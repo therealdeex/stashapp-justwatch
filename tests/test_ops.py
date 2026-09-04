@@ -128,6 +128,8 @@ class TestLineup:
         assert result["total"] == 2  # server count; Beta (no files) still counted
         assert [i["id"] for i in result["items"]] == ["10", "12"]
         assert result["items"][0]["duration"] == 1200.5
+        assert result["items"][0]["studio"] == "Blue Blur"
+        assert result["items"][0]["date"] == "2022-01-02"
 
     def test_lineup_uses_seeded_random_sort(self, envelope, data_dir, fake_client):
         catalog.save(data_dir, draft())

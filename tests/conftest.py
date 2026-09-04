@@ -43,6 +43,7 @@ def fake_client() -> FakeClient:
                 "count": 2,
                 "scenes": [
                     {"id": "10", "title": "Alpha", "duration": None,
+                     "date": "2022-01-02", "studio": {"name": "Blue Blur"},
                      "files": [{"duration": 1200.5}],
                      "paths": {"preview": "http://localhost:9998/scene/10/preview"}},
                     {"id": "11", "title": "Beta", "files": [],

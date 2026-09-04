@@ -18,6 +18,8 @@ query JustWatchLineup($filter: FindFilterType!, $scene_filter: SceneFilterType!,
     scenes {
       id
       title
+      date
+      studio { name }
       files { duration }
       paths @include(if: $include_paths) { preview }
     }
@@ -134,6 +136,8 @@ def fetch_lineup(
             "id": str(scene.get("id")),
             "title": scene.get("title") or "",
             "duration": round(float(duration), 3),
+            "studio": ((scene.get("studio") or {}).get("name") or ""),
+            "date": scene.get("date") or "",
         }
         if include_paths:
             paths = scene.get("paths") or {}
