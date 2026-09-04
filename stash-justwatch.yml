@@ -1,0 +1,46 @@
+name: "Just Watch"
+description: >-
+  Companion plugin for the StashAppAndroidTV "Just Watch" feature: author your
+  own TV channels (numbers 1-99) from the Stash web UI and tune them on the TV.
+  Custom lineups are built from saved scene filters, tags, performers, or
+  studios; the TV app pulls the lineup and the broadcast schedule stays
+  deterministic. Includes the Channel Studio editor page. Targets Stash v0.31.1.
+version: 0.1.0
+url: https://example.invalid/stash-justwatch
+
+exec:
+  - python3
+  - "{pluginDir}/justwatch/main.py"
+interface: raw
+errLog: error
+
+ui:
+  javascript:
+    - ui/index.js
+  css:
+    - ui/styles.css
+  assets:
+    /: assets
+
+settings:
+  stash_api_key:
+    displayName: Stash API Key
+    description: >-
+      API key used for authenticated local GraphQL calls when Stash requires
+      one. Leave blank to fall back to the api_key in Stash's config.yml.
+    type: STRING
+
+tasks:
+  - name: Save Channel Edit
+    description: >-
+      Persist one Channel Studio edit (catalog draft) after validation.
+      Dispatched automatically by the Channel Studio page; running it from the
+      Tasks page without a draft is a safe no-op.
+    defaultArgs:
+      mode: SaveCatalog
+  - name: Refresh Data
+    description: >-
+      Recompute every channel health snapshot (scene counts, loop length,
+      missing-source detection) in one read-only pass.
+    defaultArgs:
+      mode: RefreshData
