@@ -44,7 +44,7 @@ def fake_client() -> FakeClient:
                 "scenes": [
                     {"id": "10", "title": "Alpha", "duration": None,
                      "files": [{"duration": 1200.5}],
-                     "paths": {"preview": "/scene/10/preview.svg"}},
+                     "paths": {"preview": "http://localhost:9998/scene/10/preview"}},
                     {"id": "11", "title": "Beta", "files": [],
                      "paths": {"preview": "/scene/11/preview.svg"}},
                     {"id": "12", "title": "Gamma", "files": [{"duration": 300.0}],

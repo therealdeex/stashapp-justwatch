@@ -172,7 +172,7 @@ class TestPreviewLineup:
             {"mode": "PreviewLineup", "channel": json.dumps(draft()["channels"][0])},
             fake_client,
         )
-        assert result["items"][0]["preview"] == "/scene/10/preview.svg"
+        assert result["items"][0]["preview"] == "/scene/10/preview"
         assert result["perPage"] == 12
 
 

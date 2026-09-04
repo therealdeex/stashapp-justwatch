@@ -42,6 +42,22 @@ query JustWatchEntityName($id: ID!) {
 
 _SAVED_FILTER_MODE_SCENES = "SCENES"
 
+_URL_ORIGIN_RE = None
+
+
+def _strip_origin(url: str) -> str:
+    """Reduce an absolute Stash URL to its path+query.
+
+    Stash builds paths.* URLs from whatever host the request used; the plugin
+    reaches Stash over localhost, so absolute URLs would only resolve on the
+    server's own machine. Path-only URLs let the editor resolve against the
+    browser origin it was actually loaded from.
+    """
+    if isinstance(url, str) and "://" in url:
+        parts = url.split("/", 3)
+        return "/" + parts[3] if len(parts) > 3 else "/"
+    return url or ""
+
 
 def build_scene_filter(source: dict, object_filter: dict | None = None) -> dict:
     """Project a channel source into a ``SceneFilterType`` variable.
@@ -121,7 +137,7 @@ def fetch_lineup(
         }
         if include_paths:
             paths = scene.get("paths") or {}
-            item["preview"] = paths.get("preview") or ""
+            item["preview"] = _strip_origin(paths.get("preview") or "")
         items.append(item)
     return {
         "total": int(node.get("count") or 0),
