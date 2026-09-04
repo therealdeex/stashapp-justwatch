@@ -195,11 +195,15 @@
     return words.charAt(0).toUpperCase() + words.slice(1);
   }
 
+  function isComponent(x) {
+    return !!x && (typeof x === "function" || typeof x === "object" && !!x.$$typeof);
+  }
+
   function Glyph({ codepoint, size, color, className }) {
     const IconCmp = api.components && api.components.Icon;
     const key = fasKeyByCodepoint.get(codepoint.codePointAt(0));
     const FAS = (api.libraries && api.libraries.FontAwesomeSolid) || {};
-    if (key && typeof IconCmp === "function") {
+    if (key && isComponent(IconCmp)) {
       return h(IconCmp, {
         icon: FAS[key],
         className: "jw-glyph " + (className || ""),

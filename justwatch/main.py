@@ -121,6 +121,8 @@ def _op_get_catalog(ctx: TaskContext) -> dict:
     return {
         "pluginId": contract.PLUGIN_ID,
         "contractVersion": contract.CONTRACT_VERSION,
+        # Round-trippable: the editor sends this shape back to SaveCatalog.
+        "schemaVersion": contract.SCHEMA_VERSION,
         "revision": current.get("revision", 0),
         "settings": current.get("settings", {}),
         "channels": channels,
