@@ -179,8 +179,11 @@
     const FAS = (api.libraries && api.libraries.FontAwesomeSolid) || {};
     fasKeyByCodepoint.clear();
     Object.keys(FAS).forEach((key) => {
+      if (/^fa\d+$/.test(key)) return; // indexed duplicates; prefer named keys
       const def = FAS[key];
-      const unicode = Array.isArray(def) ? def[3] : null;
+      // IconDefinition shape: {prefix, iconName, icon: [w, h, ligatures, unicode, path]}
+      const icon = def && def.icon;
+      const unicode = Array.isArray(icon) ? icon[3] : (Array.isArray(def) ? def[3] : null);
       if (typeof unicode === "string" && /^[0-9a-f]+$/i.test(unicode)) {
         const cp = parseInt(unicode, 16);
         if (!fasKeyByCodepoint.has(cp)) fasKeyByCodepoint.set(cp, key);
