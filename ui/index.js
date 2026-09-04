@@ -139,7 +139,10 @@
       await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
       let data = null;
       try {
-        data = await gql("query JwJob($id: ID!) { findJob(id: $id) { status } }", { id: jobId });
+        data = await gql(
+          "query JwJob($input: FindJobInput!) { findJob(input: $input) { status } }",
+          { input: { id: jobId } },
+        );
       } catch (e) {
         continue; // transient query failure: keep waiting for the job
       }
@@ -167,52 +170,46 @@
   }
 
   // ------------------------------------------------------------------
-  // Glyph plumbing: shared FA codepoints rendered via Stash's bundled font.
+  // Glyph plumbing: shared FA codepoints rendered via Stash's bundled
+  // FontAwesome (the Icon component is react-fontawesome — SVG, not a font).
   // ------------------------------------------------------------------
 
-  // Map codepoint -> {unicode} for the shared set, resolved from
-  // PluginApi.libraries.FontAwesomeSolid so rendering rides Stash's own icon
-  // font. Unknown codepoints render the raw character as a fallback.
-  const glyphChars = new Map(); // codepoint -> display char (or null if unavailable)
+  const fasKeyByCodepoint = new Map(); // codepoint -> FontAwesomeSolid key
   function resolveGlyphs() {
     const FAS = (api.libraries && api.libraries.FontAwesomeSolid) || {};
-    const byUnicode = new Map();
+    fasKeyByCodepoint.clear();
     Object.keys(FAS).forEach((key) => {
       const def = FAS[key];
       const unicode = Array.isArray(def) ? def[3] : null;
       if (typeof unicode === "string" && /^[0-9a-f]+$/i.test(unicode)) {
         const cp = parseInt(unicode, 16);
-        if (!byUnicode.has(cp)) byUnicode.set(cp, key);
+        if (!fasKeyByCodepoint.has(cp)) fasKeyByCodepoint.set(cp, key);
       }
-    });
-    glyphChars.clear();
-    GLYPH_POOL.forEach((g) => {
-      const cp = g.codePointAt(0);
-      glyphChars.set(cp, byUnicode.has(cp) ? String.fromCodePoint(cp) : null);
     });
   }
 
   function glyphName(codepoint) {
-    const FAS = (api.libraries && api.libraries.FontAwesomeSolid) || {};
-    // best effort human label: nearest FAS key with this unicode
-    for (const key of Object.keys(FAS)) {
-      const def = FAS[key];
-      if (Array.isArray(def) && typeof def[3] === "string" &&
-          parseInt(def[3], 16) === codepoint.codePointAt(0)) {
-        const words = key.replace(/^fa/, "").replace(/([a-z])([A-Z])/g, "$1 $2");
-        return words.charAt(0).toUpperCase() + words.slice(1);
-      }
-    }
-    return "Glyph";
+    const key = fasKeyByCodepoint.get(codepoint.codePointAt(0));
+    if (!key) return "Glyph";
+    const words = key.replace(/^fa/, "").replace(/([a-z])([A-Z])/g, "$1 $2");
+    return words.charAt(0).toUpperCase() + words.slice(1);
   }
 
   function Glyph({ codepoint, size, color, className }) {
-    const cp = codepoint.codePointAt(0);
-    const ch = glyphChars.has(cp) ? glyphChars.get(cp) : codepoint;
+    const IconCmp = api.components && api.components.Icon;
+    const key = fasKeyByCodepoint.get(codepoint.codePointAt(0));
+    const FAS = (api.libraries && api.libraries.FontAwesomeSolid) || {};
+    if (key && typeof IconCmp === "function") {
+      return h(IconCmp, {
+        icon: FAS[key],
+        className: "jw-glyph " + (className || ""),
+        style: { fontSize: (size || 14) + "px", color: color || "#fff" },
+      });
+    }
     return h("span", {
       className: "jw-glyph " + (className || ""),
-      style: { fontSize: size || 14, color: color || "#fff", lineHeight: 1 },
-    }, ch);
+      style: { fontSize: (size || 14) + "px", color: color || "#fff", lineHeight: 1 },
+    }, codepoint);
   }
 
   function GlyphTile({ codepoint, color, size }) {
@@ -288,7 +285,9 @@
 
   let saveSeq = 0;
 
-  async function commitCatalog(catalog, expectedRevision) {
+  // After a successful save the server has refreshed labels + health counts,
+  // so re-pull the catalog instead of letting local guesses linger.
+  async function commitAndReload(catalog, expectedRevision) {
     const requestId = "req-" + Date.now() + "-" + (++saveSeq);
     const jobId = await runTask("Save Channel Edit", {
       mode: "SaveCatalog",
@@ -300,7 +299,11 @@
     if (status === "FAILED" || status === "ABORTED" || status === "CANCELLED" || status === "CANCELED") {
       throw new Error("the server reported the save failed");
     }
-    return readSaveResult(requestId);
+    const result = await readSaveResult(requestId);
+    if (result.saved) {
+      try { return { result, fresh: await loadCatalog() }; } catch (e) { return { result, fresh: null }; }
+    }
+    return { result, fresh: null };
   }
 
   async function fetchSources(q) {
@@ -816,9 +819,9 @@
         savingRef.current = true;
         setSaveState({ state: "saving" });
         try {
-          const result = await commitCatalog(toSave, toSave.revision);
+          const { result, fresh } = await commitAndReload(toSave, toSave.revision);
           if (result.saved) {
-            const savedCopy = Object.assign({}, pendingRef.current, { revision: result.revision });
+            const savedCopy = fresh || Object.assign({}, pendingRef.current, { revision: result.revision });
             catalogRef.current = savedCopy;
             setCatalog(savedCopy);
             setSaveState({ state: "saved" });
@@ -899,9 +902,9 @@
       setCatalog(next);
       setSelectedId(channel.id);
       setSaveState({ state: "saving" });
-      const result = await commitCatalog(next, next.revision);
+      const { result, fresh } = await commitAndReload(next, next.revision);
       if (result.saved) {
-        const savedCopy = Object.assign({}, next, { revision: result.revision });
+        const savedCopy = fresh || Object.assign({}, next, { revision: result.revision });
         catalogRef.current = savedCopy;
         setCatalog(savedCopy);
         setSaveState({ state: "saved" });
