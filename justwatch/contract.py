@@ -64,6 +64,7 @@ GLYPHS: tuple[str, ...] = (
 OPERATIONS: dict[str, str] = {
     "capabilities": "Capabilities",
     "directory": "Directory",
+    "fullDirectory": "FullDirectory",
     "lineup": "Lineup",
     "previewLineup": "PreviewLineup",
     "getCatalog": "GetCatalog",

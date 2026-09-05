@@ -149,6 +149,27 @@
   overflow: hidden;
 }
 
+.jw-rail-section { margin-bottom: 1rem; }
+
+.jw-rail-section-label {
+  font-size: .68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: var(--jw-muted);
+  margin: 0 0 .3rem .1rem;
+}
+
+.jw-rail-note {
+  font-size: .7rem;
+  color: var(--jw-muted);
+  font-style: italic;
+  margin: -.15rem 0 .35rem .1rem;
+}
+
+.jw-name-readonly { font-weight: 600; padding-left: 0; }
+.jw-auto-note { font-size: .85rem; }
+
 .jw-rail-row {
   display: flex;
   align-items: center;

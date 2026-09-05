@@ -81,6 +81,12 @@
     "\uf3a5", "\uf4d8", "\uf5e4", "\uf0a1", "\uf11b", "\uf1da",
   ];
 
+  // Section glyphs mirror the TV app's auto-channel branding; auto channels use
+  // the neutral slate so the owner's custom channels stay visually special.
+  const SECTION_GLYPHS = { general: "\uf02b", studios: "\uf1ad", performers: "\uf007" };
+  const AUTO_SLATE = "#546E7A";
+  const GROUP_SLATE = "#455A64";
+
   const TERMINAL_STATUSES = new Set([
     "FINISHED", "COMPLETE", "COMPLETED", "FAILED", "CANCELLED", "CANCELED", "REMOVED", "ABORTED",
   ]);
@@ -283,6 +289,10 @@
     return runOp("GetCatalog");
   }
 
+  function loadFullDirectory() {
+    return runOp("FullDirectory");
+  }
+
   function previewLineup(channel, perPage) {
     return runOp("PreviewLineup", {
       channel: JSON.stringify(channel),
@@ -347,50 +357,117 @@
     return null;
   }
 
-  function RailRow({ channel, selected, onSelect }) {
-    const badges = [];
-    if (channel.sourceMissing) {
-      badges.push(h("span", { key: "m", className: "jw-badge jw-badge-missing", title: "This lineup's source was deleted in Stash. Relink it." }, "relink"));
-    } else if (channel.sceneCount === 0) {
-      badges.push(h("span", { key: "o", className: "jw-badge jw-badge-off" }, "off air"));
-    } else if (channel.sceneCount != null && channel.sceneCount < THIN_LINEUP) {
-      badges.push(h("span", { key: "t", className: "jw-badge jw-badge-thin", title: "A lineup this small repeats all evening." }, "thin"));
-    }
-    if (!channel.enabled) badges.push(h("span", { key: "d", className: "jw-badge jw-badge-off" }, "paused"));
-
+  function RailRow({ row, selected, onSelect }) {
     return h("div", {
-      className: "jw-rail-row" + (selected ? " jw-selected" : "") + (channel.enabled ? "" : " jw-row-paused"),
-      style: selected ? { boxShadow: "inset 3px 0 0 " + channel.color } : null,
-      onClick: () => onSelect(channel.id),
-      onKeyDown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(channel.id); } },
+      className: "jw-rail-row" + (selected ? " jw-selected" : "") + (row.paused ? " jw-row-paused" : ""),
+      style: selected ? { boxShadow: "inset 3px 0 0 " + row.color } : null,
+      onClick: () => onSelect(row.sel),
+      onKeyDown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(row.sel); } },
       tabIndex: 0,
       role: "button",
     },
-      h("div", { className: "jw-rail-number", style: selected ? { color: channel.color } : null }, String(channel.number)),
-      h(GlyphTile, { codepoint: channel.glyph, color: channel.color }),
+      h("div", { className: "jw-rail-number", style: selected ? { color: row.color } : null }, row.number != null ? String(row.number) : "—"),
+      h(GlyphTile, { codepoint: row.glyph, color: row.color }),
       h("div", { className: "jw-rail-body" },
-        h("div", { className: "jw-rail-name" }, channel.name),
-        h("div", { className: "jw-rail-sub" }, summarize(channel)),
+        h("div", { className: "jw-rail-name" }, row.name),
+        h("div", { className: "jw-rail-sub" }, row.sub),
       ),
-      badges.length ? h("div", { className: "jw-rail-badges" }, badges) : null,
+      row.badges && row.badges.length ? h("div", { className: "jw-rail-badges" }, row.badges) : null,
     );
   }
 
-  function DialRail({ channels, selectedId, onSelect, onNew }) {
-    const sorted = channels.slice().sort((a, b) => a.number - b.number);
+  /** The whole lineup: My Channels (editable) + the TV's automatic sections. */
+  function buildRailSections(catalog, fullDir) {
+    const sections = [];
+    const customRows = (catalog.channels || [])
+      .slice()
+      .sort((a, b) => a.number - b.number)
+      .map((channel) => {
+        const badges = [];
+        if (channel.sourceMissing) {
+          badges.push(h("span", { key: "m", className: "jw-badge jw-badge-missing", title: "This lineup's source was deleted in Stash. Relink it." }, "relink"));
+        } else if (channel.sceneCount === 0) {
+          badges.push(h("span", { key: "o", className: "jw-badge jw-badge-off" }, "off air"));
+        } else if (channel.sceneCount != null && channel.sceneCount < THIN_LINEUP) {
+          badges.push(h("span", { key: "t", className: "jw-badge jw-badge-thin", title: "A lineup this small repeats all evening." }, "thin"));
+        }
+        if (!channel.enabled) badges.push(h("span", { key: "d", className: "jw-badge jw-badge-off" }, "paused"));
+        return {
+          sel: "custom:" + channel.id,
+          number: channel.number,
+          name: channel.name,
+          glyph: channel.glyph,
+          color: channel.color,
+          sub: summarize(channel),
+          badges,
+          channel,
+        };
+      });
+    sections.push({ label: "My Lineup", rows: customRows });
+
+    if (fullDir) {
+      const autoRow = (row, section) => {
+        const badges = [];
+        if (row.offAir) badges.push(h("span", { key: "o", className: "jw-badge jw-badge-off" }, "off air"));
+        else if (row.count === 0 && row.count != null) badges.push(h("span", { key: "o", className: "jw-badge jw-badge-off" }, "off air"));
+        else if (row.count != null && row.count < THIN_LINEUP) badges.push(h("span", { key: "t", className: "jw-badge jw-badge-thin", title: "A lineup this small repeats all evening." }, "thin"));
+        const countText =
+          row.count != null ? formatCount(row.count)
+            : row.members != null ? row.members + (row.members === 1 ? " member" : " members")
+              : "";
+        const group = row.kind && /Group|Spillover$/.test(row.kind);
+        return {
+          sel: "auto:" + section + ":" + row.number + ":" + row.name,
+          number: row.number,
+          name: row.name,
+          glyph: SECTION_GLYPHS[section] || "\uf111",
+          color: group ? GROUP_SLATE : AUTO_SLATE,
+          sub: countText ? countText + " · automatic" : "automatic",
+          badges,
+          auto: { section, row },
+        };
+      };
+      sections.push({
+        label: "General",
+        note: fullDir.curatedDialNote,
+        rows: (fullDir.general && fullDir.general.tagChannels || []).map((r) => autoRow(r, "general")),
+      });
+      sections.push({
+        label: "Studios",
+        rows: (fullDir.studios && fullDir.studios.channels || []).map((r) => autoRow(r, "studios")),
+      });
+      sections.push({
+        label: "Performers",
+        rows: (fullDir.performers && fullDir.performers.channels || []).map((r) => autoRow(r, "performers")),
+      });
+    }
+    return sections;
+  }
+
+  function DialRail({ railSections, selectedId, onSelect, onNew, channelCount }) {
     return h("div", { className: "jw-rail" },
       h("div", { className: "jw-rail-head" },
         h("span", { className: "jw-section-label" }, "My Lineup"),
-        h("span", { className: "jw-rail-count" }, sorted.length + (sorted.length === 1 ? " channel" : " channels")),
+        h("span", { className: "jw-rail-count" }, channelCount + (channelCount === 1 ? " channel" : " channels")),
       ),
       h("button", { className: "jw-btn jw-btn-primary jw-new-channel", onClick: onNew }, "+ New channel"),
-      sorted.length === 0
+      railSections.every((s) => s.rows.length === 0) && !railSections.some((s) => s.note)
         ? h("div", { className: "jw-empty" },
             h("div", { className: "jw-empty-title" }, "Your dial starts here"),
             h("div", { className: "jw-empty-sub" }, "Channels you create here air on numbers 1–99, ahead of the built-in dial on your TV."),
           )
-        : h("div", { className: "jw-rail-list" },
-            sorted.map((c) => h(RailRow, { key: c.id, channel: c, selected: c.id === selectedId, onSelect }))),
+        : railSections.map((section) =>
+            section.rows.length === 0 && !section.note
+              ? null
+              : h("div", { key: section.label, className: "jw-rail-section" },
+                  h("div", { className: "jw-rail-section-label" }, section.label),
+                  section.note ? h("div", { className: "jw-rail-note" }, section.note) : null,
+                  h("div", { className: "jw-rail-list" },
+                    section.rows.map((row) =>
+                      h(RailRow, { key: row.sel, row, selected: row.sel === selectedId, onSelect })),
+                  ),
+                ),
+          ),
     );
   }
 
@@ -612,6 +689,66 @@
     );
   }
 
+  /** Read-only detail for an automatic (library-derived) channel. */
+  function AutoChannelPane({ row }) {
+    const info = row.auto;
+    const r = info.row;
+    const soloSource =
+      r.kind === "studio" ? { type: "studio", id: r.id }
+        : r.kind === "performer" ? { type: "performer", id: r.id }
+          : null;
+    const draft = soloSource
+      ? {
+          id: "draft", number: r.number || 1, name: r.name,
+          glyph: SECTION_GLYPHS[info.section] || "\uf111", color: AUTO_SLATE,
+          source: soloSource, sort: "shuffle", seed: 0, enabled: true,
+        }
+      : null;
+
+    return h("div", { className: "jw-editor" },
+      h("div", { className: "jw-network-card" },
+        h(GlyphTile, { codepoint: SECTION_GLYPHS[info.section] || "\uf111", color: r.kind && /Group|Spillover$/.test(r.kind) ? GROUP_SLATE : AUTO_SLATE, size: 56 }),
+        h("div", { className: "jw-network-id" },
+          h("div", { className: "jw-name-input jw-name-readonly" }, r.name),
+          h("div", { className: "jw-swap-note" }, r.number != null ? "Channel " + r.number : "Unnumbered"),
+        ),
+      ),
+      h("div", { className: "jw-editor-section" },
+        h("div", { className: "jw-section-label" }, "Programming"),
+        h("div", { className: "jw-programming" },
+          h("div", { className: "jw-field" },
+            h("div", { className: "jw-field-label" }, "Airing from"),
+            h("div", { className: "jw-field-value jw-auto-note" },
+              r.kind === "tags" ? "Tags matching this channel's theme"
+                : r.kind === "studio" ? "Studio"
+                  : r.kind === "performer" ? "Performer"
+                    : r.count != null || r.members != null ? "A group of related " + (info.section === "studios" ? "studios" : "performers") : ""),
+          ),
+          h("div", { className: "jw-field" },
+            h("div", { className: "jw-field-label" }, "Size"),
+            h("div", { className: "jw-field-value jw-auto-note" },
+              r.count != null ? formatCount(r.count)
+                : r.members != null ? r.members + (r.members === 1 ? " member" : " members")
+                  : ""),
+          ),
+        ),
+      ),
+      r.offAir
+        ? h("div", { className: "jw-editor-section" },
+            h("div", { className: "jw-missing-note" }, "Off air — nothing in your library matches this channel yet. It goes live as the library grows."),
+          )
+        : null,
+      draft
+        ? h(OnAirStrip, { channel: draft, isDraft: true })
+        : h("div", { className: "jw-editor-section" },
+            h("div", { className: "jw-missing-note" }, "This channel pools several members; open the TV guide to see what's playing."),
+          ),
+      h("div", { className: "jw-editor-section" },
+        h("div", { className: "jw-missing-note" }, "Generated automatically from your library — shape it with the thresholds in Tuning (⚙), or create a custom channel to take over a number."),
+      ),
+    );
+  }
+
   function CreateChannelSheet({ onClose, onCreate, editingChannel }) {
     const [query, setQuery] = useState("");
     const [results, setResults] = useState(null);
@@ -776,6 +913,7 @@
 
   function App() {
     const [catalog, setCatalog] = useState(null);
+    const [fullDir, setFullDir] = useState(null);
     const [selectedId, setSelectedId] = useState(null);
     const [sheet, setSheet] = useState(null); // null | {mode: 'new'|'source'|'settings'}
     const [saveState, setSaveState] = useState({ state: "idle" });
@@ -811,6 +949,12 @@
           setCatalog(empty);
           catalogRef.current = empty;
         }
+        // The full lineup (auto channels) is an enhancement; its absence
+        // must never block editing.
+        try {
+          const fd = await loadFullDirectory();
+          if (alive) setFullDir(fd);
+        } catch (e) { /* rail shows custom channels only */ }
       })();
       return () => { alive = false; };
     }, [showToast]);
@@ -952,6 +1096,10 @@
     }
 
     const selected = (catalog.channels || []).find((c) => c.id === selectedId) || null;
+    const railSections = buildRailSections(catalog, fullDir);
+    const selectedRailRow = railSections
+      .flatMap((s) => s.rows)
+      .find((r) => r.sel === selectedId) || null;
 
     return h("div", { className: "jw-page" },
       h("div", { className: "jw-header" },
@@ -967,8 +1115,9 @@
       ),
       h("div", { className: "jw-columns" },
         h(DialRail, {
-          channels: catalog.channels || [], selectedId,
+          railSections, selectedId,
           onSelect: setSelectedId, onNew: () => setSheet({ mode: "new" }),
+          channelCount: (catalog.channels || []).length,
         }),
         selected
           ? h(EditorPane, {
@@ -978,10 +1127,12 @@
               onChangeSource: () => setSheet({ mode: "source" }),
               onRemove: removeChannel,
             })
-          : h("div", { className: "jw-editor jw-editor-empty" },
-              h("div", { className: "jw-empty-title" }, "Nothing selected"),
-              h("div", { className: "jw-empty-sub" }, "Pick a channel on the left, or create your first one."),
-            ),
+          : selectedRailRow && selectedRailRow.auto
+            ? h(AutoChannelPane, { row: selectedRailRow })
+            : h("div", { className: "jw-editor jw-editor-empty" },
+                h("div", { className: "jw-empty-title" }, "Nothing selected"),
+                h("div", { className: "jw-empty-sub" }, "Pick a channel on the left, or create your first one."),
+              ),
       ),
       sheet && sheet.mode === "new"
         ? h(CreateChannelSheet, { onClose: () => setSheet(null), onCreate: createChannel })

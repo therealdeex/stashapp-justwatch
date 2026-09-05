@@ -32,7 +32,7 @@ _PLUGIN_ROOT = str(Path(__file__).resolve().parent.parent)
 if _PLUGIN_ROOT not in sys.path:
     sys.path.insert(0, _PLUGIN_ROOT)
 
-from justwatch import catalog, contract, lineup, snapshots  # noqa: E402
+from justwatch import autodir, catalog, contract, lineup, snapshots  # noqa: E402
 from justwatch.stash_client import (  # noqa: E402
     GraphQLAuthError,
     GraphQLClientError,
@@ -42,7 +42,7 @@ from justwatch.stash_client import (  # noqa: E402
 PLUGIN_VERSION = "0.1.0"
 
 SYNC_MODES = frozenset({
-    "capabilities", "directory", "lineup", "preview_lineup",
+    "capabilities", "directory", "full_directory", "lineup", "preview_lineup",
     "get_catalog", "validate_catalog",
 })
 TASK_MODES = frozenset({"save_catalog", "refresh_data"})
@@ -352,10 +352,29 @@ def _op_refresh_data(ctx: TaskContext) -> dict:
     }
 
 
+def _op_full_directory(ctx: TaskContext) -> dict:
+    """The complete lineup for the Channel Studio: custom channels PLUS the
+    auto-generated General (tags) / Studios / Performers sections, computed
+    with the same tiering the TV app uses. The curated 101–160 dial lives in
+    the app itself and is represented here only by a note.
+    """
+    current = catalog.load(ctx.data_dir)
+    sections = autodir.build_full_directory(ctx.client.submit, current.get("settings") or {})
+    return {
+        "pluginId": contract.PLUGIN_ID,
+        "contractVersion": contract.CONTRACT_VERSION,
+        "revision": current.get("revision", 0),
+        "custom": _op_directory(ctx)["channels"],
+        **sections,
+        "curatedDialNote": "Channels 101–160 are the built-in Just Watch networks curated in the TV app.",
+    }
+
+
 _HANDLERS = {
     "capabilities": _op_capabilities,
     "get_catalog": _op_get_catalog,
     "directory": _op_directory,
+    "full_directory": _op_full_directory,
     "lineup": _op_lineup,
     "preview_lineup": _op_preview_lineup,
     "validate_catalog": _op_validate_catalog,
