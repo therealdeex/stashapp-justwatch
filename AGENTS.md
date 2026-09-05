@@ -109,7 +109,10 @@ brand-tinted number cells, flip order wraps 99 → 101.
   (hourly), env at `~/.config/stash-justwatch/scheduler.env` (`STASH_URL`,
   `STASH_API_KEY_FILE`). Install steps are in README.
 - TV app: build debug APK in `~/dev/StashAppAndroidTV` (`./gradlew assembleDebug`);
-  emulator AVD `@stash-tv-api36`, Fire TV stick via adb (see that repo's AGENTS.md).
+  emulator AVD `@stash-tv-api36`. Fire TV sticks: **192.168.8.196:5555 = dev/
+  testing**, **192.168.8.169:5555 = production** (see that repo's AGENTS.md).
+- Dev Stash web login is interactive-only (no stored creds); API access uses
+  the key file above.
 
 | Op | Mode token | Sync? | Purpose |
 | --- | --- | --- | --- |
