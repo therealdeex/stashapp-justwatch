@@ -12,14 +12,25 @@ own ServerPreferences.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import secrets
+import time
 from pathlib import Path
 from typing import Any
 
 from justwatch import contract
+
+try:  # POSIX
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
+try:  # Windows
+    import msvcrt
+except ImportError:
+    msvcrt = None
 
 DATA_DIR_NAME = "stash-justwatch-data"
 CATALOG_NAME = "catalog.json"
@@ -50,11 +61,13 @@ def catalog_path(data_dir: str | Path) -> Path:
 
 
 def load(data_dir: str | Path) -> dict:
-    """Load the catalog, returning a fresh empty one on any absence/corruption.
+    """Load the stored catalog, strictly.
 
-    A corrupted file is a hard failure for writes (the operator would silently
-    wipe their channels on the next save), so ``load`` refuses to paper over it
-    and callers surface the error; reads for the editor get the same error.
+    A missing file initializes a fresh empty catalog. A file that exists but is
+    not a structurally valid catalog at THIS plugin's schema version raises
+    ``CatalogError`` — never silently normalize it into an empty editable
+    catalog, because the next save would make that loss permanent. The original
+    bytes are left untouched for the operator.
     """
     path = catalog_path(data_dir)
     if not path.exists():
@@ -65,7 +78,52 @@ def load(data_dir: str | Path) -> dict:
         raise CatalogError(f"catalog unreadable at {path}: {exc}") from exc
     if not isinstance(raw, dict):
         raise CatalogError(f"catalog at {path} is not a JSON object")
+    _require_storable_shape(raw, path)
     return normalize(raw)
+
+
+def _require_storable_shape(raw: dict, path: Path) -> None:
+    """Structural gate for stored catalogs: what must be true before any part
+    of the file may be normalized, let alone rewritten."""
+
+    def bad(message: str) -> CatalogError:
+        return CatalogError(f"catalog at {path} is corrupt: {message}")
+
+    version = raw.get("schemaVersion")
+    if version != contract.SCHEMA_VERSION:
+        raise bad(
+            f"unsupported schemaVersion {version!r} (this plugin writes "
+            f"{contract.SCHEMA_VERSION}); refusing to load or overwrite",
+        )
+    revision = raw.get("revision")
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+        raise bad(f"revision must be a non-negative integer, got {revision!r}")
+    channels = raw.get("channels")
+    if not isinstance(channels, list):
+        raise bad(f"channels must be a list, got {type(channels).__name__}")
+    for i, ch in enumerate(channels):
+        if not isinstance(ch, dict):
+            raise bad(f"channels[{i}] must be a JSON object, got {type(ch).__name__}")
+        ch_id = ch.get("id")
+        if not isinstance(ch_id, str) or not _ID_RE.match(ch_id):
+            raise bad(f"channels[{i}].id {ch_id!r} is not a channel id (ch_XXXXXXXX)")
+        number = ch.get("number")
+        if isinstance(number, bool) or not isinstance(number, int) or \
+                not (contract.MIN_CHANNEL_NUMBER <= number <= contract.MAX_CHANNEL_NUMBER):
+            raise bad(f"channels[{i}] ({ch_id}) has invalid number {number!r}")
+        if not isinstance(ch.get("name"), str):
+            raise bad(f"channels[{i}] ({ch_id}) has a non-string name")
+        source = ch.get("source")
+        if not isinstance(source, dict) or source.get("type") not in contract.SOURCE_TYPES \
+                or not _DIGITS_RE.match(str(source.get("id", ""))):
+            raise bad(f"channels[{i}] ({ch_id}) has an invalid source")
+        if ch.get("sort") not in contract.SORTS:
+            raise bad(f"channels[{i}] ({ch_id}) has unknown sort {ch.get('sort')!r}")
+        if not _valid_seed(ch.get("seed")):
+            raise bad(f"channels[{i}] ({ch_id}) is missing or has an invalid seed")
+    settings = raw.get("settings")
+    if settings is not None and not isinstance(settings, dict):
+        raise bad("settings must be a JSON object")
 
 
 def empty() -> dict:
@@ -80,11 +138,58 @@ def empty() -> dict:
 def save(data_dir: str | Path, catalog: dict) -> None:
     path = catalog_path(data_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(
-        json.dumps(catalog, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
-    )
-    os.replace(tmp, path)
+    # Unique temp name: concurrent writers must never share a temp file (a
+    # shared name lets one process rename away another's half-written bytes).
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp")
+    try:
+        tmp.write_text(
+            json.dumps(catalog, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
+        )
+        os.replace(tmp, path)
+    finally:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+
+
+@contextlib.contextmanager
+def catalog_lock(data_dir: str | Path, timeout: float = 30.0):
+    """Process-safe exclusive lock for the read-check-write save section.
+
+    Stash's job queue serializes tasks, but sync operations and direct
+    RunPluginOperation calls are not dispatched through it, so writers cannot
+    assume they are the only process touching catalog.json. One lock file per
+    data directory; advisory locks are held per open file handle, which makes
+    them exclusive across processes (and across handles in one process).
+    """
+    lock_path = Path(data_dir) / ".catalog.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(lock_path, "a+")
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            try:
+                if fcntl is not None:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                elif msvcrt is not None:  # pragma: no cover - Windows
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise CatalogError(
+                        "another save is holding the catalog lock; try again",
+                    ) from None
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            with contextlib.suppress(OSError):
+                if fcntl is not None:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                elif msvcrt is not None:  # pragma: no cover - Windows
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    finally:
+        handle.close()
 
 
 def validate(raw: Any) -> tuple[list[dict], dict]:
@@ -180,26 +285,34 @@ def validate(raw: Any) -> tuple[list[dict], dict]:
 
 def normalize(raw: dict) -> dict:
     """Return the canonical on-disk shape: defaults filled, seeds generated,
-    settings clamped, unknown top-level keys dropped."""
+    settings clamped, unknown top-level keys dropped.
+
+    Tolerant by design: drafts (PreviewLineup payloads, editor working copies)
+    may carry malformed fields; ``validate`` reports them as structured errors
+    and normalization must never crash on them.
+    """
     settings = _validate_settings(raw.get("settings"), lambda *a: None)
     channels = []
     for ch in raw.get("channels") or []:
         if not isinstance(ch, dict):
             continue
+        source = ch.get("source")
+        source = source if isinstance(source, dict) else {}
         channels.append({
             "id": ch.get("id"),
             "number": ch.get("number"),
-            "name": (ch.get("name") or "").strip(),
+            "name": _as_text(ch.get("name")),
             "glyph": ch.get("glyph"),
-            "color": (ch.get("color") or "").lower(),
+            "color": _as_text(ch.get("color")).lower(),
             "source": {
-                "type": (ch.get("source") or {}).get("type"),
-                "id": str((ch.get("source") or {}).get("id", "")),
+                "type": source.get("type"),
+                "id": str(source.get("id", "")),
             },
-            "sourceLabel": ch.get("sourceLabel") or "",
+            "sourceLabel": _as_text(ch.get("sourceLabel")),
             "sort": ch.get("sort"),
             "seed": ch.get("seed") if _valid_seed(ch.get("seed")) else new_seed(),
             "enabled": bool(ch.get("enabled", True)),
+            "programming": _programming_policy(ch.get("programming")),
         })
     channels.sort(key=lambda c: (c["number"] is None, c["number"] or 0))
     return {
@@ -208,6 +321,13 @@ def normalize(raw: dict) -> dict:
         "settings": settings,
         "channels": channels,
     }
+
+
+def _as_text(value: Any) -> str:
+    """Stringly-typed fields survive any JSON garbage without crashing."""
+    if value is None:
+        return ""
+    return value if isinstance(value, str) else str(value)
 
 
 def _valid_seed(seed: Any) -> bool:
@@ -243,9 +363,13 @@ def _validate_settings(raw: Any, err) -> dict:
     def tag_lists(source: dict) -> dict:
         out = {}
         for section in sections:
-            ids = source.get(section, [])
+            ids = source.get(section)
+            if ids is None:
+                ids = []
             if isinstance(ids, str):
                 ids = [s.strip() for s in ids.split(",") if s.strip()]
+            if not isinstance(ids, list):
+                ids = []
             out[section] = [str(i) for i in ids if _DIGITS_RE.match(str(i))]
         return out
 
@@ -260,3 +384,8 @@ def _validate_settings(raw: Any, err) -> dict:
 
 def _deep_copy_settings(settings: dict) -> dict:
     return json.loads(json.dumps(settings))
+
+
+def _programming_policy(value):
+    from justwatch.programming import policy
+    return policy(value)

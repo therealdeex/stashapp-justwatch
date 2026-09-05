@@ -17,6 +17,17 @@ SCHEMA_VERSION = 1
 MIN_CHANNEL_NUMBER = 1
 MAX_CHANNEL_NUMBER = 99
 
+#: The active rotation policy. A channel airs a bounded, ordered window over
+#: its source — up to ROTATION_SIZE *playable* scenes in the channel's own
+#: order, scanning at most ROTATION_SCAN_LIMIT raw rows server-side. TV
+#: playback, editor previews, health counts, and loop lengths all derive from
+#: that same rotation, so every client describes the same program loop. The
+#: rotation is deliberately NOT the whole library: scheduling never fetches an
+#: unbounded source, and the editor labels the rotation as what's on air while
+#: `sourceTotal` reports the library behind it.
+ROTATION_SIZE = 50
+ROTATION_SCAN_LIMIT = 1000
+
 #: Lineup sorts and their server-side FindFilterType projection. ``shuffle``
 #: uses the server's deterministic ``random_<seed>`` sort keyed on the
 #: channel's stored seed.
@@ -35,6 +46,9 @@ LAUNCH_MODES = ("last", "random")
 
 #: Default tuning for the TV app's auto-generated channels (201+). Custom
 #: channels never inherit these; they are exactly what the owner authored.
+#: NOTE: these shape the plugin's own computed directory (FullDirectory) and
+#: the Channel Studio's rail only. The TV app tunes its generated channels from
+#: its own per-server preferences and never reads these values.
 DEFAULT_SETTINGS: dict = {
     "soloThreshold": 10,
     "groupThreshold": 5,
@@ -62,6 +76,10 @@ GLYPHS: tuple[str, ...] = (
 #: Every operation the plugin answers, and the client-visible token for each.
 #: Consumers advertise/whitelist these names in ``capabilities.operations``.
 OPERATIONS: dict[str, str] = {
+    "schedule": "Schedule",
+    "previewProgramming": "PreviewProgramming",
+    "programmingDesk": "ProgrammingDesk",
+    "prepareProgramming": "PrepareProgramming",
     "capabilities": "Capabilities",
     "directory": "Directory",
     "fullDirectory": "FullDirectory",
@@ -88,10 +106,14 @@ def capabilities(plugin_version: str) -> dict:
         "contractVersion": CONTRACT_VERSION,
         "operations": dict(OPERATIONS),
         "features": {
+            "publishedSchedule": {"version": 1, "pageSize": 50, "horizonHours": 72},
             "customChannels": True,
+            # The plugin exposes tuning settings, but they govern its own
+            # computed directory, not the TV app's generated channels.
             "globalSettings": True,
             "draftPreview": True,
             "healthSnapshots": True,
+            "rotation": {"size": ROTATION_SIZE, "scanLimit": ROTATION_SCAN_LIMIT},
             "channelNumbers": [MIN_CHANNEL_NUMBER, MAX_CHANNEL_NUMBER],
             "sorts": list(SORTS),
             "glyphs": list(GLYPHS),

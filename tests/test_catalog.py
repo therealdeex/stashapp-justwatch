@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from justwatch import catalog, contract
@@ -104,6 +106,27 @@ class TestValidate:
         errors, _ = catalog.validate([1, 2, 3])
         assert codes(errors) == ["not_an_object"]
 
+    def test_malformed_fields_are_structured_errors_not_crashes(self):
+        errors, normalized = catalog.validate({
+            "schemaVersion": 1,
+            "channels": [channel(id="ch_00000001", name=42, source="tag")],
+            "settings": {"includeTags": {"general": None}},
+        })
+        assert "bad_name" in codes(errors)
+        assert "bad_source" in codes(errors)
+        # normalization survived the garbage and echoed a best-effort shape
+        assert normalized["channels"][0]["name"] == "42"
+        assert normalized["settings"]["includeTags"]["general"] == []
+
+    def test_null_tag_list_does_not_crash(self):
+        errors, normalized = catalog.validate({
+            "schemaVersion": 1,
+            "settings": {"includeTags": {"general": None}},
+            "channels": [],
+        })
+        assert errors == []
+        assert normalized["settings"]["includeTags"]["general"] == []
+
 
 class TestNormalize:
     def test_missing_seed_generated(self):
@@ -147,3 +170,80 @@ class TestNormalize:
         catalog.catalog_path(data_dir).write_text("{not json", encoding="utf-8")
         with pytest.raises(catalog.CatalogError):
             catalog.load(data_dir)
+
+
+class TestStrictLoad:
+    """A structurally broken stored catalog must never load as editable — the
+    next save would silently make the loss permanent."""
+
+    def stored(self, data_dir, body):
+        path = catalog.catalog_path(data_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(body) if not isinstance(body, str) else body,
+                        encoding="utf-8")
+        return path
+
+    def test_broken_channels_value_never_loads_as_empty(self, data_dir):
+        self.stored(data_dir, {"schemaVersion": 1, "revision": 5, "channels": "broken"})
+        with pytest.raises(catalog.CatalogError, match="channels"):
+            catalog.load(data_dir)
+
+    def test_future_schema_is_rejected_not_downgraded(self, data_dir):
+        self.stored(data_dir, {"schemaVersion": 99, "revision": 1, "channels": []})
+        with pytest.raises(catalog.CatalogError, match="schemaVersion"):
+            catalog.load(data_dir)
+
+    def test_non_object_channel_member_is_rejected(self, data_dir):
+        self.stored(data_dir, {"schemaVersion": 1, "revision": 1, "channels": ["nope"]})
+        with pytest.raises(catalog.CatalogError, match=r"channels\[0\]"):
+            catalog.load(data_dir)
+
+    def test_channel_missing_seed_is_rejected(self, data_dir):
+        ch = channel()
+        del ch["seed"]
+        self.stored(data_dir, {"schemaVersion": 1, "revision": 1, "channels": [ch]})
+        with pytest.raises(catalog.CatalogError, match="seed"):
+            catalog.load(data_dir)
+
+    def test_original_bytes_are_preserved(self, data_dir):
+        broken = '{"schemaVersion":1,"revision":5,"channels":"broken"}'
+        path = self.stored(data_dir, broken)
+        with pytest.raises(catalog.CatalogError):
+            catalog.load(data_dir)
+        assert path.read_text(encoding="utf-8") == broken
+
+    def test_a_valid_stored_catalog_round_trips(self, data_dir):
+        _, normalized = catalog.validate({
+            "schemaVersion": 1, "revision": 2,
+            "settings": {}, "channels": [channel()],
+        })
+        normalized["revision"] = 3
+        catalog.save(data_dir, normalized)
+        assert catalog.load(data_dir) == normalized
+
+    def test_concurrent_saves_use_distinct_temp_files(self, data_dir):
+        """Two writers must never share a temp path (regression for the shared
+        catalog.json.tmp collision)."""
+        _, normalized = catalog.validate({"schemaVersion": 1, "channels": [channel()]})
+        import threading
+
+        seen = []
+        original_replace = catalog.os.replace
+
+        def spy_replace(src, dst):
+            seen.append(str(src))
+            return original_replace(src, dst)
+
+        catalog.os.replace = spy_replace
+        try:
+            threads = [
+                threading.Thread(target=catalog.save, args=(data_dir, dict(normalized)))
+                for _ in range(4)
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        finally:
+            catalog.os.replace = original_replace
+        assert len(set(seen)) == 4  # every write had its own temp file

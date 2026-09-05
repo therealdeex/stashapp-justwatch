@@ -1,0 +1,8 @@
+[Unit]
+Description=Prepare Just Watch programming
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/stash-justwatch/scheduler.env
+ExecStart=/usr/bin/python3 %h/dev/stash-justwatch/tools/prepare_programming.py

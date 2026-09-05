@@ -33,7 +33,11 @@
   // Constants
   // ------------------------------------------------------------------
 
-  const ROUTE_PATH = "/plugin/stash-justwatch";
+  const ROUTE_PATH = "/plugins/stash-justwatch";
+  // Legacy path kept registered: early bookmarks/links used it. The server
+  // only serves the app shell for /plugins/* (its /plugin mount owns assets
+  // and /javascript), so the plural path is the only deep-linkable one.
+  const LEGACY_ROUTE_PATH = "/plugin/stash-justwatch";
   const ASSET_BASE = "/plugin/stash-justwatch/assets/";
   const POLL_INTERVAL_MS = 800;
   const AUTOSAVE_DEBOUNCE_MS = 700;
@@ -140,8 +144,12 @@
     return data.runPluginTask; // job id
   }
 
+  // Bounded: a job that never reaches a terminal state leaves an actionable
+  // "save failed — retry" state, not an endless Saving indicator.
+  const JOB_POLL_MAX = 150; // ~2 min at POLL_INTERVAL_MS
+
   async function pollJob(jobId) {
-    for (;;) {
+    for (let i = 0; i < JOB_POLL_MAX; i++) {
       await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
       let data = null;
       try {
@@ -157,8 +165,12 @@
       const status = String(job.status || "").toUpperCase();
       if (TERMINAL_STATUSES.has(status)) return status;
     }
+    throw new Error("the save is taking unusually long — you can retry");
   }
 
+  // Results are stored per requestId by the plugin (a small retention-capped
+  // list), so two tabs saving close together each find their own outcome
+  // instead of whoever wrote last.
   async function readSaveResult(requestId, attempts) {
     for (let i = 0; i < (attempts || 12); i++) {
       try {
@@ -167,7 +179,9 @@
         });
         if (resp.ok) {
           const body = await resp.json();
-          if (!requestId || body.requestId === requestId) return body;
+          const results = Array.isArray(body && body.results) ? body.results : [];
+          const match = results.find((r) => r && r.requestId === requestId);
+          if (match) return match;
         }
       } catch (e) { /* retry */ }
       await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
@@ -302,10 +316,19 @@
 
   let saveSeq = 0;
 
+  function newRequestId() {
+    // Random UUID: safe across tabs and sessions, unlike wall-clock sequences.
+    if (window.crypto && typeof window.crypto.randomUUID === "function") {
+      return "req-" + window.crypto.randomUUID();
+    }
+    return "req-" + Date.now() + "-" + Math.random().toString(36).slice(2) + "-" + (++saveSeq);
+  }
+
   // After a successful save the server has refreshed labels + health counts,
-  // so re-pull the catalog instead of letting local guesses linger.
+  // so re-pull the catalog instead of letting local guesses linger. The
+  // caller decides what to adopt — a newer local draft is never clobbered.
   async function commitAndReload(catalog, expectedRevision) {
-    const requestId = "req-" + Date.now() + "-" + (++saveSeq);
+    const requestId = newRequestId();
     const jobId = await runTask("Save Channel Edit", {
       mode: "SaveCatalog",
       catalog: JSON.stringify(catalog),
@@ -350,9 +373,14 @@
   // Components
   // ------------------------------------------------------------------
 
-  function SaveIndicator({ state }) {
+  function SaveIndicator({ state, onRetry }) {
     if (state === "saving") return h("span", { className: "jw-save-indicator" }, "Saving…");
-    if (state === "error") return h("span", { className: "jw-save-indicator jw-save-error" }, "Save failed — will retry on your next change");
+    if (state === "error") {
+      return h("span", { className: "jw-save-indicator jw-save-error" },
+        "Save failed — your changes are kept. ",
+        h("button", { className: "jw-link", onClick: onRetry }, "Retry now"),
+      );
+    }
     if (state === "saved") return h("span", { className: "jw-save-indicator" }, "Saved");
     return null;
   }
@@ -393,7 +421,7 @@
         }
         if (!channel.enabled) badges.push(h("span", { key: "d", className: "jw-badge jw-badge-off" }, "paused"));
         return {
-          sel: "custom:" + channel.id,
+          sel: channel.id,
           number: channel.number,
           name: channel.name,
           glyph: channel.glyph,
@@ -512,35 +540,43 @@
   }
 
   function OnAirStrip({ channel, isDraft }) {
-    const [state, setState] = useState({ loading: true, items: null, total: null, error: null });
+    const [state, setState] = useState({ loading: true, items: null, total: null, sourceTotal: null, error: null });
     const spec = JSON.stringify(channel);
 
     useEffect(() => {
       let alive = true;
-      setState({ loading: true, items: null, total: null, error: null });
+      setState({ loading: true, items: null, total: null, sourceTotal: null, error: null });
       const t = setTimeout(async () => {
         try {
           const result = await previewLineup(JSON.parse(spec), PREVIEW_COUNT + 1);
           if (!alive) return;
-          setState({ loading: false, items: result.items || [], total: result.total, error: null });
+          setState({
+            loading: false, items: result.items || [], total: result.total,
+            sourceTotal: result.sourceTotal, error: null,
+          });
         } catch (e) {
-          if (alive) setState({ loading: false, items: null, total: null, error: String((e && e.message) || e) });
+          if (alive) setState({ loading: false, items: null, total: null, sourceTotal: null, error: String((e && e.message) || e) });
         }
       }, 250);
       return () => { alive = false; clearTimeout(t); };
     }, [spec]);
 
     const missing = channel.sourceMissing && !isDraft;
+    // The preview count IS the rotation: the same bounded loop the TV plays,
+    // not the size of the library behind it (that's shown separately).
+    const countBits = [];
+    if (!state.loading && !missing) {
+      if (state.total != null) countBits.push(formatCount(state.total) + " in rotation");
+      if (!isDraft && state.sourceTotal != null && state.sourceTotal > state.total) {
+        countBits.push(formatCount(state.sourceTotal) + " in your library");
+      }
+      if (!isDraft && channel.loopSeconds != null) countBits.push(formatLoop(channel.loopSeconds));
+      if (!isDraft && channel.loopCapped) countBits.push("sampled from a very long lineup");
+    }
     return h("div", { className: "jw-editor-section" },
       h("div", { className: "jw-onair-head" },
         h("span", { className: "jw-section-label" }, "On air tonight"),
-        h("span", { className: "jw-onair-meta" },
-          state.loading || missing ? "" : [
-            state.total != null ? formatCount(state.total) : "",
-            !isDraft && channel.loopSeconds != null ? " · " + formatLoop(channel.loopSeconds) : "",
-            !isDraft && channel.loopCapped ? " · very long lineup" : "",
-          ].join(""),
-        ),
+        h("span", { className: "jw-onair-meta" }, countBits.join(" · ")),
       ),
       missing
         ? h("div", { className: "jw-missing-note" }, "This lineup's source was deleted in Stash. Use “Airing from” above to relink it.")
@@ -584,9 +620,135 @@
     );
   }
 
+  function ProgrammingControls({ channel, onPatch }) {
+    const p = channel.programming || { mode: "fixed", spacing: 0, repeatHours: 0, spotlight: "none", spotlightDay: 5, spotlightHour: 20 };
+    const patch = (values) => onPatch({ programming: Object.assign({}, p, values) });
+    return h("div", { className: "jw-editor-section" },
+      h("div", { className: "jw-section-label" }, "Keep the channel moving"),
+      h("div", { className: "jw-chip-row" }, [
+        ["fixed", "Favorite rotation"], ["explore", "Explore the library"], ["discovery", "Discovery"]
+      ].map(([mode, label]) => h("button", { key: mode, className: "jw-chip" + (p.mode === mode ? " jw-chip-active" : ""),
+        onClick: () => patch({ mode }) }, label))),
+      h("p", { className: "jw-settings-hint" }, p.mode === "fixed"
+        ? "A familiar rotation of up to 50 scenes, on repeat."
+        : p.mode === "discovery" ? "Give overlooked scenes a turn. Uses scheduled airtime, never your watch history."
+        : "A continuing schedule through this source. Every scene gets a turn before the next pass."),
+      p.mode !== "fixed" ? h("div", { className: "jw-programming" },
+        h("label", { className: "jw-field" }, "Space performers and studios",
+          h("select", { className: "jw-search", value: p.spacing || 0, onChange: e => patch({ spacing: Number(e.target.value) }) },
+            [0, 1, 2, 3, 5].map(n => h("option", { key: n, value: n }, n ? n + (n === 1 ? " program apart when possible" : " programs apart when possible") : "Follow play order")))),
+        h("label", { className: "jw-field" }, "Prefer no repeats within",
+          h("select", { className: "jw-search", value: p.repeatHours || 0, onChange: e => patch({ repeatHours: Number(e.target.value) }) },
+            [0, 12, 24, 48, 72, 168].map(n => h("option", { key: n, value: n }, n ? n + " hours" : "One complete library pass")))),
+        h("label", { className: "jw-field" }, "Weekly double feature",
+          h("select", { className: "jw-search", value: p.spotlight || "none", onChange: e => patch({ spotlight: e.target.value }) },
+            [["none", "No spotlight"], ["studio", "Studio spotlight"], ["performer", "Performer double feature"]].map(([v, label]) => h("option", { key: v, value: v }, label)))),
+        p.spotlight !== "none" ? h("div", { className: "jw-chip-row" },
+          h("select", { className: "jw-search", "aria-label": "Spotlight day in UTC", value: p.spotlightDay == null ? 5 : p.spotlightDay, onChange: e => patch({ spotlightDay: Number(e.target.value) }) },
+            ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map((d, i) => h("option", { key: d, value: i }, d))),
+          h("select", { className: "jw-search", "aria-label": "Spotlight hour in UTC", value: p.spotlightHour == null ? 20 : p.spotlightHour, onChange: e => patch({ spotlightHour: Number(e.target.value) }) },
+            Array.from({ length: 24 }, (_, i) => h("option", { key: i, value: i }, String(i).padStart(2, "0") + ":00 UTC")))) : null,
+      ) : null);
+  }
+
+  function PublishedSchedule({ channel }) {
+    const [tomorrow, setTomorrow] = useState(false);
+    const [data, setData] = useState(null);
+    const [desk, setDesk] = useState(null);
+    const [error, setError] = useState(null);
+    const [busy, setBusy] = useState(false);
+    const [refresh, setRefresh] = useState(0);
+    const spec = JSON.stringify([channel.id, channel.programming, channel.sort, channel.source, channel.programmingVersion]);
+    useEffect(() => {
+      let alive = true;
+      setData(null); setError(null);
+      const at = Date.now() + (tomorrow ? 86400000 : 0);
+      Promise.all([
+        gql('mutation($a: Map!) { runPluginOperation(plugin_id: "stash-justwatch", args: $a) }', { a: { mode: "Schedule", channelId: channel.id, at: String(at), limit: "20" } }),
+        runOp("ProgrammingDesk"),
+      ]).then(([result, overview]) => { if (alive) { setData(result.runPluginOperation); setDesk(overview); } })
+        .catch(e => { if (alive) setError(e.message); });
+      return () => { alive = false; };
+    }, [spec, tomorrow, refresh]);
+    if (!channel.programming || channel.programming.mode === "fixed") return null;
+    const summary = desk && (desk.channels || []).find(c => c.id === channel.id);
+    const prepare = async () => {
+      setBusy(true); setError(null);
+      try {
+        const id = await runTask("Prepare Programming", { mode: "PrepareProgramming", channelId: channel.id });
+        const status = await pollJob(id);
+        if (status !== "FINISHED" && status !== "COMPLETE" && status !== "COMPLETED") throw new Error("Programming could not be prepared. Try again.");
+        setRefresh(v => v + 1);
+      } catch (e) { setError(e.message); } finally { setBusy(false); }
+    };
+    return h("div", { className: "jw-editor-section jw-published" },
+      h("div", { className: "jw-section-label" }, "Your programming desk"),
+      h("div", { className: "jw-chip-row" },
+        h("button", { className: "jw-chip" + (!tomorrow ? " jw-chip-active" : ""), onClick: () => setTomorrow(false) }, "On now"),
+        h("button", { className: "jw-chip" + (tomorrow ? " jw-chip-active" : ""), onClick: () => setTomorrow(true) }, "Tomorrow"),
+        h("button", { className: "jw-chip", disabled: busy, onClick: prepare }, busy ? "Preparing…" : "Prepare upcoming programming")),
+      error ? h("p", { role: "alert", className: "jw-missing-note" }, error) : null,
+      summary ? h("p", { className: "jw-settings-hint" }, formatCount(summary.sourceTotal) + " in this source · " + summary.scheduledUnique + " have a place in the schedule · Ready through " + new Date(summary.preparedThrough).toLocaleString()) : null,
+      summary && summary.overlap && summary.overlap.length ? h("p", { className: "jw-settings-hint" }, "Shared programming: " + summary.overlap.map(o => o.percent + "% also belongs to " + o.name).join(" · ")) : null,
+      data && (data.warnings || []).map(w => h("p", { key: w, className: "jw-settings-hint" }, w)),
+      data && data.status === "preparing" ? h("p", null, "Your first schedule is being prepared. Save your channel, then prepare upcoming programming.") : null,
+      data && data.status === "repeat" ? h("p", { className: "jw-settings-hint" }, "Encore programming is airing until the next schedule is ready.") : null,
+      h("div", { className: "jw-airings" }, data && (data.programs || []).map(p => h("div", { className: "jw-airing", key: p.airingId },
+        h("time", null, new Date(p.startEpochMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })),
+        h("div", null, h("strong", null, p.item.title || "Untitled"),
+          h("div", { className: "jw-settings-hint" }, [p.block, p.item.studio, Math.round((p.endEpochMs - p.startEpochMs) / 60000) + " min"].filter(Boolean).join(" · ")))))),
+    );
+  }
+
+  function ProgrammingTrial({ channel, onApply, onClose }) {
+    const [draft, setDraft] = useState(() => JSON.parse(JSON.stringify(channel)));
+    const [result, setResult] = useState(null);
+    const [error, setError] = useState(null);
+    const [busy, setBusy] = useState(false);
+    const [tested, setTested] = useState(null);
+    const ref = useRef(null);
+    useEffect(() => {
+      const previous = document.activeElement;
+      ref.current.querySelector("button").focus();
+      const keys = e => {
+        if (e.key === "Escape") { e.preventDefault(); onClose(); }
+        if (e.key === "Tab") {
+          const nodes = Array.from(ref.current.querySelectorAll("button:not(:disabled), select"));
+          const first = nodes[0], last = nodes[nodes.length - 1];
+          if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+          if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+        }
+      };
+      document.addEventListener("keydown", keys);
+      return () => { document.removeEventListener("keydown", keys); if (previous && previous.isConnected) previous.focus(); };
+    }, []);
+    const preview = async () => {
+      setBusy(true); setError(null);
+      try {
+        const answer = await runOp("PreviewProgramming", { channel: JSON.stringify(draft) });
+        setResult(answer); setTested(JSON.stringify(draft.programming));
+      } catch (e) { setError(e.message); } finally { setBusy(false); }
+    };
+    return h("div", { className: "jw-overlay" }, h("div", { className: "jw-sheet", ref, role: "dialog", "aria-modal": true, "aria-label": "Try different programming" },
+      h("div", { className: "jw-sheet-head" }, h("strong", null, "Try different programming"), h("button", { className: "jw-btn", onClick: onClose }, "Close")),
+      h("p", { className: "jw-settings-hint" }, "Experiment here before changing what airs. The current program always finishes."),
+      h(ProgrammingControls, { channel: draft, onPatch: patch => setDraft(Object.assign({}, draft, patch)) }),
+      h("button", { className: "jw-btn", disabled: busy || draft.programming.mode === "fixed", onClick: preview }, busy ? "Preparing preview…" : "Preview this programming"),
+      error ? h("p", { role: "alert" }, error) : null,
+      result && result.message ? h("p", null, result.message) : null,
+      result && result.effectiveAt ? h("p", { className: "jw-settings-hint" }, "This preview changes programming from " + new Date(result.effectiveAt).toLocaleString() + ". Playback continues through the published boundary.") : null,
+      result && (result.warnings || []).map(w => h("p", { key: w }, w)),
+      h("div", { className: "jw-airings" }, result && (result.programs || []).slice(0,8).map(p => h("div", { className: "jw-airing", key: p.airingId },
+        h("time", null, new Date(p.startEpochMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })), h("span", null, p.item.title || "Untitled")))),
+      h("div", { className: "jw-sheet-foot" }, h("button", { className: "jw-btn jw-btn-primary", disabled: !result || result.status !== "preview" || tested !== JSON.stringify(draft.programming),
+        onClick: () => { onApply({ programming: draft.programming }); onClose(); } }, "Use this programming")),
+    ));
+  }
+
   function EditorPane({ channel, channels, onPatch, onAssignNumber, onChangeSource, onRemove }) {
     const [confirmRemove, setConfirmRemove] = useState(false);
     const [glyphOpen, setGlyphOpen] = useState(false);
+    const [trialOpen, setTrialOpen] = useState(false);
     if (!channel) return null;
 
     return h("div", { className: "jw-editor" },
@@ -648,6 +810,10 @@
         ),
       ),
 
+      h(ProgrammingControls, { channel, onPatch }),
+      channel.programming && channel.programming.mode !== "fixed" ? h("button", { className: "jw-btn", onClick: () => setTrialOpen(true) }, "Try different programming…") : null,
+      trialOpen ? h(ProgrammingTrial, { channel, onApply: onPatch, onClose: () => setTrialOpen(false) }) : null,
+      h(PublishedSchedule, { channel }),
       h("div", { className: "jw-editor-section" },
         h("div", { className: "jw-section-label" }, "Appearance"),
         h("div", { className: "jw-appearance" },
@@ -675,7 +841,7 @@
         ),
       ),
 
-      h(OnAirStrip, { channel, isDraft: false }),
+      (!channel.programming || channel.programming.mode === "fixed") ? h(OnAirStrip, { channel, isDraft: false }) : null,
 
       h("div", { className: "jw-editor-section jw-danger" },
         confirmRemove
@@ -879,30 +1045,21 @@
           h("button", { className: "jw-btn jw-btn-ghost", onClick: onClose }, "✕"),
         ),
         h("p", { className: "jw-settings-hint" },
-          "These tune the channels your TV generates by itself (General, Studios, Performers). Channels you create here are never touched by them."),
+          "These thresholds shape the General, Studios, and Performers sections shown on THIS page. ",
+          "Your TV generates its own channels from its own Just Watch settings (TV → Settings → Just Watch); ",
+          "the two are not connected. Channels you create here are never touched by either."),
         h("div", { className: "jw-programming" },
           h("div", { className: "jw-field" },
-            h("div", { className: "jw-field-label" }, "A studio or performer gets its own channel at"),
+            h("div", { className: "jw-field-label" }, "A studio or performer is listed on its own row at"),
             num("soloThreshold", 10),
           ),
           h("div", { className: "jw-field" },
-            h("div", { className: "jw-field-label" }, "Smaller ones are pooled into groups at"),
+            h("div", { className: "jw-field-label" }, "Smaller ones are pooled into groups below"),
             num("groupThreshold", 5),
           ),
-          h("div", { className: "jw-field" },
-            h("div", { className: "jw-field-label" }, "When the TV turns on"),
-            h("div", { className: "jw-chip-row" },
-              h("button", {
-                className: "jw-chip" + (s.launchMode !== "random" ? " jw-chip-active" : ""),
-                onClick: () => onPatchSettings({ launchMode: "last" }),
-              }, "Pick up where I left off"),
-              h("button", {
-                className: "jw-chip" + (s.launchMode === "random" ? " jw-chip-active" : ""),
-                onClick: () => onPatchSettings({ launchMode: "random" }),
-              }, "Surprise me"),
-            ),
-          ),
         ),
+        h("p", { className: "jw-settings-hint" },
+          "Launch behavior (pick up where you left off vs. a random channel) is set on your TV, under Just Watch settings."),
         h("div", { className: "jw-sheet-foot" },
           h("button", { className: "jw-btn jw-btn-primary", onClick: onClose }, "Done"),
         ),
@@ -911,8 +1068,31 @@
   }
 
   // ------------------------------------------------------------------
-  // App root: catalog state + serialized autosave
+  // App root: catalog state + one save coordinator
   // ------------------------------------------------------------------
+
+  // Server-authoritative fields are merged into a draft that moved on while a
+  // save ran: only per-channel display facts (labels + health), and only for
+  // channels the finished save actually covered with an unchanged source.
+  function rebaseAcknowledged(latest, savedDraft, fresh, revision) {
+    const out = Object.assign({}, latest, { revision });
+    if (!fresh) return out;
+    const freshById = new Map((fresh.channels || []).map((c) => [c.id, c]));
+    const savedSources = new Map((savedDraft.channels || []).map((c) => [c.id, JSON.stringify(c.source)]));
+    out.channels = (latest.channels || []).map((ch) => {
+      const saved = freshById.get(ch.id);
+      if (!saved) return ch; // brand-new local channel: no server truth yet
+      if (savedSources.get(ch.id) !== JSON.stringify(ch.source)) return ch; // source moved on
+      return Object.assign({}, ch, {
+        sourceLabel: saved.sourceLabel || ch.sourceLabel,
+        sceneCount: saved.sceneCount,
+        loopSeconds: saved.loopSeconds,
+        loopCapped: saved.loopCapped,
+        sourceMissing: saved.sourceMissing,
+      });
+    });
+    return out;
+  }
 
   function App() {
     const [catalog, setCatalog] = useState(null);
@@ -922,17 +1102,30 @@
     const [saveState, setSaveState] = useState({ state: "idle" });
     const [toast, setToast] = useState(null);
 
-    const catalogRef = useRef(null); // mirrors state for event handlers
+    // One save coordinator for creation, editing, relinking, renumbering,
+    // deletion, and settings. `draftRef` is the newest working copy (possibly
+    // ahead of the server); `ackRef` is the revision the server last
+    // acknowledged. Saves always submit against ackRef, so edits made while a
+    // save is in flight serialize cleanly instead of conflicting with it.
+    const catalogRef = useRef(null); // mirrors the draft for event handlers
+    const draftRef = useRef(null);
+    const ackRef = useRef(0);
     const saveTimer = useRef(null);
-    const pendingRef = useRef(null); // latest working copy while a save is in flight
     const savingRef = useRef(false);
     const selectedRef = useRef(null);
+    const settingsDirtyRef = useRef(false);
 
     useEffect(() => { resolveGlyphs(); }, []);
 
     const showToast = useCallback((msg) => {
       setToast(msg);
       setTimeout(() => setToast(null), 5000);
+    }, []);
+
+    const adopt = useCallback((next) => {
+      draftRef.current = next;
+      catalogRef.current = next;
+      setCatalog(next);
     }, []);
 
     // ---- initial load
@@ -942,15 +1135,13 @@
         try {
           const c = await loadCatalog();
           if (!alive) return;
-          setCatalog(c);
-          catalogRef.current = c;
+          adopt(c);
+          ackRef.current = c.revision || 0;
           if (c.channels && c.channels.length) setSelectedId(c.channels[0].id);
         } catch (e) {
           if (!alive) return;
           showToast("Could not reach the Just Watch plugin: " + ((e && e.message) || e));
-          const empty = { revision: 0, settings: {}, channels: [] };
-          setCatalog(empty);
-          catalogRef.current = empty;
+          adopt({ revision: 0, settings: {}, channels: [] });
         }
         // The full lineup (auto channels) is an enhancement; its absence
         // must never block editing.
@@ -960,54 +1151,87 @@
         } catch (e) { /* rail shows custom channels only */ }
       })();
       return () => { alive = false; };
-    }, [showToast]);
+    }, [showToast, adopt]);
 
-    // ---- autosave: debounce, serialize saves, handle conflicts
-    const scheduleSave = useCallback((working) => {
-      pendingRef.current = working;
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-      saveTimer.current = setTimeout(async () => {
-        if (savingRef.current) return; // in-flight save re-reads pendingRef below
-        const toSave = pendingRef.current;
-        if (!toSave) return;
-        savingRef.current = true;
-        setSaveState({ state: "saving" });
-        try {
-          const { result, fresh } = await commitAndReload(toSave, toSave.revision);
-          if (result.saved) {
-            const savedCopy = fresh || Object.assign({}, pendingRef.current, { revision: result.revision });
-            catalogRef.current = savedCopy;
-            setCatalog(savedCopy);
+    const flushSave = useCallback(async () => {
+      if (savingRef.current) return;
+      const toSave = draftRef.current;
+      if (!toSave) return;
+      savingRef.current = true;
+      setSaveState((s) => (s.state === "conflict" ? s : { state: "saving" }));
+      let dirty = false;
+      try {
+        const { result, fresh } = await commitAndReload(toSave, ackRef.current);
+        const latest = draftRef.current;
+        if (result.saved) {
+          ackRef.current = result.revision;
+          if (latest === toSave) {
+            // Nothing moved during the save: adopt the server's copy wholesale.
+            adopt(fresh || Object.assign({}, toSave, { revision: result.revision }));
             setSaveState({ state: "saved" });
-          } else if (result.error === "revision_conflict") {
-            const fresh = await loadCatalog();
-            catalogRef.current = fresh;
-            setCatalog(fresh);
-            setSaveState({ state: "idle" });
-            showToast("Your lineup changed elsewhere — reloaded the latest.");
           } else {
-            const first = (result.errors && result.errors[0]) || {};
-            showToast(first.message || "The server rejected that change.");
-            setSaveState({ state: "error" });
+            // Edits arrived while saving: keep them, acknowledge under them,
+            // and save the newer draft right after.
+            adopt(rebaseAcknowledged(latest, toSave, fresh, result.revision));
+            setSaveState({ state: "saving" });
+            dirty = true;
           }
-        } catch (e) {
+          if (settingsDirtyRef.current) {
+            settingsDirtyRef.current = false;
+            loadFullDirectory().then((fd) => setFullDir(fd)).catch(() => {});
+          }
+        } else if (result.error === "revision_conflict") {
+          // Real external change (another tab, a task). The local draft is
+          // preserved; the user chooses reload vs deliberate overwrite.
+          setSaveState({ state: "conflict", serverRevision: result.currentRevision });
+        } else {
+          const first = (result.errors && result.errors[0]) || {};
+          showToast(first.message || "The server rejected that change.");
           setSaveState({ state: "error" });
-        } finally {
-          savingRef.current = false;
-          // Anything edited while this save ran gets its own save now.
-          if (pendingRef.current && pendingRef.current !== toSave) {
-            scheduleSave(pendingRef.current);
-          } else {
-            pendingRef.current = null;
-          }
         }
-      }, AUTOSAVE_DEBOUNCE_MS);
-    }, [showToast]);
+      } catch (e) {
+        setSaveState({ state: "error" });
+      } finally {
+        savingRef.current = false;
+        if (dirty) scheduleSave();
+      }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [adopt, showToast]);
+
+    const scheduleSave = useCallback((working) => {
+      if (working) adopt(working);
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+      saveTimer.current = setTimeout(() => { flushSave(); }, AUTOSAVE_DEBOUNCE_MS);
+    }, [adopt, flushSave]);
+
+    const retrySave = useCallback(() => {
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+      flushSave();
+    }, [flushSave]);
+
+    const discardDraftAndReload = useCallback(async () => {
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+      try {
+        const fresh = await loadCatalog();
+        ackRef.current = fresh.revision || 0;
+        adopt(fresh);
+        setSaveState({ state: "idle" });
+      } catch (e) {
+        showToast("Could not reload: " + ((e && e.message) || e));
+      }
+    }, [adopt, showToast]);
+
+    const overwriteWithDraft = useCallback(() => {
+      // Deliberate overwrite: acknowledge the server's current revision and
+      // resubmit the preserved draft against it.
+      ackRef.current = saveState.serverRevision || ackRef.current;
+      setSaveState({ state: "saving" });
+      flushSave();
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [flushSave, saveState.serverRevision]);
 
     const mutate = useCallback((fn) => {
-      const next = fn(JSON.parse(JSON.stringify(catalogRef.current || { revision: 0, settings: {}, channels: [] })));
-      catalogRef.current = next;
-      setCatalog(next);
+      const next = fn(JSON.parse(JSON.stringify(draftRef.current || { revision: 0, settings: {}, channels: [] })));
       scheduleSave(next);
     }, [scheduleSave]);
 
@@ -1033,8 +1257,8 @@
       });
     }, [mutate]);
 
-    const createChannel = useCallback(async ({ source, name }) => {
-      const base = catalogRef.current;
+    const createChannel = useCallback(({ source, name }) => {
+      const base = draftRef.current;
       const number = lowestFreeNumber(base.channels || []);
       if (number == null) throw new Error("All 99 channel numbers are in use.");
       const channel = {
@@ -1044,32 +1268,20 @@
         glyph: pickDefaultGlyph(name),
         color: PALETTE[(number - 1) % PALETTE.length],
         source,
-        sourceLabel: "",
+        sourceLabel: name,
         sort: "shuffle",
         seed: Math.floor(Math.random() * 2147483647),
         enabled: true,
       };
-      const next = JSON.parse(JSON.stringify(base));
-      next.channels.push(channel);
-      next.channels.sort((a, b) => a.number - b.number);
-      catalogRef.current = next;
-      setCatalog(next);
+      mutate((c) => {
+        c.channels.push(channel);
+        c.channels.sort((a, b) => a.number - b.number);
+        return c;
+      });
       setSelectedId(channel.id);
-      setSaveState({ state: "saving" });
-      const { result, fresh } = await commitAndReload(next, next.revision);
-      if (result.saved) {
-        const savedCopy = fresh || Object.assign({}, next, { revision: result.revision });
-        catalogRef.current = savedCopy;
-        setCatalog(savedCopy);
-        setSaveState({ state: "saved" });
-      } else {
-        setSaveState({ state: "error" });
-        const first = (result.errors && result.errors[0]) || {};
-        throw new Error(first.message || "The server rejected the new channel.");
-      }
-    }, []);
+    }, [mutate]);
 
-    const relinkChannel = useCallback(async ({ source, name }) => {
+    const relinkChannel = useCallback(({ source, name }) => {
       const target = selectedRef.current;
       mutate((c) => {
         const ch = c.channels.find((x) => x.id === target);
@@ -1080,7 +1292,7 @@
 
     const removeChannel = useCallback(() => {
       const target = selectedRef.current;
-      const remaining = (catalogRef.current.channels || []).filter((x) => x.id !== target);
+      const remaining = (draftRef.current.channels || []).filter((x) => x.id !== target);
       mutate((c) => {
         c.channels = c.channels.filter((x) => x.id !== target);
         return c;
@@ -1089,6 +1301,7 @@
     }, [mutate]);
 
     const patchSettings = useCallback((patch) => {
+      settingsDirtyRef.current = true;
       mutate((c) => { Object.assign(c.settings, patch); return c; });
     }, [mutate]);
 
@@ -1112,10 +1325,21 @@
             "Your library, on the air. Channels you create here air on numbers 1–99, ahead of the built-in dial on your TV."),
         ),
         h("div", { className: "jw-header-actions" },
-          h(SaveIndicator, { state: saveState.state }),
+          h(SaveIndicator, {
+            state: saveState.state,
+            onRetry: retrySave,
+          }),
           h("button", { className: "jw-btn jw-btn-ghost", title: "Tuning", onClick: () => setSheet({ mode: "settings" }) }, "⚙"),
         ),
       ),
+      saveState.state === "conflict"
+        ? h("div", { className: "jw-conflict-banner" },
+            h("span", null,
+              "Your lineup changed in another session. Keep this page's changes, or reload the saved lineup?"),
+            h("button", { className: "jw-btn jw-btn-primary", onClick: overwriteWithDraft }, "Keep my changes"),
+            h("button", { className: "jw-btn jw-btn-ghost", onClick: discardDraftAndReload }, "Reload saved lineup"),
+          )
+        : null,
       h("div", { className: "jw-columns" },
         h(DialRail, {
           railSections, selectedId,
@@ -1160,7 +1384,9 @@
     const IconCmp = (api.components && api.components.Icon) || null;
     const NavLink = RRDOM.NavLink;
     if (api.patch && typeof api.patch.before === "function" && NavLink) {
-      api.patch.before("MainNavBar.MenuItems", function (props) {
+      // UtilityItems is the nav group Stash always renders (top-right, next to
+      // Statistics/Settings); MenuItems collapses on narrow layouts.
+      api.patch.before("MainNavBar.UtilityItems", function (props) {
         try {
           if (!props || typeof props !== "object") return [{}];
           const existing = props.children != null ? props.children : null;
@@ -1185,6 +1411,7 @@
 
   try {
     api.register.route(ROUTE_PATH, App);
+    api.register.route(LEGACY_ROUTE_PATH, App);
   } catch (e) {
     console.error("[stash-justwatch] route registration failed", e);
   }

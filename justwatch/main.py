@@ -32,20 +32,20 @@ _PLUGIN_ROOT = str(Path(__file__).resolve().parent.parent)
 if _PLUGIN_ROOT not in sys.path:
     sys.path.insert(0, _PLUGIN_ROOT)
 
-from justwatch import autodir, catalog, contract, lineup, snapshots  # noqa: E402
+from justwatch import autodir, catalog, contract, lineup, snapshots, programming  # noqa: E402
 from justwatch.stash_client import (  # noqa: E402
     GraphQLAuthError,
     GraphQLClientError,
     StashClient,
 )
 
-PLUGIN_VERSION = "0.1.0"
+PLUGIN_VERSION = "0.2.0"
 
 SYNC_MODES = frozenset({
     "capabilities", "directory", "full_directory", "lineup", "preview_lineup",
-    "get_catalog", "validate_catalog",
+    "get_catalog", "validate_catalog", "schedule", "programming_desk", "preview_programming",
 })
-TASK_MODES = frozenset({"save_catalog", "refresh_data"})
+TASK_MODES = frozenset({"save_catalog", "refresh_data", "prepare_programming"})
 ALL_MODES = SYNC_MODES | TASK_MODES
 
 _CAMEL_RE_1 = re.compile(r"([A-Z]+)([A-Z][a-z])")
@@ -112,11 +112,17 @@ def _op_get_catalog(ctx: TaskContext) -> dict:
     channels = []
     for channel in current.get("channels", []):
         enriched = dict(channel)
+        try:
+            published = programming.read(ctx.data_dir, channel["id"])
+        except (OSError, ValueError):
+            published = None
+        enriched["programmingVersion"] = published.get("version") if published else None
         health_entry = health.get(channel.get("id") or "", {})
         enriched["sceneCount"] = health_entry.get("sceneCount")
         enriched["loopSeconds"] = health_entry.get("loopSeconds")
         enriched["loopCapped"] = health_entry.get("loopCapped", False)
         enriched["sourceMissing"] = health_entry.get("sourceMissing", False)
+        enriched["healthStatus"] = health_entry.get("healthStatus", "ok")
         channels.append(enriched)
     return {
         "pluginId": contract.PLUGIN_ID,
@@ -147,6 +153,7 @@ def _op_directory(ctx: TaskContext) -> dict:
             "sort": channel["sort"],
             "seed": channel["seed"],
             "sourceType": (channel.get("source") or {}).get("type"),
+            "programmingMode": programming.policy(channel.get("programming"))["mode"],
             "sceneCount": health.get(channel.get("id") or "", {}).get("sceneCount"),
         })
     return {
@@ -166,48 +173,61 @@ def _find_channel(current: dict, channel_id: str) -> dict | None:
 
 def _op_lineup(ctx: TaskContext) -> dict:
     channel_id = str(ctx.args.get("channelId") or "").strip()
-    page = max(1, _as_int(ctx.args.get("page"), 1))
-    per_page = min(100, max(1, _as_int(ctx.args.get("perPage"), 50)))
+    per_page = min(100, max(1, _as_int(ctx.args.get("perPage"), contract.ROTATION_SIZE)))
     if not channel_id:
         raise ValueError("channelId is required")
     current = catalog.load(ctx.data_dir)
     channel = _find_channel(current, channel_id)
     if channel is None or not channel.get("enabled", True):
         raise LookupError(f"no enabled channel {channel_id!r}")
-    result = _lineup_for_channel(ctx, channel, page, per_page, include_paths=False)
+    result = _lineup_for_channel(ctx, channel, per_page, include_paths=False)
+    revision = current.get("revision", 0)
     result.update({
         "channelId": channel_id,
-        "revision": current.get("revision", 0),
+        "revision": revision,
         "sort": channel.get("sort"),
+        # Rotation identity: ordering hash + the catalog revision that
+        # published it. Clients compare this to drop stale cached lineups.
+        "rotationVersion": f"r{revision}-{result['rotationVersion']}",
     })
     return result
 
 
 def _lineup_for_channel(
-    ctx: TaskContext, channel: dict, page: int, per_page: int, *, include_paths: bool,
+    ctx: TaskContext, channel: dict, max_items: int, *, include_paths: bool,
 ) -> dict:
+    """The channel's active rotation (bounded, ordered, playable). ``max_items``
+    caps the entries returned; the rotation itself is always assembled whole so
+    every client sees the same loop."""
     source = channel.get("source") or {}
     object_filter = None
+    text_query = None
     if source.get("type") == "savedFilter":
-        object_filter = lineup.fetch_saved_object_filter(ctx.client, str(source.get("id", "")))
-        if object_filter is None:
-            raise LookupError("channel source (saved filter) is missing")
-    result = lineup.fetch_lineup(
+        try:
+            object_filter, text_query = lineup.resolve_saved_criteria(
+                ctx.client, str(source.get("id", "")),
+            )
+        except LookupError as exc:
+            raise LookupError(f"channel source (saved filter) is missing: {exc}") from exc
+    rotation = lineup.fetch_rotation(
         ctx.client,
         source=source,
         sort=channel.get("sort") or "shuffle",
         seed=int(channel.get("seed") or 0),
-        page=page,
-        per_page=per_page,
         include_paths=include_paths,
         object_filter=object_filter,
+        text_query=text_query,
     )
-    result.update({"page": page, "perPage": per_page})
-    return result
+    # `total` quotes the whole rotation even when the caller takes a prefix
+    # (the editor's preview asks for a thumb-strip slice of it).
+    rotation["total"] = len(rotation["items"])
+    rotation["items"] = rotation["items"][:max_items]
+    rotation["perPage"] = max_items
+    return rotation
 
 
 def _op_preview_lineup(ctx: TaskContext) -> dict:
-    """Lineup for an UNSAVED draft channel (the editor's On Air strip)."""
+    """Rotation preview for an UNSAVED draft channel (the editor's On Air strip)."""
     raw = ctx.args.get("channel")
     try:
         draft = json.loads(raw) if isinstance(raw, str) else raw
@@ -219,9 +239,8 @@ def _op_preview_lineup(ctx: TaskContext) -> dict:
     if not normalized or not (normalized[0].get("source") or {}).get("type"):
         raise ValueError("channel draft needs a valid source")
     channel = normalized[0]
-    page = max(1, _as_int(ctx.args.get("page"), 1))
     per_page = min(100, max(1, _as_int(ctx.args.get("perPage"), 12)))
-    return _lineup_for_channel(ctx, channel, page, per_page, include_paths=True)
+    return _lineup_for_channel(ctx, channel, per_page, include_paths=True)
 
 
 def _parse_catalog_arg(ctx: TaskContext) -> dict:
@@ -255,51 +274,54 @@ def _op_save_catalog(ctx: TaskContext) -> dict:
     """Validate + persist a draft, then refresh the health snapshot.
 
     Optimistic concurrency: ``expectedRevision`` must match the stored
-    revision. The result is mirrored to ``save_result.json`` because Stash's
-    job object does not relay plugin stdout to the editor.
+    revision, re-checked inside the catalog lock so concurrent processes
+    cannot both pass the check. Every outcome — success, handled rejection,
+    or internal failure — is mirrored per ``requestId`` to the save_result
+    store, so the editor can always correlate an outcome with its own save.
     """
     request_id = str(ctx.args.get("requestId") or "").strip()
-    raw_draft = ctx.args.get("catalog")
 
     def mirror(payload: dict) -> None:
         snapshots.write_save_result(
             ctx.data_dir, ctx.assets_dir, {**payload, "requestId": request_id},
         )
 
-    if raw_draft is None or (isinstance(raw_draft, str) and not raw_draft.strip()):
-        result = {"saved": False, "message": "no draft to save (Tasks-page runs are a no-op)"}
-        mirror(result)
-        return result
+    try:
+        result = _save_catalog_inner(ctx)
+    except catalog.CatalogError as exc:
+        # A corrupt stored catalog must never be overwritten by a save.
+        result = {
+            "saved": False,
+            "error": "catalog_corrupt",
+            "message": str(exc),
+        }
+    except Exception as exc:  # every handled failure publishes its result
+        _log(f"save failed: {exc}")
+        result = {"saved": False, "error": "internal_error", "message": str(exc)}
+    mirror(result)
+    return result
+
+
+def _save_catalog_inner(ctx: TaskContext) -> dict:
+    if ctx.args.get("catalog") is None or (
+        isinstance(ctx.args.get("catalog"), str) and not ctx.args["catalog"].strip()
+    ):
+        return {"saved": False, "message": "no draft to save (Tasks-page runs are a no-op)"}
 
     draft = _parse_catalog_arg(ctx)
     errors, normalized = catalog.validate(draft)
     if errors:
-        result = {"saved": False, "errors": errors, "error": "validation_failed"}
-        mirror(result)
-        return result
-
-    current = catalog.load(ctx.data_dir)
-    expected = _as_int(ctx.args.get("expectedRevision"), -1)
-    stored_revision = current.get("revision", 0)
-    if expected != stored_revision:
-        result = {
-            "saved": False,
-            "error": "revision_conflict",
-            "message": f"draft expects revision {expected}, server has {stored_revision}",
-            "currentRevision": stored_revision,
-        }
-        mirror(result)
-        return result
+        return {"saved": False, "errors": errors, "error": "validation_failed"}
 
     # Resolve source labels + existence; a save must reference real sources.
+    # Pure Stash queries against the draft — safe outside the lock.
     for i, channel in enumerate(normalized.get("channels", [])):
         source = channel.get("source") or {}
         try:
             if (source.get("type") or "") == "savedFilter":
-                object_filter = lineup.fetch_saved_object_filter(
-                    ctx.client, str(source.get("id", "")),
-                )
-                if object_filter is None:
+                try:
+                    lineup.resolve_saved_criteria(ctx.client, str(source.get("id", "")))
+                except LookupError:
                     errors.append({
                         "path": f"channels[{i}].source",
                         "code": "missing_source",
@@ -309,9 +331,7 @@ def _op_save_catalog(ctx: TaskContext) -> dict:
             label, exists = lineup.resolve_source(ctx.client, source)
         except GraphQLClientError as exc:
             # A transport blip must NOT mark sources missing; fail the save.
-            result = {"saved": False, "error": "source_check_failed", "message": str(exc)}
-            mirror(result)
-            return result
+            return {"saved": False, "error": "source_check_failed", "message": str(exc)}
         if not exists:
             errors.append({
                 "path": f"channels[{i}].source",
@@ -320,29 +340,61 @@ def _op_save_catalog(ctx: TaskContext) -> dict:
             })
         channel["sourceLabel"] = label
     if errors:
-        result = {"saved": False, "errors": errors, "error": "validation_failed"}
-        mirror(result)
-        return result
+        return {"saved": False, "errors": errors, "error": "validation_failed"}
 
-    normalized["revision"] = stored_revision + 1
-    catalog.save(ctx.data_dir, normalized)
+    with catalog.catalog_lock(ctx.data_dir):
+        current = catalog.load(ctx.data_dir)
+        expected = _as_int(ctx.args.get("expectedRevision"), -1)
+        stored_revision = current.get("revision", 0)
+        if expected != stored_revision:
+            return {
+                "saved": False,
+                "error": "revision_conflict",
+                "message": f"draft expects revision {expected}, server has {stored_revision}",
+                "currentRevision": stored_revision,
+            }
+        _preserve_existing_seeds(current, normalized)
+        normalized["revision"] = stored_revision + 1
+        catalog.save(ctx.data_dir, normalized)
+
     _log(f"saved catalog revision {normalized['revision']} "
          f"({len(normalized['channels'])} channels)")
 
+    # Health regenerates outside the lock; a stale computation is dropped by
+    # the revision-aware snapshot publication.
     try:
-        snapshot = snapshots.build_directory_snapshot(ctx.client, normalized)
+        previous = snapshots.read_snapshot(ctx.data_dir, ctx.assets_dir)
+        snapshot = snapshots.build_directory_snapshot(ctx.client, normalized, previous)
         snapshots.write_snapshot(ctx.data_dir, ctx.assets_dir, snapshot)
     except Exception as exc:  # save already succeeded; health is best-effort
         _log(f"snapshot regeneration skipped: {exc}")
 
-    result = {"saved": True, "revision": normalized["revision"]}
-    mirror(result)
-    return result
+    try:
+        programming.prepare(ctx.client, ctx.data_dir, only_changed=True)
+    except Exception as exc:
+        _log(f"programming will retry on the next preparation task: {exc}")
+    return {"saved": True, "revision": normalized["revision"]}
+
+
+def _preserve_existing_seeds(stored: dict, draft: dict) -> None:
+    """Channel seeds are identity: an existing channel keeps the seed it was
+    first saved with, whatever the draft carries (changed, missing, or fresh).
+    Only genuinely new channels get their draft's seed."""
+    stored_seeds = {
+        ch.get("id"): ch.get("seed")
+        for ch in stored.get("channels", [])
+        if isinstance(ch, dict) and ch.get("id")
+    }
+    for channel in draft.get("channels", []):
+        prior = stored_seeds.get(channel.get("id"))
+        if prior is not None:
+            channel["seed"] = prior
 
 
 def _op_refresh_data(ctx: TaskContext) -> dict:
     current = catalog.load(ctx.data_dir)
-    snapshot = snapshots.build_directory_snapshot(ctx.client, current)
+    previous = snapshots.read_snapshot(ctx.data_dir, ctx.assets_dir)
+    snapshot = snapshots.build_directory_snapshot(ctx.client, current, previous)
     snapshots.write_snapshot(ctx.data_dir, ctx.assets_dir, snapshot)
     return {
         "mode": "refresh_data",
@@ -370,7 +422,44 @@ def _op_full_directory(ctx: TaskContext) -> dict:
     }
 
 
+def _op_schedule(ctx):
+    channel_id = str(ctx.args.get("channelId") or "")
+    channel = _find_channel(catalog.load(ctx.data_dir), channel_id)
+    if channel is None or not channel["enabled"]:
+        raise LookupError("channel is unavailable")
+    if programming.policy(channel.get("programming"))["mode"] == "fixed":
+        return {"status": "fixed", "programs": []}
+    return programming.schedule(ctx.data_dir, channel_id,
+        _as_int(ctx.args.get("at"), int(__import__("time").time() * 1000)),
+        _as_int(ctx.args.get("limit"), 50))
+
+
+def _op_preview_programming(ctx):
+    raw = ctx.args.get("channel")
+    draft = json.loads(raw) if isinstance(raw, str) else raw
+    if not isinstance(draft, dict):
+        raise ValueError("channel draft is required")
+    normalized = catalog.normalize({"channels": [draft]})["channels"][0]
+    return programming.preview(ctx.data_dir, normalized)
+
+
+def _op_programming_desk(ctx):
+    return programming.desk(ctx.data_dir, catalog.load(ctx.data_dir)["channels"])
+
+
+def _op_prepare_programming(ctx):
+    result = programming.prepare(ctx.client, ctx.data_dir, ctx.args.get("channelId"))
+    errors = {key: value for key, value in result["channels"].items() if value != "ready"}
+    if errors:
+        raise GraphQLClientError("Some programming could not be prepared: " + json.dumps(errors))
+    return result
+
+
 _HANDLERS = {
+    "schedule": _op_schedule,
+    "preview_programming": _op_preview_programming,
+    "programming_desk": _op_programming_desk,
+    "prepare_programming": _op_prepare_programming,
     "capabilities": _op_capabilities,
     "get_catalog": _op_get_catalog,
     "directory": _op_directory,

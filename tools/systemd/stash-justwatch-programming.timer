@@ -1,0 +1,10 @@
+[Unit]
+Description=Keep Just Watch programming ready
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

@@ -26,7 +26,10 @@ STUDIO_GROUP_SCORE_FLOOR = 3.0
 STUDIO_SECOND_SLOT_RATIO = 0.2
 STUDIO_SAMPLE_SCENES = 200
 
-NUMBERED_PER_SECTION = 99
+# Ordinary channels number base+0 .. base+97. The 99th number of each entity
+# tier (399 / 499) is pinned to the spillover channel, so ordinary numbering
+# must stop one short of it or the two would collide at scale.
+NUMBERED_PER_SECTION = 98
 
 
 def specs() -> dict:

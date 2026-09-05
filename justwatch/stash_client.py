@@ -80,7 +80,12 @@ class StashClient:
         self.endpoint = build_endpoint(server_connection or {})
         self.timeout = timeout
         cookie = (server_connection or {}).get("SessionCookie") or {}
-        self.session_cookie = str(cookie.get("value") or "")
+        # Stash marshals a Go http.Cookie, whose exported fields are Name and
+        # Value (capitalized). Older envelopes used lowercase keys; accept both.
+        self.session_cookie = str(
+            cookie.get("Value") or cookie.get("value") or "",
+        )
+        self.cookie_name = str(cookie.get("Name") or cookie.get("name") or "session")
         api_key = ""
         for source in (settings or {}, (server_connection or {})):
             value = source.get("ApiKey") or source.get("stash_api_key")
@@ -99,7 +104,7 @@ class StashClient:
         if self.api_key:
             headers["ApiKey"] = self.api_key
         elif self.session_cookie:
-            headers["Cookie"] = f"session={self.session_cookie}"
+            headers["Cookie"] = f"{self.cookie_name}={self.session_cookie}"
         return headers
 
     def submit(self, query: str, variables: dict | None = None) -> Any:

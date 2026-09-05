@@ -147,6 +147,55 @@ class TestStudioTiers:
         assert len(groups) == 2  # Toon Lagoon + The Great Outdoors
 
 
+class TestNumberAllocation:
+    """Ordinary tiers stop at base+97; the 99th number (399/499) is the
+    spillover pin. At scale the two must never collide."""
+
+    def _solo_studios(self, count):
+        return [
+            {"id": str(i), "name": f"Solo {i}", "sceneCount": 50, "tags": []}
+            for i in range(count)
+        ]
+
+    def test_98_solo_studios_fill_up_to_398(self):
+        rows = autodir.studio_channels(self._solo_studios(98), 10, 5, lambda _id: [])
+        numbers = [r["number"] for r in rows if r["kind"] == "studio"]
+        assert numbers[0] == 301
+        assert numbers[-1] == 398
+        assert len(numbers) == 98
+
+    def test_99th_solo_studio_does_not_collide_with_spillover(self):
+        studios = self._solo_studios(99)
+        studios.append({"id": "sp", "name": "Tiny", "sceneCount": 1, "tags": []})
+        rows = autodir.studio_channels(studios, 10, 5, lambda _id: [])
+        numbers = [r["number"] for r in rows if r["kind"] == "studio"]
+        assert len([n for n in numbers if n is not None]) == 98  # 99th solo unnumbered
+        assert None in numbers
+        spillover = next(r for r in rows if r["kind"] == "studioSpillover")
+        assert spillover["number"] == 399
+        assert 399 not in numbers  # nothing else claims the pin
+
+    def test_100_solo_studios_with_spillover_all_unique(self):
+        studios = self._solo_studios(100)
+        studios.append({"id": "sp", "name": "Tiny", "sceneCount": 2, "tags": []})
+        rows = autodir.studio_channels(studios, 10, 5, lambda _id: [])
+        assigned = [r["number"] for r in rows if r["number"] is not None]
+        assert len(assigned) == len(set(assigned))
+        assert max(assigned) == 399
+
+    def test_performer_tier_pins_spillover_at_499(self):
+        performers = [
+            {"id": str(i), "name": f"P{i}", "sceneCount": 50, "tags": []}
+            for i in range(100)
+        ] + [{"id": "sp", "name": "Tiny", "sceneCount": 1, "tags": []}]
+        rows = autodir.performer_channels(performers, 10, 5)
+        numbers = [r["number"] for r in rows if r["kind"] == "performer"]
+        assert len([n for n in numbers if n is not None]) == 98
+        assert max(n for n in numbers if n is not None) == 498
+        spillover = next(r for r in rows if r["kind"] == "performerSpillover")
+        assert spillover["number"] == 499
+
+
 class TestFullDirectoryWiring:
     def test_build_full_directory_combines_sections(self):
         def submit(query, variables):
