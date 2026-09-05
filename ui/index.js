@@ -1563,7 +1563,7 @@
         ? h(CreateChannelSheet, { onClose: () => setSheet(null), onCreate: relinkChannel, editingChannel: selected })
         : null,
       sheet && sheet.mode === "tags"
-        ? h(TagPickSheet, { channel: selected, onClose: () => setSheet(null), onDone: patchSelectedSource })
+        ? h(TagPickSheet, { channel: selected, onClose: () => setSheet(null), onDone: (ids) => patchSelectedSource(tagSource(ids)) })
         : null,
       sheet && sheet.mode === "settings"
         ? h(SettingsSheet, { catalog, onClose: () => setSheet(null), onPatchSettings: patchSettings })
