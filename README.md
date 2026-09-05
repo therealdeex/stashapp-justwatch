@@ -29,7 +29,7 @@ plugin injects into Stash's web UI (`/plugins/stash-justwatch`).
 | Source | Airs |
 | --- | --- |
 | Saved filter | Any saved **scene** filter, verbatim (the powerful path) |
-| Tag | Scenes with the tag (hierarchical — subtags included) |
+| Tag | Scenes with the tag (hierarchical — subtags included). A channel can air from a **set of tags**: a scene matching any of them airs |
 | Performer | Scenes featuring the performer |
 | Studio | Scenes from the studio (hierarchical — child studios included) |
 

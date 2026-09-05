@@ -85,6 +85,65 @@ class TestValidate:
         })
         assert errors == []
 
+
+class TestTagSetSources:
+    """A tag channel may air from a SET of tags (source.ids = ANY-of union).
+    Canonical form keeps ``id`` mirroring the first sorted id so stored files
+    stay strictly loadable and hashes/equality stay order-stable."""
+
+    def test_ids_only_draft_is_valid_and_canonicalized(self):
+        errors, normalized = catalog.validate({
+            "schemaVersion": 1,
+            "channels": [channel(source={"type": "tag", "ids": ["9", "3", "12"]})],
+        })
+        assert errors == []
+        assert normalized["channels"][0]["source"] == {"type": "tag", "id": "3", "ids": ["3", "9", "12"]}
+
+    def test_id_and_ids_merge_sorted_deduped(self):
+        _, normalized = catalog.validate({
+            "schemaVersion": 1,
+            "channels": [channel(source={"type": "tag", "id": "9", "ids": ["12", "3", "9", "3"]})],
+        })
+        assert normalized["channels"][0]["source"]["ids"] == ["3", "9", "12"]
+        assert normalized["channels"][0]["source"]["id"] == "3"
+
+    def test_single_tag_canonicalizes_to_a_set_of_one(self):
+        _, normalized = catalog.validate({
+            "schemaVersion": 1, "channels": [channel()],
+        })
+        assert normalized["channels"][0]["source"] == {"type": "tag", "id": "42", "ids": ["42"]}
+
+    def test_non_numeric_ids_rejected(self):
+        errors, _ = catalog.validate({
+            "schemaVersion": 1,
+            "channels": [channel(source={"type": "tag", "id": "3", "ids": ["3", "oops"]})],
+        })
+        assert "bad_source_ids" in codes(errors)
+
+    def test_empty_ids_list_rejected(self):
+        errors, _ = catalog.validate({
+            "schemaVersion": 1,
+            "channels": [channel(source={"type": "tag", "id": "3", "ids": []})],
+        })
+        assert "bad_source_ids" in codes(errors)
+
+    def test_non_tag_sources_stay_single_id(self):
+        _, normalized = catalog.validate({
+            "schemaVersion": 1,
+            "channels": [channel(source={"type": "savedFilter", "id": "7", "ids": ["3"]})],
+        })
+        assert normalized["channels"][0]["source"] == {"type": "savedFilter", "id": "7"}
+
+    def test_stored_ids_only_source_loads(self, data_dir):
+        path = catalog.catalog_path(data_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "schemaVersion": 1, "revision": 1,
+            "channels": [channel(source={"type": "tag", "ids": ["7", "3"]})],
+        }), encoding="utf-8")
+        loaded = catalog.load(data_dir)
+        assert loaded["channels"][0]["source"] == {"type": "tag", "id": "3", "ids": ["3", "7"]}
+
     def test_settings_thresholds_clamped_not_rejected(self):
         _, normalized = catalog.validate({
             "schemaVersion": 1,

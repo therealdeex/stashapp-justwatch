@@ -358,6 +358,58 @@
 }
 .jw-source-missing { border-color: var(--jw-danger); color: var(--jw-danger); }
 
+/* ---------- tag pills (multi-tag sources) ---------- */
+
+.jw-field-wide { flex: 1 1 100%; }
+
+.jw-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: .1rem;
+  border: 1px solid var(--jw-border);
+  background: var(--jw-surface);
+  border-radius: 6px;
+  padding: .12rem .3rem .12rem .6rem;
+  font-size: .85rem;
+  max-width: 220px;
+}
+.jw-pill-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: default;
+}
+.jw-pill-remove {
+  border: none;
+  background: transparent;
+  color: var(--jw-muted);
+  font-size: .9rem;
+  line-height: 1;
+  padding: .15rem .35rem;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.jw-pill-remove:hover:not(:disabled) { color: var(--jw-danger); }
+.jw-pill-remove:disabled { opacity: .35; cursor: default; }
+.jw-pill-add {
+  border: 1px dashed var(--jw-border);
+  background: transparent;
+  border-radius: 6px;
+  padding: .15rem .6rem;
+  font-size: .8rem;
+  color: var(--jw-muted);
+  cursor: pointer;
+}
+.jw-pill-add:hover { color: var(--jw-text); border-color: var(--primary, #6caddf); }
+.jw-pill-missing { border-color: var(--jw-danger); color: var(--jw-danger); }
+
+.jw-picked-tags { margin: .25rem 0 .5rem; }
+
+.jw-result-picked {
+  background: var(--jw-surface);
+  box-shadow: inset 0 0 0 1px var(--primary, #6caddf);
+}
+
 /* ---------- swatches ---------- */
 
 .jw-swatch-row { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; }

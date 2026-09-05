@@ -61,6 +61,41 @@
     performer: { label: "Performer", glyph: "\uf007" },
   };
 
+  // A tag channel airs from a SET of tags (any-of union). Canonical shape:
+  // {type:"tag", id:<first>, ids:[sorted]} — mirrors the server's normalize.
+  // Names resolve lazily (this Stash has no ids filter on findTags); null
+  // marks a tag deleted in Stash, known only after it has been looked up.
+  const TAG_NAMES = new Map();
+
+  function tagIdsOf(source) {
+    const src = source || {};
+    if (src.type !== "tag") return [];
+    const pool = [...new Set((Array.isArray(src.ids) ? src.ids : []).map(String).filter((x) => /^\d+$/.test(x)))];
+    if (pool.length) return pool.sort((a, b) => Number(a) - Number(b));
+    return /^\d+$/.test(String(src.id || "")) ? [String(src.id)] : [];
+  }
+
+  function tagSource(ids) {
+    const clean = [...new Set(ids.map(String))].sort((a, b) => Number(a) - Number(b));
+    return { type: "tag", id: clean[0], ids: clean };
+  }
+
+  function joinLabels(names) {
+    return names.length <= 2 ? names.join(", ") : names.slice(0, 2).join(", ") + " +" + (names.length - 2);
+  }
+
+  async function fetchTagNames(ids) {
+    const missing = [...new Set(ids)].filter((id) => !TAG_NAMES.has(id));
+    await Promise.all(missing.map(async (id) => {
+      try {
+        const r = await gql("query JwTagName($id: ID!) { findTag(id: $id) { name } }", { id });
+        TAG_NAMES.set(id, ((r || {}).findTag || {}).name || null);
+      } catch (e) {
+        TAG_NAMES.set(id, "#" + id);
+      }
+    }));
+  }
+
   // Curated brand palette (one row of swatches; a custom color is allowed too).
   const PALETTE = [
     "#E91E63", "#D32F2F", "#F57C00", "#F9A825", "#AFB42B", "#388E3C",
@@ -286,13 +321,19 @@
   }
 
   function summarize(channel) {
-    const kind = SOURCE_KINDS[(channel.source || {}).type] || { label: "" };
+    const src = channel.source || {};
+    const kind = SOURCE_KINDS[src.type] || { label: "" };
+    const ids = tagIdsOf(src);
+    const kindLabel = ids.length > 1 ? "Tags" : kind.label;
     const base = kind.label === "Custom lineup"
       ? (channel.sourceLabel || "Custom lineup")
-      : kind.label + " · " + (channel.sourceLabel || "?");
+      : kindLabel + " · " + (channel.sourceLabel || "?");
     if (channel.sourceMissing) return base + " · lineup missing";
-    if (channel.sceneCount != null) return base + " · " + formatCount(channel.sceneCount);
-    return base;
+    const missing = ids.filter((id) => TAG_NAMES.get(id) === null).length;
+    const missingNote = !channel.sourceMissing && missing
+      ? " · " + missing + (missing === 1 ? " tag missing" : " tags missing") : "";
+    if (channel.sceneCount != null) return base + missingNote + " · " + formatCount(channel.sceneCount);
+    return base + missingNote;
   }
 
   // ------------------------------------------------------------------
@@ -745,7 +786,54 @@
     ));
   }
 
-  function EditorPane({ channel, channels, onPatch, onAssignNumber, onChangeSource, onRemove }) {
+  /** The tag-set "Airing from" field: one pill per tag, plus add/switch. */
+  function TagPillRow({ channel, onRemoveTag, onAddTags, onChangeSource }) {
+    const ids = tagIdsOf(channel.source);
+    const [, setNamesTick] = useState(0);
+    useEffect(() => {
+      let alive = true;
+      fetchTagNames(ids).then(() => { if (alive) setNamesTick((t) => t + 1); });
+      return () => { alive = false; };
+    }, [ids.join(",")]);
+    const [confirmSwitch, setConfirmSwitch] = useState(false);
+    return h("div", { className: "jw-field jw-field-wide" },
+      h("div", { className: "jw-field-label" }, "Airing from"),
+      h("div", { className: "jw-chip-row" },
+        ids.map((id) => {
+          const name = TAG_NAMES.get(id);
+          const missing = name === null;
+          return h("span", {
+            key: id,
+            className: "jw-pill" + (missing ? " jw-pill-missing" : ""),
+            title: missing ? "This tag was deleted in Stash — remove it from the channel." : null,
+          },
+            h("span", { className: "jw-pill-name" }, missing ? "Deleted tag" : name || ("#" + id)),
+            h("button", {
+              className: "jw-pill-remove",
+              disabled: ids.length === 1,
+              "aria-label": "Remove tag " + (name || id),
+              title: ids.length === 1 ? "A channel needs at least one tag." : "Remove this tag",
+              onClick: () => onRemoveTag(id),
+            }, "×"),
+          );
+        }),
+        h("button", { className: "jw-pill-add", onClick: onAddTags }, "+ Add tag"),
+      ),
+      ids.length > 1
+        ? h("div", { className: "jw-swap-note" }, "Airs scenes tagged with any of these.")
+        : h("div", { className: "jw-swap-note" }, "A channel needs at least one tag — add more, or switch to a different kind of lineup below."),
+      confirmSwitch
+        ? h("div", { className: "jw-confirm-row" },
+            h("span", null, "Switching to a different kind of lineup removes these " + ids.length + " tags."),
+            h("button", { className: "jw-btn jw-btn-danger", onClick: () => { setConfirmSwitch(false); onChangeSource(); } }, "Switch"),
+            h("button", { className: "jw-btn jw-btn-ghost", onClick: () => setConfirmSwitch(false) }, "Keep tags"),
+          )
+        : h("button", { className: "jw-link", onClick: () => (ids.length > 1 ? setConfirmSwitch(true) : onChangeSource()) },
+            "Switch to a different kind of lineup…"),
+    );
+  }
+
+  function EditorPane({ channel, channels, onPatch, onAssignNumber, onChangeSource, onRemoveTag, onAddTags, onRemove }) {
     const [confirmRemove, setConfirmRemove] = useState(false);
     const [glyphOpen, setGlyphOpen] = useState(false);
     const [trialOpen, setTrialOpen] = useState(false);
@@ -778,19 +866,21 @@
       h("div", { className: "jw-editor-section" },
         h("div", { className: "jw-section-label" }, "Programming"),
         h("div", { className: "jw-programming" },
-          h("div", { className: "jw-field" },
-            h("div", { className: "jw-field-label" }, "Airing from"),
-            h("button", {
-              className: "jw-source-chip" + (channel.sourceMissing ? " jw-source-missing" : ""),
-              onClick: onChangeSource,
-              title: "Change what this channel airs",
-            },
-              h(Glyph, { codepoint: SOURCE_KINDS[(channel.source || {}).type] ? SOURCE_KINDS[(channel.source || {}).type].glyph : "\uf111", size: 12, color: "inherit" }),
-              h("span", null, channel.sourceMissing
-                ? "Lineup missing — relink"
-                : (channel.sourceLabel || (SOURCE_KINDS[(channel.source || {}).type] || {}).label || "?")),
-            ),
-          ),
+          (channel.source || {}).type === "tag"
+            ? h(TagPillRow, { channel, onRemoveTag, onAddTags, onChangeSource })
+            : h("div", { className: "jw-field" },
+                h("div", { className: "jw-field-label" }, "Airing from"),
+                h("button", {
+                  className: "jw-source-chip" + (channel.sourceMissing ? " jw-source-missing" : ""),
+                  onClick: onChangeSource,
+                  title: "Change what this channel airs",
+                },
+                  h(Glyph, { codepoint: SOURCE_KINDS[(channel.source || {}).type] ? SOURCE_KINDS[(channel.source || {}).type].glyph : "\uf111", size: 12, color: "inherit" }),
+                  h("span", null, channel.sourceMissing
+                    ? "Lineup missing — relink"
+                    : (channel.sourceLabel || (SOURCE_KINDS[(channel.source || {}).type] || {}).label || "?")),
+                ),
+              ),
           h("div", { className: "jw-field" },
             h("div", { className: "jw-field-label" }, "Play order"),
             h("div", { className: "jw-chip-row" }, SORTS.map((s) =>
@@ -962,7 +1052,9 @@
       setError(null);
       try {
         await onCreate({
-          source: { type: picked.type, id: picked.id },
+          source: picked.type === "tag"
+            ? { type: "tag", id: picked.id, ids: [picked.id] }
+            : { type: picked.type, id: picked.id },
           name: (name || picked.name || "New channel").trim().slice(0, 60),
         });
         onClose();
@@ -1024,6 +1116,86 @@
               busy ? "Working…" : (editingChannel ? "Relink channel" : "Create channel")),
           ),
         ],
+      ),
+    );
+  }
+
+  /** Multi-pick tag sheet: toggle membership; Done applies the whole set. */
+  function TagPickSheet({ channel, onClose, onDone }) {
+    const [query, setQuery] = useState("");
+    const [results, setResults] = useState(null);
+    const [picked, setPicked] = useState(tagIdsOf(channel.source));
+    const [busy, setBusy] = useState(false);
+    const inputRef = useRef(null);
+
+    useEffect(() => { if (inputRef.current) inputRef.current.focus(); }, []);
+    useEffect(() => { fetchTagNames(picked); }, [picked.join(",")]);
+    useEffect(() => {
+      let alive = true;
+      const t = setTimeout(async () => {
+        try {
+          const r = await fetchSources(query.trim());
+          if (alive) setResults(r.tags);
+        } catch (e) {
+          if (alive) setResults([]);
+        }
+      }, query.trim() ? SEARCH_DEBOUNCE_MS : 0);
+      return () => { alive = false; clearTimeout(t); };
+    }, [query]);
+
+    const toggle = (id) => setPicked((cur) => cur.includes(id)
+      ? cur.filter((x) => x !== id)
+      : [...cur, id].sort((a, b) => Number(a) - Number(b)));
+    const done = () => {
+      if (!picked.length || busy) return;
+      setBusy(true);
+      onDone(picked);
+      onClose();
+    };
+
+    return h("div", { className: "jw-overlay", onMouseDown: (e) => { if (e.target === e.currentTarget) onClose(); } },
+      h("div", { className: "jw-sheet" },
+        h("div", { className: "jw-sheet-head" },
+          h("span", { className: "jw-sheet-title" }, "Tags this channel airs from"),
+          h("button", { className: "jw-btn jw-btn-ghost", onClick: onClose }, "✕"),
+        ),
+        h("div", { className: "jw-settings-hint" }, "Pick any number — the channel airs scenes matching any of them."),
+        picked.length
+          ? h("div", { className: "jw-chip-row jw-picked-tags" },
+              picked.map((id) => {
+                const name = TAG_NAMES.get(id);
+                return h("span", { key: id, className: "jw-pill" },
+                  h("span", { className: "jw-pill-name" }, name || "#" + id),
+                  h("button", { className: "jw-pill-remove", "aria-label": "Remove tag " + (name || id), onClick: () => toggle(id) }, "×"),
+                );
+              }),
+            )
+          : null,
+        h("input", {
+          ref: inputRef, className: "jw-search",
+          placeholder: "Search tags…",
+          value: query, onChange: (e) => setQuery(e.target.value),
+        }),
+        results == null
+          ? h("div", { className: "jw-sheet-loading" }, "Loading…")
+          : results.length === 0
+            ? h("div", { className: "jw-sheet-loading" }, "Nothing matches “" + query + "”")
+            : results.map((row) => h("button", {
+                key: row.id,
+                className: "jw-result-row" + (picked.includes(row.id) ? " jw-result-picked" : ""),
+                onClick: () => toggle(row.id),
+              },
+                h(Glyph, { codepoint: SOURCE_KINDS.tag.glyph, size: 13, color: "rgba(235,235,240,.6)" }),
+                h("span", { className: "jw-result-name" }, row.name),
+                h("span", { className: "jw-result-count" + (row.count === 0 ? " jw-off-air-text" : "") },
+                  row.count === 0 ? "off air" : formatCount(row.count)),
+              )),
+        h("div", { className: "jw-sheet-foot" },
+          h("button", { className: "jw-btn jw-btn-ghost", onClick: onClose }, "Cancel"),
+          h("button", { className: "jw-btn jw-btn-primary", disabled: !picked.length || busy, onClick: done,
+            title: picked.length ? null : "A channel needs at least one tag." },
+            "Done"),
+        ),
       ),
     );
   }
@@ -1290,6 +1462,27 @@
       });
     }, [mutate]);
 
+    const patchSelectedSource = useCallback((source) => {
+      const target = selectedRef.current;
+      mutate((c) => {
+        const ch = c.channels.find((x) => x.id === target);
+        if (ch) {
+          ch.source = source;
+          const names = tagIdsOf(source).map((id) => TAG_NAMES.get(id));
+          // Optimistic rail label from known names; the server re-joins on save.
+          if (names.length && names.every(Boolean)) ch.sourceLabel = joinLabels(names);
+        }
+        return c;
+      });
+    }, [mutate]);
+
+    const removeTagFromSelected = useCallback((tagId) => {
+      const ch = (draftRef.current.channels || []).find((x) => x.id === selectedRef.current);
+      if (!ch) return;
+      const remaining = tagIdsOf(ch.source).filter((x) => x !== tagId);
+      if (remaining.length) patchSelectedSource(tagSource(remaining));
+    }, [patchSelectedSource]);
+
     const removeChannel = useCallback(() => {
       const target = selectedRef.current;
       const remaining = (draftRef.current.channels || []).filter((x) => x.id !== target);
@@ -1352,6 +1545,8 @@
               onPatch: (patch) => patchChannel(selected.id, patch),
               onAssignNumber: (number, swapId) => assignNumber(selected.id, number, swapId),
               onChangeSource: () => setSheet({ mode: "source" }),
+              onRemoveTag: removeTagFromSelected,
+              onAddTags: () => setSheet({ mode: "tags" }),
               onRemove: removeChannel,
             })
           : selectedRailRow && selectedRailRow.auto
@@ -1366,6 +1561,9 @@
         : null,
       sheet && sheet.mode === "source"
         ? h(CreateChannelSheet, { onClose: () => setSheet(null), onCreate: relinkChannel, editingChannel: selected })
+        : null,
+      sheet && sheet.mode === "tags"
+        ? h(TagPickSheet, { channel: selected, onClose: () => setSheet(null), onDone: patchSelectedSource })
         : null,
       sheet && sheet.mode === "settings"
         ? h(SettingsSheet, { catalog, onClose: () => setSheet(null), onPatchSettings: patchSettings })

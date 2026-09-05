@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.0 (unreleased)
+- Multi-tag sources: a tag channel can air from a SET of tags — a scene
+  matching ANY of them airs (`tags INCLUDES depth -1`, union semantics).
+  Sources carry canonical `source.ids` (sorted, with `id` mirroring the first);
+  old single-id catalogs load unchanged. `rotation_version` now hashes the
+  whole tag set; `resolve_source` labels sets "kids, comedy +1" and reports
+  exists-when-any-exists. Additive: contract stays v1, the TV app is unaffected.
+- Channel Studio: tag channels show their tags as removable pills in the editor
+  ("Airing from"), with a dashed "+ Add tag" pill opening a multi-pick tag
+  sheet; the rail summarizes sets ("Tags · kids, comedy +1") and flags deleted
+  tags ("1 tag missing"); switching a multi-tag channel to another lineup kind
+  asks first. Single-tag channels render as a one-pill set — no migration.
+
 ## 0.2.0 (2026-09-05)
 Published programming plus the reliability pass from the 2026-09-04 integration
 audit (docs/AUDIT-2026-09-04.md). Contract v1 unchanged; all response additions

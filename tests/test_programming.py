@@ -158,6 +158,17 @@ def test_draft_preview_does_not_publish_or_advance_deck(tmp_path):
     assert file.read_bytes() == before
 
 
+def test_preview_accepts_publications_stored_before_multi_tag(tmp_path):
+    old = p.build(channel(), entries(), now=0)
+    legacy = copy.deepcopy(old)
+    legacy['source'] = {"type": "tag", "id": "1"}  # stored before tag sets existed
+    snapshots.write_json(p.path(tmp_path, channel()['id']), legacy)
+    draft = channel()
+    draft['source'] = {"type": "tag", "id": "1", "ids": ["1"]}
+    result = p.preview(tmp_path, draft, now=p.HOUR // 2)
+    assert result['status'] == 'preview'
+
+
 def test_source_change_cannot_preview_using_old_membership(tmp_path):
     snapshots.write_json(p.path(tmp_path, channel()['id']), p.build(channel(), entries(), now=0))
     draft = channel()

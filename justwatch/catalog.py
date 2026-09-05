@@ -115,7 +115,7 @@ def _require_storable_shape(raw: dict, path: Path) -> None:
             raise bad(f"channels[{i}] ({ch_id}) has a non-string name")
         source = ch.get("source")
         if not isinstance(source, dict) or source.get("type") not in contract.SOURCE_TYPES \
-                or not _DIGITS_RE.match(str(source.get("id", ""))):
+                or not _valid_source_identity(source):
             raise bad(f"channels[{i}] ({ch_id}) has an invalid source")
         if ch.get("sort") not in contract.SORTS:
             raise bad(f"channels[{i}] ({ch_id}) has unknown sort {ch.get('sort')!r}")
@@ -267,9 +267,18 @@ def validate(raw: Any) -> tuple[list[dict], dict]:
             err(f"{prefix}.source", "bad_source",
                 f"source.type must be one of: {', '.join(contract.SOURCE_TYPES)}")
         else:
+            ids = source.get("ids")
+            ids_ok = False
+            if source.get("type") == "tag" and ids is not None:
+                ids_ok = _valid_tag_ids(ids)
+                if not ids_ok:
+                    err(f"{prefix}.source.ids", "bad_source_ids",
+                        "source.ids must be a non-empty list of numeric ids")
             src_id = source.get("id")
             if not isinstance(src_id, (str, int)) or not _DIGITS_RE.match(str(src_id)):
-                err(f"{prefix}.source.id", "bad_source_id", "source.id must be a numeric id")
+                # A tag set may legally carry membership in ids alone.
+                if not ids_ok:
+                    err(f"{prefix}.source.id", "bad_source_id", "source.id must be a numeric id")
 
         seed = ch.get("seed")
         if isinstance(seed, bool) or not isinstance(seed, int) or not (0 <= seed <= MAX_SEED):
@@ -304,10 +313,7 @@ def normalize(raw: dict) -> dict:
             "name": _as_text(ch.get("name")),
             "glyph": ch.get("glyph"),
             "color": _as_text(ch.get("color")).lower(),
-            "source": {
-                "type": source.get("type"),
-                "id": str(source.get("id", "")),
-            },
+            "source": _canonical_source(source),
             "sourceLabel": _as_text(ch.get("sourceLabel")),
             "sort": ch.get("sort"),
             "seed": ch.get("seed") if _valid_seed(ch.get("seed")) else new_seed(),
@@ -328,6 +334,40 @@ def _as_text(value: Any) -> str:
     if value is None:
         return ""
     return value if isinstance(value, str) else str(value)
+
+
+def _valid_tag_ids(ids: Any) -> bool:
+    return isinstance(ids, list) and bool(ids) and all(
+        not isinstance(x, bool) and isinstance(x, (str, int)) and _DIGITS_RE.match(str(x))
+        for x in ids
+    )
+
+
+def _valid_source_identity(source: dict) -> bool:
+    """What a stored source must satisfy for ANY load path to proceed."""
+    if _DIGITS_RE.match(str(source.get("id", ""))):
+        return True
+    # A tag set may carry its membership in ids alone (legacy files never do,
+    # but hand-edited ones may; normalize mirrors ids[0] into id).
+    return source.get("type") == "tag" and _valid_tag_ids(source.get("ids"))
+
+
+def _canonical_source(source: dict) -> dict:
+    """Canonical stored source: tag channels carry a sorted, deduped ``ids``
+    set (with ``id`` mirroring the first) so hashes and equality stay stable
+    regardless of the order the UI sent. Other kinds stay single-id."""
+    kind = source.get("type")
+    if kind != "tag":
+        return {"type": kind, "id": str(source.get("id", ""))}
+    pool = {str(x) for x in (source.get("ids") if isinstance(source.get("ids"), list) else [])
+            if _DIGITS_RE.match(str(x))}
+    single = str(source.get("id", ""))
+    if _DIGITS_RE.match(single):
+        pool.add(single)
+    if not pool:
+        return {"type": kind, "id": ""}
+    ordered = sorted(pool, key=int)
+    return {"type": kind, "id": ordered[0], "ids": ordered}
 
 
 def _valid_seed(seed: Any) -> bool:

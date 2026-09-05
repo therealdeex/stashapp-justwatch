@@ -63,6 +63,29 @@ def _strip_origin(url: str) -> str:
     return url or ""
 
 
+def tag_ids(source: dict) -> list[str]:
+    """A tag source's tag ids: the canonical ``ids`` set, else the single ``id``.
+    Sorted numerically so equal sets are identical regardless of input order."""
+    ids = source.get("ids")
+    if isinstance(ids, list):
+        out = {str(x) for x in ids if str(x).isdigit()}
+        if out:
+            return sorted(out, key=int)
+    only = str(source.get("id", ""))
+    return [only] if only.isdigit() else []
+
+
+def source_key(source: dict) -> tuple:
+    """Equality identity of a source, tolerant of legacy single-id tag shapes.
+
+    Publications stored before multi-tag support embed ``{type, id}``; every
+    source comparison must go through this so those still match.
+    """
+    if source.get("type") == "tag":
+        return ("tag", tuple(tag_ids(source)))
+    return (str(source.get("type")), str(source.get("id", "")))
+
+
 def build_scene_filter(source: dict, object_filter: dict | None = None) -> dict:
     """Project a channel source into a ``SceneFilterType`` variable.
 
@@ -76,7 +99,9 @@ def build_scene_filter(source: dict, object_filter: dict | None = None) -> dict:
             raise LookupError("saved filter has no stored object filter")
         return object_filter
     if source_type == "tag":
-        return {"tags": {"value": [source_id], "modifier": "INCLUDES", "depth": -1}}
+        # INCLUDES with several values is a union: a scene tagged with ANY of
+        # them airs (depth -1 keeps sub-tags of every pill in the set).
+        return {"tags": {"value": tag_ids(source), "modifier": "INCLUDES", "depth": -1}}
     if source_type == "performer":
         return {"performers": {"value": [source_id], "modifier": "INCLUDES"}}
     if source_type == "studio":
@@ -116,7 +141,7 @@ def rotation_version(source: dict, sort: str, seed: int, size: int) -> str:
     clients compare versions to drop stale cached lineups.
     """
     basis = json.dumps(
-        [source.get("type"), str(source.get("id", "")), sort, int(seed), int(size)],
+        [*source_key(source), sort, int(seed), int(size)],
         sort_keys=True,
     )
     return hashlib.sha1(basis.encode("utf-8")).hexdigest()[:12]
@@ -257,16 +282,25 @@ def resolve_source(client: Any, source: dict) -> tuple[str, bool]:
     """Resolve a source's display label and existence.
 
     Returns ``(label, exists)``. Saved filters must be SCENES-mode; a
-    non-scenes filter is reported as missing (it cannot air scenes).
+    non-scenes filter is reported as missing (it cannot air scenes). A tag set
+    exists when ANY of its tags exists (the channel still airs), and its label
+    names the first two tags with an overflow count.
     """
     source_type = source.get("type")
     source_id = str(source.get("id", ""))
+    if source_type == "tag":
+        names = []
+        for tid in tag_ids(source):
+            data = client.submit(FIND_ENTITY_NAME, {"id": tid})
+            node = (data or {}).get("findTag") or {}
+            name = str(node.get("name") or "").strip()
+            if name:
+                names.append(name)
+        return _join_labels(names), bool(names)
     if not source_id.isdigit():
         return "", False
     data = client.submit(FIND_ENTITY_NAME, {"id": source_id})
-    if source_type == "tag":
-        node = (data or {}).get("findTag") or {}
-    elif source_type == "performer":
+    if source_type == "performer":
         node = (data or {}).get("findPerformer") or {}
     elif source_type == "studio":
         node = (data or {}).get("findStudio") or {}
@@ -278,3 +312,9 @@ def resolve_source(client: Any, source: dict) -> tuple[str, bool]:
         return "", False
     label = str(node.get("name") or "").strip()
     return label, bool(label)
+
+
+def _join_labels(names: list[str]) -> str:
+    if len(names) <= 2:
+        return ", ".join(names)
+    return ", ".join(names[:2]) + f" +{len(names) - 2}"

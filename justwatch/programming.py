@@ -285,7 +285,10 @@ def desk(data_dir, channels):
 
 def preview(data_dir, channel, now=None):
     previous = read(data_dir, channel["id"])
-    if not previous or previous.get("source") != channel["source"] or not previous.get("index"):
+    # source_key keeps publications stored before multi-tag (source without
+    # "ids") reusable instead of forcing a pointless re-index.
+    if not previous or lineup.source_key(previous.get("source") or {}) != lineup.source_key(channel["source"]) \
+            or not previous.get("index"):
         return {"status": "needsIndex", "programs": [], "message": "Prepare this channel once before trying different programming."}
     now = int(time.time() * 1000) if now is None else now
     draft = build(channel, previous["index"], previous, now=now)

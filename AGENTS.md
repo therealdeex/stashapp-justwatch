@@ -1,6 +1,6 @@
 # stash-justwatch — project knowledge
 
-**Status:** v0.2.0, contract version 1. Companion plugin for the TV app's
+**Status:** v0.3.0, contract version 1. Companion plugin for the TV app's
 Just Watch feature (repo `~/dev/StashAppAndroidTV`).
 
 ## Architecture
