@@ -741,7 +741,10 @@
       draft
         ? h(OnAirStrip, { channel: draft, isDraft: true })
         : h("div", { className: "jw-editor-section" },
-            h("div", { className: "jw-missing-note" }, "This channel pools several members; open the TV guide to see what's playing."),
+            h("div", { className: "jw-missing-note" },
+              r.kind === "tags"
+                ? "This channel pools every tag matching its theme; open the TV guide to see what's playing."
+                : "This channel pools several members; open the TV guide to see what's playing."),
           ),
       h("div", { className: "jw-editor-section" },
         h("div", { className: "jw-missing-note" }, "Generated automatically from your library — shape it with the thresholds in Tuning (⚙), or create a custom channel to take over a number."),
