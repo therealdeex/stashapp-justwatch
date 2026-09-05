@@ -83,14 +83,35 @@ def source_key(source: dict) -> tuple:
     """
     if source.get("type") == "tag":
         return ("tag", tuple(tag_ids(source)))
+    if source.get("type") == "filter":
+        return ("filter", _canonical_filter(source))
     return (str(source.get("type")), str(source.get("id", "")))
+
+
+def _filter_ids(value: Any) -> list[str]:
+    """A filter source's id list for one criterion: digits only, sorted, deduped."""
+    if not isinstance(value, list):
+        return []
+    out = {str(x) for x in value if str(x).isdigit()}
+    return sorted(out, key=int)
+
+
+def _canonical_filter(source: dict) -> tuple:
+    """Hash-stable form of a ``filter`` source: sorted id lists per criterion."""
+    return tuple(
+        (criterion, tuple(_filter_ids(source.get(criterion))))
+        for criterion in ("tags", "excludeTags", "performers", "studios")
+    )
 
 
 def build_scene_filter(source: dict, object_filter: dict | None = None) -> dict:
     """Project a channel source into a ``SceneFilterType`` variable.
 
     ``object_filter`` carries a saved filter's stored ``object_filter`` (used
-    verbatim); entity sources project directly.
+    verbatim); entity sources project directly. A ``filter`` source is the
+    network tier's composite: ALL-of semantics per include criterion (the
+    curation intersections the CSV validated), ``excludeTags`` riding the tags
+    criterion's ``excludes`` (any-of exclusion, hierarchical like the include).
     """
     source_type = source.get("type")
     source_id = str(source.get("id", ""))
@@ -106,6 +127,26 @@ def build_scene_filter(source: dict, object_filter: dict | None = None) -> dict:
         return {"performers": {"value": [source_id], "modifier": "INCLUDES"}}
     if source_type == "studio":
         return {"studios": {"value": [source_id], "modifier": "INCLUDES", "depth": -1}}
+    if source_type == "filter":
+        out: dict[str, Any] = {}
+        tags = _filter_ids(source.get("tags"))
+        exclude_tags = _filter_ids(source.get("excludeTags"))
+        performers = _filter_ids(source.get("performers"))
+        studios = _filter_ids(source.get("studios"))
+        if not (tags or performers or studios):
+            raise ValueError("filter source has no include criteria")
+        if tags or exclude_tags:
+            criterion: dict[str, Any] = {
+                "value": tags, "modifier": "INCLUDES_ALL", "depth": -1,
+            }
+            if exclude_tags:
+                criterion["excludes"] = exclude_tags
+            out["tags"] = criterion
+        if performers:
+            out["performers"] = {"value": performers, "modifier": "INCLUDES_ALL"}
+        if studios:
+            out["studios"] = {"value": studios, "modifier": "INCLUDES_ALL", "depth": -1}
+        return out
     raise ValueError(f"unknown source type: {source_type!r}")
 
 

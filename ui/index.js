@@ -484,21 +484,24 @@
           row.count != null ? formatCount(row.count)
             : row.members != null ? row.members + (row.members === 1 ? " member" : " members")
               : "";
-        const group = row.kind && /Group|Spillover$/.test(row.kind);
+        const network = row.origin === "network";
+        const group = !network && row.kind && /Group|Spillover$/.test(row.kind);
         return {
-          sel: "auto:" + section + ":" + row.number + ":" + row.name,
+          sel: network ? "auto:" + section + ":" + row.id
+            : "auto:" + section + ":" + row.number + ":" + row.name,
           number: row.number,
           name: row.name,
-          glyph: SECTION_GLYPHS[section] || "\uf111",
-          color: group ? GROUP_SLATE : AUTO_SLATE,
-          sub: countText ? countText + " · automatic" : "automatic",
+          glyph: row.glyph || SECTION_GLYPHS[section] || "\uf111",
+          color: row.color || (group ? GROUP_SLATE : AUTO_SLATE),
+          sub: countText ? countText + " · " + (network ? "network" : "automatic")
+            : network ? "network" : "automatic",
           badges,
           auto: { section, row },
         };
       };
       sections.push({
         label: "General",
-        note: fullDir.curatedDialNote,
+        note: fullDir.networksNote != null ? fullDir.networksNote : fullDir.curatedDialNote,
         rows: (fullDir.general && fullDir.general.tagChannels || []).map((r) => autoRow(r, "general")),
       });
       sections.push({
@@ -945,10 +948,11 @@
     );
   }
 
-  /** Read-only detail for an automatic (library-derived) channel. */
+  /** Read-only detail for an automatic (library-derived) or network channel. */
   function AutoChannelPane({ row }) {
     const info = row.auto;
     const r = info.row;
+    const network = r.origin === "network";
     const soloSource =
       r.kind === "studio" ? { type: "studio", id: r.id }
         : r.kind === "performer" ? { type: "performer", id: r.id }
@@ -960,10 +964,12 @@
           source: soloSource, sort: "shuffle", seed: 0, enabled: true,
         }
       : null;
+    const tileGlyph = network ? (r.glyph || SECTION_GLYPHS[info.section] || "\uf111") : (SECTION_GLYPHS[info.section] || "\uf111");
+    const tileColor = network ? (r.color || AUTO_SLATE) : (r.kind && /Group|Spillover$/.test(r.kind) ? GROUP_SLATE : AUTO_SLATE);
 
     return h("div", { className: "jw-editor" },
       h("div", { className: "jw-network-card" },
-        h(GlyphTile, { codepoint: SECTION_GLYPHS[info.section] || "\uf111", color: r.kind && /Group|Spillover$/.test(r.kind) ? GROUP_SLATE : AUTO_SLATE, size: 56 }),
+        h(GlyphTile, { codepoint: tileGlyph, color: tileColor, size: 56 }),
         h("div", { className: "jw-network-id" },
           h("div", { className: "jw-name-input jw-name-readonly" }, r.name),
           h("div", { className: "jw-swap-note" }, r.number != null ? "Channel " + r.number : "Unnumbered"),
@@ -975,10 +981,11 @@
           h("div", { className: "jw-field" },
             h("div", { className: "jw-field-label" }, "Airing from"),
             h("div", { className: "jw-field-value jw-auto-note" },
-              r.kind === "tags" ? "Tags matching this channel's theme"
-                : r.kind === "studio" ? "Studio"
-                  : r.kind === "performer" ? "Performer"
-                    : r.count != null || r.members != null ? "A group of related " + (info.section === "studios" ? "studios" : "performers") : ""),
+              network ? (r.sourceLabel || "Curated network")
+                : r.kind === "tags" ? "Tags matching this channel's theme"
+                  : r.kind === "studio" ? "Studio"
+                    : r.kind === "performer" ? "Performer"
+                      : r.count != null || r.members != null ? "A group of related " + (info.section === "studios" ? "studios" : "performers") : ""),
           ),
           h("div", { className: "jw-field" },
             h("div", { className: "jw-field-label" }, "Size"),

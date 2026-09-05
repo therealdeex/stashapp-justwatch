@@ -1,6 +1,32 @@
 # Changelog
 
-## 0.3.0 (unreleased)
+## 0.4.0 (2026-09-05)
+
+The network tier: the owner's curated channel list (800 networks, 100–899)
+compiled from `data/proposed_channels_scene_validated.csv` now replaces the TV
+app's client-generated General/Studios/Performers sections — the dial becomes
+1–99 My Channels plus the curated 100–899 band. Contract stays v1; every
+change is additive and deploy-order safe (an old plugin or app falls back to
+the legacy generation).
+
+- `tools/import_channels.py`: CSV → `justwatch/networks.json`. Deterministic
+  (ids/seeds hash the row identity — re-import never reshuffles rotations),
+  strict (family, logic flags, name length, duplicate numbers, singleton
+  studios). Section + brand glyph/color per family.
+- New `filter` source type (network tier only): ALL-of tags / performers /
+  studios plus any-of tag exclusions, projected in `build_scene_filter` to
+  `INCLUDES_ALL` / `excludes` / `depth -1` — one rotation code path for every
+  tier. `source_key`/`rotation_version` hash the canonical filter.
+- `Directory` gains a `networks` block (revision + channels with
+  owner numbers, brand, section, validated counts); `Lineup` serves `net_`
+  channels through the same bounded rotation; `FullDirectory` sections now
+  come from the tier with zero Stash queries (the autodir library tiering is
+  retired along with `specs.json`). Capabilities advertises
+  `features.networks`.
+- Network channels are read-only: never in catalog.json, never snapshot
+  computed (CSV counts are the health), fixed programming mode.
+
+## 0.3.0 (2026-09-04)
 - Multi-tag sources: a tag channel can air from a SET of tags — a scene
   matching ANY of them airs (`tags INCLUDES depth -1`, union semantics).
   Sources carry canonical `source.ids` (sorted, with `id` mirroring the first);

@@ -4,8 +4,10 @@ description: >-
   own TV channels (numbers 1-99) from the Stash web UI and tune them on the TV.
   Custom lineups are built from saved scene filters, tags, performers, or
   studios; the TV app pulls the lineup and the broadcast schedule stays
-  deterministic. Includes the Channel Studio editor page. Targets Stash v0.31.1.
-version: 0.3.0
+  deterministic. Ships the owner's curated network tier (channels 100+, from
+  the channel CSV) which replaces the TV app's generated sections, and the
+  Channel Studio editor page. Targets Stash v0.31.1.
+version: 0.4.0
 url: https://example.invalid/stash-justwatch
 
 exec:

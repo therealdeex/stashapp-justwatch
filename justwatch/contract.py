@@ -11,11 +11,15 @@ PLUGIN_ID = "stash-justwatch"
 CONTRACT_VERSION = 1
 SCHEMA_VERSION = 1
 
-#: Channel numbers reserved for custom channels. The TV dial uses 101-160 for
-#: curated networks and 201+ for auto-generated channels; 1-99 is the free
-#: "low band" that sits first in the flip order.
+#: Channel numbers reserved for custom channels. The network tier (the
+#: owner's curated list compiled into networks.json) numbers from 100 up;
+#: 1-99 is the free "low band" that sits first in the flip order.
 MIN_CHANNEL_NUMBER = 1
 MAX_CHANNEL_NUMBER = 99
+
+#: The network tier's number band (informational; the Directory payload
+#: carries the authoritative channels).
+MIN_NETWORK_NUMBER = 100
 
 #: The active rotation policy. A channel airs a bounded, ordered window over
 #: its source — up to ROTATION_SIZE *playable* scenes in the channel's own
@@ -108,6 +112,9 @@ def capabilities(plugin_version: str) -> dict:
         "features": {
             "publishedSchedule": {"version": 1, "pageSize": 50, "horizonHours": 72},
             "customChannels": True,
+            # The owner's curated network tier (Directory.networks): replaces
+            # the TV app's client-generated General/Studios/Performers.
+            "networks": {"version": 1, "minNumber": MIN_NETWORK_NUMBER},
             # The plugin exposes tuning settings, but they govern its own
             # computed directory, not the TV app's generated channels.
             "globalSettings": True,

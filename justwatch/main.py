@@ -32,14 +32,14 @@ _PLUGIN_ROOT = str(Path(__file__).resolve().parent.parent)
 if _PLUGIN_ROOT not in sys.path:
     sys.path.insert(0, _PLUGIN_ROOT)
 
-from justwatch import autodir, catalog, contract, lineup, snapshots, programming  # noqa: E402
+from justwatch import catalog, contract, lineup, networks, snapshots, programming  # noqa: E402
 from justwatch.stash_client import (  # noqa: E402
     GraphQLAuthError,
     GraphQLClientError,
     StashClient,
 )
 
-PLUGIN_VERSION = "0.3.0"
+PLUGIN_VERSION = "0.4.0"
 
 SYNC_MODES = frozenset({
     "capabilities", "directory", "full_directory", "lineup", "preview_lineup",
@@ -136,7 +136,13 @@ def _op_get_catalog(ctx: TaskContext) -> dict:
 
 
 def _op_directory(ctx: TaskContext) -> dict:
-    """The TV app's view: enabled channels only, no catalog internals."""
+    """The TV app's view: enabled channels only, no catalog internals.
+
+    The ``networks`` block carries the owner's curated tier (channels 100+)
+    which replaces the TV's client-generated sections; it is absent entirely
+    when this deployment has no networks file, so older clients keep their
+    fallback path.
+    """
     current = catalog.load(ctx.data_dir)
     snapshot = snapshots.read_snapshot(ctx.data_dir, ctx.assets_dir)
     health = snapshot.get("channels", {}) if snapshot.get("revision") == current.get("revision") else {}
@@ -156,12 +162,16 @@ def _op_directory(ctx: TaskContext) -> dict:
             "programmingMode": programming.policy(channel.get("programming"))["mode"],
             "sceneCount": health.get(channel.get("id") or "", {}).get("sceneCount"),
         })
-    return {
+    result = {
         "pluginId": contract.PLUGIN_ID,
         "contractVersion": contract.CONTRACT_VERSION,
         "revision": current.get("revision", 0),
         "channels": channels,
+        "networks": networks.directory_payload(),
     }
+    if result["networks"] is None:
+        del result["networks"]
+    return result
 
 
 def _find_channel(current: dict, channel_id: str) -> dict | None:
@@ -176,6 +186,9 @@ def _op_lineup(ctx: TaskContext) -> dict:
     per_page = min(100, max(1, _as_int(ctx.args.get("perPage"), contract.ROTATION_SIZE)))
     if not channel_id:
         raise ValueError("channelId is required")
+    network = networks.get(channel_id)
+    if network is not None:
+        return _network_lineup(ctx, network, per_page)
     current = catalog.load(ctx.data_dir)
     channel = _find_channel(current, channel_id)
     if channel is None or not channel.get("enabled", True):
@@ -186,9 +199,24 @@ def _op_lineup(ctx: TaskContext) -> dict:
         "channelId": channel_id,
         "revision": revision,
         "sort": channel.get("sort"),
-        # Rotation identity: ordering hash + the catalog revision that
-        # published it. Clients compare this to drop stale cached lineups.
+        # Rotation identity: ordering hash + the revision that published it.
+        # Clients compare this to drop stale cached lineups.
         "rotationVersion": f"r{revision}-{result['rotationVersion']}",
+    })
+    return result
+
+
+def _network_lineup(ctx: TaskContext, network: dict, per_page: int) -> dict:
+    """A network channel's rotation: the same bounded-rotation machinery as
+    custom channels (one rotation policy everywhere), keyed by the network's
+    own content revision instead of the catalog's."""
+    result = _lineup_for_channel(ctx, network, per_page, include_paths=False)
+    revision = networks.revision([network])
+    result.update({
+        "channelId": network["id"],
+        "revision": revision,
+        "sort": network.get("sort"),
+        "rotationVersion": f"n{revision}-{result['rotationVersion']}",
     })
     return result
 
@@ -406,19 +434,38 @@ def _op_refresh_data(ctx: TaskContext) -> dict:
 
 def _op_full_directory(ctx: TaskContext) -> dict:
     """The complete lineup for the Channel Studio: custom channels PLUS the
-    auto-generated General (tags) / Studios / Performers sections, computed
-    with the same tiering the TV app uses. The curated 101–160 dial lives in
-    the app itself and is represented here only by a note.
-    """
+    owner's curated networks, which replaced the General/Studios/Performers
+    tiering the TV app used to generate client-side. Pure file reads — no
+    Stash queries; network health is the CSV-validated count."""
     current = catalog.load(ctx.data_dir)
-    sections = autodir.build_full_directory(ctx.client.submit, current.get("settings") or {})
+    grouped = networks.sections()
+
+    def rows(section: str) -> list[dict]:
+        return [
+            {
+                "id": ch["id"],
+                "number": ch["number"],
+                "name": ch["name"],
+                "glyph": ch["glyph"],
+                "color": ch["color"],
+                "kind": ch["family"],
+                "count": ch["count"],
+                "offAir": ch["count"] <= 0,
+                "origin": "network",
+                "sourceLabel": ch["sourceLabel"],
+            }
+            for ch in grouped[section]
+        ]
+
     return {
         "pluginId": contract.PLUGIN_ID,
         "contractVersion": contract.CONTRACT_VERSION,
         "revision": current.get("revision", 0),
         "custom": _op_directory(ctx)["channels"],
-        **sections,
-        "curatedDialNote": "Channels 101–160 are the built-in Just Watch networks curated in the TV app.",
+        "general": {"tagChannels": rows("general")},
+        "studios": {"channels": rows("studios")},
+        "performers": {"channels": rows("performers")},
+        "networksNote": "Channels 100+ are the owner's curated networks (networks.json).",
     }
 
 
