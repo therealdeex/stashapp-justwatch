@@ -139,6 +139,27 @@ Networks" (legacy legend otherwise).
 - Dev Stash web login is interactive-only (no stored creds); API access uses
   the key file above.
 
+## Production deployment
+
+- **Prod Stash** runs on `192.168.8.40` (`docker-personal.manx-teeth.ts.net`,
+  SSH as shahram) — NOT docker: systemd unit `stash.service`, working dir
+  `/mnt/stash-virtiofs/stashapp`, `plugins_path: /mnt/stash-virtiofs/stashapp/plugins`.
+- The prod plugin install is a plain copy (not git, not symlink):
+  `/home/shahram/dev/stash-justwatch` on that host. Deploy with
+  `rsync -az --delete --exclude '.git' ./ shahram@192.168.8.40:/home/shahram/dev/stash-justwatch/`
+  then `reloadPlugins` over GraphQL (Apikey header; a working API key is in
+  the prod stick's `run-as ... shared_prefs ... stashApiKey`).
+- Prod stick **192.168.8.169:5555 runs the debug-signed APK** (same keystore
+  as dev) — `adb install -r` of the armeabi-v7a APK works in place. HARD RULE
+  from that repo still applies: no screenshots/UI inspection against prod
+  (adult content); verify via the plugin GraphQL surface and logcat only.
+- Deployment order is safe either way: an old APK ignores `Directory.networks`;
+  a new APK falls back to legacy generation without the block. Deploy the
+  plugin first, then the APK.
+- Prod validation (read-only): run `Directory`/`Lineup` via `runPluginOperation`
+  and compare projected-filter `findScenes.count` vs the CSV's
+  `exact_scene_count` — 2026-09-05 sweep: 54/54 exact across all 9 families.
+
 | Op | Mode token | Sync? | Purpose |
 | --- | --- | --- | --- |
 | Capabilities | `Capabilities` | yes | handshake (advertises rotation policy + networks feature) |
