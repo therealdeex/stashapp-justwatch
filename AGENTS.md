@@ -98,6 +98,19 @@ brand-tinted number cells, flip order wraps 99 → 101.
 
 ## Ops quick reference
 
+## Deployment (this machine, dev-lab2)
+
+- Plugin deploys by symlink: `/opt/stash-dev/plugins/stash-justwatch` → this
+  repo; apply changes with Stash **Settings → Plugins → reload** (or the
+  `reloadPlugins` mutation). Dev Stash listens on **:9998** (all interfaces) —
+  LAN `192.168.8.123:9998`, tailscale `100.99.132.40:9998`; the API key file is
+  `/opt/stash-dev/API_KEY`. Use port 9998 consistently for this server.
+- Programming scheduler: systemd user units `stash-justwatch-programming.{service,timer}`
+  (hourly), env at `~/.config/stash-justwatch/scheduler.env` (`STASH_URL`,
+  `STASH_API_KEY_FILE`). Install steps are in README.
+- TV app: build debug APK in `~/dev/StashAppAndroidTV` (`./gradlew assembleDebug`);
+  emulator AVD `@stash-tv-api36`, Fire TV stick via adb (see that repo's AGENTS.md).
+
 | Op | Mode token | Sync? | Purpose |
 | --- | --- | --- | --- |
 | Capabilities | `Capabilities` | yes | handshake (advertises rotation policy) |
