@@ -1,6 +1,6 @@
 # stash-justwatch — project knowledge
 
-**Status:** v0.4.0, contract version 1. Companion plugin for the TV app's
+**Status:** v0.5.0, contract version 1. Companion plugin for the TV app's
 Just Watch feature (repo `~/dev/StashAppAndroidTV`).
 
 ## Architecture
@@ -72,6 +72,13 @@ beyond stdlib (+ optional PyYAML for the API-key fallback). Data flow:
   rotations. Network source ids are DATABASE ids of the Stash the CSV was
   validated against; against any other library the tier airs empty. Absent
   file = absent `networks` block = clients keep their legacy generation.
+- **Nowhere-tags (v0.5.0):** every network row excludes tag `9320` ("JAV",
+  434 scenes) — JAV airs ONLY where the owner puts it (custom channel 1) and
+  never on a network. Policy lives in the CSV's `exclude_tag_ids_any`
+  columns; apply new nowhere-tags with
+  `tools/recount_channels.py --exclude-tag ID=NAME --write` (idempotent,
+  recounts too), never by hand. Counts are recomputed with the same
+  projection the runtime serves, so keep it that way.
 - **Optimistic concurrency, process-safe for writes:** saves must carry
   `expectedRevision`; mismatch is `revision_conflict` with `currentRevision`.
   Revision increments by 1 per save. The check+write section runs under
@@ -156,9 +163,11 @@ Networks" (legacy legend otherwise).
 - Deployment order is safe either way: an old APK ignores `Directory.networks`;
   a new APK falls back to legacy generation without the block. Deploy the
   plugin first, then the APK.
-- Prod validation (read-only): run `Directory`/`Lineup` via `runPluginOperation`
-  and compare projected-filter `findScenes.count` vs the CSV's
-  `exact_scene_count` — 2026-09-05 sweep: 54/54 exact across all 9 families.
+- Prod validation (read-only): the sweep is scripted —
+  `python3 tools/recount_channels.py --check --url http://192.168.8.40:9999
+  --api-key-file <key>` (exits non-zero on drift vs the CSV). 2026-09-06:
+  800/800 exact after the JAV policy recount (the 2026-09-05 manual 54/54
+  sample predated real library drift — 15 rows had grown stale).
 
 | Op | Mode token | Sync? | Purpose |
 | --- | --- | --- | --- |

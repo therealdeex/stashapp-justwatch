@@ -121,7 +121,24 @@ python3 -m pytest tests/ -q             # then test + reload plugins in Stash
 The import is deterministic (ids and seeds hash the row identity), so
 re-importing an unchanged CSV is a no-op and rotations never reshuffle.
 Section assignment: `performer_*` families -> Performers, `studio_*` ->
-Studios, `tag_*` -> General; brand glyph/color per section.
+Studios, `tag_*` families -> General; brand glyph/color per section.
+
+`exact_scene_count` is the tier's health data — the importer trusts it
+verbatim — so recompute it whenever criteria or library change, and sweep it
+periodically, with `tools/recount_channels.py` (run against the Stash the
+CSV's ids belong to; credentials from `--url`/`--api-key-file` or the
+`STASH_URL`/`STASH_API_KEY_FILE` env vars):
+
+```bash
+python3 tools/recount_channels.py --check                  # validation sweep
+python3 tools/recount_channels.py --exclude-tag 9320=JAV --write   # policy + recount
+python3 tools/import_channels.py                           # then re-import
+```
+
+`--exclude-tag ID=NAME` is the "this tag airs nowhere in the network tier"
+knob (idempotent, appends to every row's any-of exclusions); without
+`--write` the run reports drift only. Counts only mean anything against the
+library the CSV was validated against — the ids are Stash database ids.
 
 ## Development
 

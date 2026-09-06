@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.5.0 (2026-09-06)
+
+JAV confinement in the network tier + the recount loop that keeps the CSV's
+counts honest. No plugin runtime changes — the composite filter projection
+already carried any-of exclusions end to end; this release is policy (CSV),
+tooling, and truth maintenance. Contract stays v1.
+
+- Tag policy: every one of the 800 network rows now excludes tag `9320`
+  ("JAV", 434 scenes) — JAV airs only where the owner puts it (today: the
+  custom "JAV" channel 1), never on a network. Applied and recounted in one
+  pass; ids/seeds unchanged, rotations re-versioned through the canonical
+  filter hash.
+- `tools/recount_channels.py`: recounts `exact_scene_count` +
+  `library_share_pct` per row against the owning library, projecting each
+  row exactly as the runtime does (importer `build_source` ->
+  `lineup.build_scene_filter`), so counts and aired lineups cannot disagree
+  about membership. `--check` is the re-runnable validation sweep (exits
+  non-zero on drift); `--exclude-tag ID=NAME` applies the nowhere-but-its-
+  own-channel policy idempotently before recounting; `--write` persists.
+  First full sweep: 800/800 exact (the 2026-09-05 sample was 54/54; the
+  library had drifted past it — 15 rows recounted upward, e.g. New
+  Sensations Vault 413 -> 1046, independent of the JAV policy).
+- Importer polish: `sourceLabel` joins multiple excluded tag names with
+  ", " instead of the raw pipe (rows now carry two).
+- Four all-JAV networks now air empty by design (Madonna Selects, Nagae
+  Style Showcase, Madonna: Wrong Side of the Bed Nights -> 0; Hunter Vault
+  -> 1); rows kept for the owner to prune or keep.
+
 ## 0.4.0 (2026-09-05)
 
 The network tier: the owner's curated channel list (800 networks, 100–899)

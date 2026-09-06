@@ -132,8 +132,9 @@ def source_label(row: dict) -> str:
     if tags:
         parts.append(" × ".join(tags))
     label = " · ".join(parts)
-    if row["exclude_tags_any"].strip():
-        label += f" (without {row['exclude_tags_any'].strip()})"
+    exclude_names = split_names(row["exclude_tags_any"])
+    if exclude_names:
+        label += f" (without {', '.join(exclude_names)})"
     return label
 
 
