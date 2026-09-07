@@ -131,14 +131,18 @@ CSV's ids belong to; credentials from `--url`/`--api-key-file` or the
 
 ```bash
 python3 tools/recount_channels.py --check                  # validation sweep
-python3 tools/recount_channels.py --exclude-tag 9320=JAV --write   # policy + recount
+python3 tools/recount_channels.py \
+  --exclude-tag 9320=JAV --write \
+  --except-row 407 --except-row 461 --except-row 480 --except-row 835   # JAV policy
 python3 tools/import_channels.py                           # then re-import
 ```
 
 `--exclude-tag ID=NAME` is the "this tag airs nowhere in the network tier"
-knob (idempotent, appends to every row's any-of exclusions); without
-`--write` the run reports drift only. Counts only mean anything against the
-library the CSV was validated against — the ids are Stash database ids.
+knob (idempotent, appends to every row's any-of exclusions); `--except-row N`
+exempts a channel from the policy (the four all-JAV studios are the standing
+exception). Without `--write` the run reports drift only. Counts only mean
+anything against the library the CSV was validated against — the ids are
+Stash database ids.
 
 ## Development
 

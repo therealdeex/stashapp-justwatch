@@ -72,13 +72,19 @@ beyond stdlib (+ optional PyYAML for the API-key fallback). Data flow:
   rotations. Network source ids are DATABASE ids of the Stash the CSV was
   validated against; against any other library the tier airs empty. Absent
   file = absent `networks` block = clients keep their legacy generation.
-- **Nowhere-tags (v0.5.0):** every network row excludes tag `9320` ("JAV",
-  434 scenes) — JAV airs ONLY where the owner puts it (custom channel 1) and
-  never on a network. Policy lives in the CSV's `exclude_tag_ids_any`
-  columns; apply new nowhere-tags with
+- **Nowhere-tags (v0.5.0):** every network row EXCEPT the four all-JAV
+  studios (407 Madonna Selects, 461 Nagae Style Showcase, 480 Hunter Vault,
+  835 Madonna: Wrong Side of the Bed Nights — the sanctioned exception, noted
+  in each row's rationale) excludes tag `9320` ("JAV") — JAV airs ONLY where
+  the owner puts it (custom channel 1 + those four) and never on another
+  network. Policy lives in the CSV's `exclude_tag_ids_any` columns; apply new
+  nowhere-tags with
   `tools/recount_channels.py --exclude-tag ID=NAME --write` (idempotent,
-  recounts too), never by hand. Counts are recomputed with the same
-  projection the runtime serves, so keep it that way.
+  recounts too), never by hand — and ALWAYS pass
+  `--except-row 407 --except-row 461 --except-row 480 --except-row 835` so
+  re-applying the JAV policy never re-excludes the exempt studios. Counts are
+  recomputed with the same projection the runtime serves, so keep it that
+  way.
 - **Optimistic concurrency, process-safe for writes:** saves must carry
   `expectedRevision`; mismatch is `revision_conflict` with `currentRevision`.
   Revision increments by 1 per save. The check+write section runs under

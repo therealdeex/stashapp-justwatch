@@ -7,9 +7,10 @@ counts honest. No plugin runtime changes — the composite filter projection
 already carried any-of exclusions end to end; this release is policy (CSV),
 tooling, and truth maintenance. Contract stays v1.
 
-- Tag policy: every one of the 800 network rows now excludes tag `9320`
-  ("JAV", 434 scenes) — JAV airs only where the owner puts it (today: the
-  custom "JAV" channel 1), never on a network. Applied and recounted in one
+- Tag policy: 796 of the 800 network rows now exclude tag `9320` ("JAV",
+  434 scenes) — JAV airs only where the owner puts it (today: the custom
+  "JAV" channel 1 plus the four exempt all-JAV studios), never on another
+  network. Applied and recounted in one
   pass; ids/seeds unchanged, rotations re-versioned through the canonical
   filter hash.
 - `tools/recount_channels.py`: recounts `exact_scene_count` +
@@ -24,9 +25,13 @@ tooling, and truth maintenance. Contract stays v1.
   Sensations Vault 413 -> 1046, independent of the JAV policy).
 - Importer polish: `sourceLabel` joins multiple excluded tag names with
   ", " instead of the raw pipe (rows now carry two).
-- Four all-JAV networks now air empty by design (Madonna Selects, Nagae
-  Style Showcase, Madonna: Wrong Side of the Bed Nights -> 0; Hunter Vault
-  -> 1); rows kept for the owner to prune or keep.
+- JAV's only network homes are the four all-JAV studios, kept on the air by
+  owner decision as the sanctioned exception (407 Madonna Selects, 461 Nagae
+  Style Showcase, 480 Hunter Vault, 835 Madonna: Wrong Side of the Bed
+  Nights — exemption noted in each row's rationale). Every other row
+  excludes JAV. `--except-row N` exempts rows from `--exclude-tag` and fails
+  on unknown numbers, so re-applying the policy can never silently re-exclude
+  the exempt studios.
 
 ## 0.4.0 (2026-09-05)
 

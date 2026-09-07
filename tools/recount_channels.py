@@ -102,13 +102,19 @@ def parse_policies(values: list[str]) -> list[tuple[str, str]]:
     return policies
 
 
-def apply_exclusions(rows: list[dict], policies: list[tuple[str, str]]) -> int:
+def apply_exclusions(
+    rows: list[dict], policies: list[tuple[str, str]], except_numbers: set[str] = frozenset(),
+) -> int:
     """Append each policy tag to every row's exclusion columns, idempotently.
 
-    Ids and names stay aligned because they are only ever appended as a pair.
-    Returns the number of rows changed."""
+    Rows whose ``channel_number`` is excepted keep their criteria untouched
+    (the sanctioned exemptions — e.g. the all-JAV studios under the JAV
+    policy). Ids and names stay aligned because they are only ever appended
+    as a pair. Returns the number of rows changed."""
     changed = 0
     for row in rows:
+        if row.get("channel_number") in except_numbers:
+            continue
         ids = [part for part in (row["exclude_tag_ids_any"] or "").split("|") if part]
         names = [part for part in (row["exclude_tags_any"] or "").split("|") if part]
         before = len(ids)
@@ -169,6 +175,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--csv", type=Path, default=DEFAULT_CSV)
     parser.add_argument("--exclude-tag", action="append", default=[], metavar="ID=NAME",
                         help="append this tag to every row's exclusions (repeatable)")
+    parser.add_argument("--except-row", action="append", default=[], metavar="N",
+                        help="channel_number exempted from --exclude-tag (repeatable); "
+                             "required for the sanctioned exemptions, e.g. the all-JAV studios")
     parser.add_argument("--write", action="store_true",
                         help="rewrite counts (+ shares) into the CSV; default reports only")
     parser.add_argument("--check", action="store_true",
@@ -193,10 +202,18 @@ def main(argv: list[str] | None = None) -> int:
         fail("CSV has no rows")
 
     policies = parse_policies(args.exclude_tag)
+    except_numbers = {value.strip() for value in args.except_row if value.strip()}
+    if except_numbers:
+        known = {row["channel_number"] for row in rows}
+        unknown = sorted(except_numbers - known)
+        if unknown:
+            # A typo'd exemption would silently re-exclude a real channel.
+            fail(f"--except-row numbers not in the CSV: {', '.join(unknown)}")
     if policies:
-        changed = apply_exclusions(rows, policies)
+        changed = apply_exclusions(rows, policies, except_numbers)
         summary = ", ".join(f"{tag_id} ({name})" for tag_id, name in policies)
-        print(f"recount_channels: excluded {summary} on {changed}/{len(rows)} rows")
+        print(f"recount_channels: excluded {summary} on {changed}/{len(rows)} rows"
+              + (f" ({len(except_numbers)} exempt)" if except_numbers else ""))
 
     try:
         api_key = Path(args.api_key_file).read_text(encoding="utf-8").strip()

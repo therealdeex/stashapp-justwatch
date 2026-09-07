@@ -249,7 +249,7 @@
       "color": "#8E24AA",
       "section": "performers",
       "family": "performer_spotlight",
-      "count": 254,
+      "count": 256,
       "sort": "shuffle",
       "seed": 13309547,
       "programmingMode": "fixed",
@@ -393,7 +393,7 @@
       "color": "#8E24AA",
       "section": "performers",
       "family": "performer_spotlight",
-      "count": 220,
+      "count": 221,
       "sort": "shuffle",
       "seed": 1679235862,
       "programmingMode": "fixed",
@@ -681,7 +681,7 @@
       "color": "#8E24AA",
       "section": "performers",
       "family": "performer_spotlight",
-      "count": 181,
+      "count": 182,
       "sort": "shuffle",
       "seed": 725823554,
       "programmingMode": "fixed",
@@ -705,7 +705,7 @@
       "color": "#8E24AA",
       "section": "performers",
       "family": "performer_spotlight",
-      "count": 169,
+      "count": 170,
       "sort": "shuffle",
       "seed": 1597052226,
       "programmingMode": "fixed",
@@ -729,7 +729,7 @@
       "color": "#8E24AA",
       "section": "performers",
       "family": "performer_spotlight",
-      "count": 168,
+      "count": 169,
       "sort": "shuffle",
       "seed": 948117200,
       "programmingMode": "fixed",
@@ -1089,7 +1089,7 @@
       "color": "#8E24AA",
       "section": "performers",
       "family": "performer_spotlight",
-      "count": 137,
+      "count": 138,
       "sort": "shuffle",
       "seed": 768319621,
       "programmingMode": "fixed",
@@ -1257,7 +1257,7 @@
       "color": "#8E24AA",
       "section": "performers",
       "family": "performer_spotlight",
-      "count": 126,
+      "count": 127,
       "sort": "shuffle",
       "seed": 1471471335,
       "programmingMode": "fixed",
@@ -1425,7 +1425,7 @@
       "color": "#8E24AA",
       "section": "performers",
       "family": "performer_spotlight",
-      "count": 114,
+      "count": 115,
       "sort": "shuffle",
       "seed": 1389383252,
       "programmingMode": "fixed",
@@ -1617,7 +1617,7 @@
       "color": "#8E24AA",
       "section": "performers",
       "family": "performer_spotlight",
-      "count": 101,
+      "count": 102,
       "sort": "shuffle",
       "seed": 736012690,
       "programmingMode": "fixed",
@@ -1977,7 +1977,7 @@
       "color": "#8E24AA",
       "section": "performers",
       "family": "performer_spotlight",
-      "count": 91,
+      "count": 92,
       "sort": "shuffle",
       "seed": 1625650179,
       "programmingMode": "fixed",
@@ -2265,7 +2265,7 @@
       "color": "#8E24AA",
       "section": "performers",
       "family": "performer_spotlight",
-      "count": 87,
+      "count": 88,
       "sort": "shuffle",
       "seed": 1732367568,
       "programmingMode": "fixed",
@@ -2289,7 +2289,7 @@
       "color": "#8E24AA",
       "section": "performers",
       "family": "performer_spotlight",
-      "count": 86,
+      "count": 87,
       "sort": "shuffle",
       "seed": 666751612,
       "programmingMode": "fixed",
@@ -2337,7 +2337,7 @@
       "color": "#8E24AA",
       "section": "performers",
       "family": "performer_spotlight",
-      "count": 84,
+      "count": 85,
       "sort": "shuffle",
       "seed": 831917267,
       "programmingMode": "fixed",
@@ -2769,7 +2769,7 @@
       "color": "#8E24AA",
       "section": "performers",
       "family": "performer_spotlight",
-      "count": 68,
+      "count": 69,
       "sort": "shuffle",
       "seed": 906322470,
       "programmingMode": "fixed",
@@ -3033,7 +3033,7 @@
       "color": "#8E24AA",
       "section": "performers",
       "family": "performer_spotlight",
-      "count": 64,
+      "count": 65,
       "sort": "shuffle",
       "seed": 1594914579,
       "programmingMode": "fixed",
@@ -4737,7 +4737,7 @@
       "color": "#8E24AA",
       "section": "performers",
       "family": "performer_spotlight",
-      "count": 39,
+      "count": 40,
       "sort": "shuffle",
       "seed": 732276930,
       "programmingMode": "fixed",
@@ -5481,7 +5481,7 @@
       "color": "#8E24AA",
       "section": "performers",
       "family": "performer_spotlight",
-      "count": 35,
+      "count": 36,
       "sort": "shuffle",
       "seed": 1854178201,
       "programmingMode": "fixed",
@@ -5625,7 +5625,7 @@
       "color": "#8E24AA",
       "section": "performers",
       "family": "performer_spotlight",
-      "count": 35,
+      "count": 36,
       "sort": "shuffle",
       "seed": 98232625,
       "programmingMode": "fixed",
@@ -6825,7 +6825,7 @@
       "color": "#00897B",
       "section": "studios",
       "family": "studio_spotlight",
-      "count": 1046,
+      "count": 1047,
       "sort": "shuffle",
       "seed": 1707142695,
       "programmingMode": "fixed",
@@ -7161,7 +7161,7 @@
       "color": "#00897B",
       "section": "studios",
       "family": "studio_spotlight",
-      "count": 187,
+      "count": 188,
       "sort": "shuffle",
       "seed": 1092177193,
       "programmingMode": "fixed",
@@ -7281,7 +7281,7 @@
       "color": "#00897B",
       "section": "studios",
       "family": "studio_spotlight",
-      "count": 166,
+      "count": 168,
       "sort": "shuffle",
       "seed": 110337733,
       "programmingMode": "fixed",
@@ -7377,21 +7377,18 @@
       "color": "#00897B",
       "section": "studios",
       "family": "studio_spotlight",
-      "count": 0,
+      "count": 169,
       "sort": "shuffle",
       "seed": 331534331,
       "programmingMode": "fixed",
-      "sourceLabel": "Madonna (without JAV)",
+      "sourceLabel": "Madonna",
       "source": {
         "type": "filter",
-        "excludeTags": [
-          "9320"
-        ],
         "studios": [
           "819"
         ]
       },
-      "rationale": "Studio spotlight; 150 exact scenes. Age-ambiguous studio names were omitted."
+      "rationale": "Studio spotlight; 150 exact scenes. Age-ambiguous studio names were omitted. All-JAV studio; airs JAV by owner decision (exception to the JAV policy)."
     },
     {
       "id": "net_bd001510",
@@ -7473,7 +7470,7 @@
       "color": "#00897B",
       "section": "studios",
       "family": "studio_spotlight",
-      "count": 143,
+      "count": 144,
       "sort": "shuffle",
       "seed": 659074414,
       "programmingMode": "fixed",
@@ -7689,7 +7686,7 @@
       "color": "#00897B",
       "section": "studios",
       "family": "studio_spotlight",
-      "count": 121,
+      "count": 122,
       "sort": "shuffle",
       "seed": 95392259,
       "programmingMode": "fixed",
@@ -7905,7 +7902,7 @@
       "color": "#00897B",
       "section": "studios",
       "family": "studio_spotlight",
-      "count": 84,
+      "count": 85,
       "sort": "shuffle",
       "seed": 2074683873,
       "programmingMode": "fixed",
@@ -8481,7 +8478,7 @@
       "color": "#00897B",
       "section": "studios",
       "family": "studio_spotlight",
-      "count": 50,
+      "count": 51,
       "sort": "shuffle",
       "seed": 93216813,
       "programmingMode": "fixed",
@@ -8673,21 +8670,18 @@
       "color": "#00897B",
       "section": "studios",
       "family": "studio_spotlight",
-      "count": 0,
+      "count": 39,
       "sort": "shuffle",
       "seed": 1968318575,
       "programmingMode": "fixed",
-      "sourceLabel": "Nagae Style (without JAV)",
+      "sourceLabel": "Nagae Style",
       "source": {
         "type": "filter",
-        "excludeTags": [
-          "9320"
-        ],
         "studios": [
           "1599"
         ]
       },
-      "rationale": "Studio spotlight; 39 exact scenes. Age-ambiguous studio names were omitted."
+      "rationale": "Studio spotlight; 39 exact scenes. Age-ambiguous studio names were omitted. All-JAV studio; airs JAV by owner decision (exception to the JAV policy)."
     },
     {
       "id": "net_95200e12",
@@ -9129,21 +9123,18 @@
       "color": "#00897B",
       "section": "studios",
       "family": "studio_spotlight",
-      "count": 1,
+      "count": 30,
       "sort": "shuffle",
       "seed": 485285673,
       "programmingMode": "fixed",
-      "sourceLabel": "Hunter (without JAV)",
+      "sourceLabel": "Hunter",
       "source": {
         "type": "filter",
-        "excludeTags": [
-          "9320"
-        ],
         "studios": [
           "2733"
         ]
       },
-      "rationale": "Studio spotlight; 30 exact scenes. Age-ambiguous studio names were omitted."
+      "rationale": "Studio spotlight; 30 exact scenes. Age-ambiguous studio names were omitted. All-JAV studio; airs JAV by owner decision (exception to the JAV policy)."
     },
     {
       "id": "net_4f3a3ac4",
@@ -18174,24 +18165,21 @@
       "color": "#00897B",
       "section": "studios",
       "family": "studio_tag",
-      "count": 0,
+      "count": 79,
       "sort": "shuffle",
       "seed": 219740004,
       "programmingMode": "fixed",
-      "sourceLabel": "Madonna · THEME: Cheating (without JAV)",
+      "sourceLabel": "Madonna · THEME: Cheating",
       "source": {
         "type": "filter",
         "tags": [
           "8020"
         ],
-        "excludeTags": [
-          "9320"
-        ],
         "studios": [
           "819"
         ]
       },
-      "rationale": "Studio/theme specialty: 74 scenes, 49% of this studio's catalog; tag affinity is 6.22x the library baseline."
+      "rationale": "Studio/theme specialty: 74 scenes, 49% of this studio's catalog; tag affinity is 6.22x the library baseline. All-JAV studio; airs JAV by owner decision (exception to the JAV policy)."
     },
     {
       "id": "net_c33d1017",
@@ -19842,5 +19830,5 @@
       "rationale": "Validated performer pairing with 12 scenes together."
     }
   ],
-  "revision": "4f4ffb42f159"
+  "revision": "d1e26aed6e37"
 }

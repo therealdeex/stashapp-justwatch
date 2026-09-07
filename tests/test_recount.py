@@ -7,6 +7,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 from test_networks import _importer, csv_row, write_csv
 
 REPO = Path(__file__).resolve().parent.parent
@@ -54,6 +56,36 @@ def test_apply_exclusions_appends_idempotently():
     assert rows[1]["exclude_tags_any"] == "JAV"
     assert all(row["exclude_tag_logic"] == "ANY" for row in rows)
     assert _recount().apply_exclusions(rows, [("9320", "JAV")]) == 0
+
+
+def test_apply_exclusions_skips_excepted_rows():
+    rows = [
+        {"channel_number": "407", "exclude_tag_ids_any": "", "exclude_tags_any": "",
+         "exclude_tag_logic": "ANY"},
+        {"channel_number": "408", "exclude_tag_ids_any": "", "exclude_tags_any": "",
+         "exclude_tag_logic": "ANY"},
+    ]
+    changed = _recount().apply_exclusions(rows, [("9320", "JAV")], {"407"})
+    assert changed == 1
+    assert rows[0]["exclude_tag_ids_any"] == ""  # the sanctioned exemption holds
+    assert rows[1]["exclude_tag_ids_any"] == "9320"
+
+
+def test_main_rejects_unknown_except_row(tmp_path, monkeypatch):
+    recount = _recount()
+    path = write_csv(tmp_path / "channels.csv", [
+        csv_row(channel_number="100", channel_name="Perf",
+                channel_family="performer_spotlight", exact_scene_count="8",
+                include_performer_logic="ALL", include_performer_ids_all="157"),
+    ])
+    key_file = tmp_path / "key"
+    key_file.write_text("test-key", encoding="utf-8")
+    monkeypatch.setattr(recount, "build_client", lambda url, api_key: FakeClient())
+    with pytest.raises(SystemExit) as excinfo:
+        recount.main(["--csv", str(path), "--url", "http://stash:9999",
+                      "--api-key-file", str(key_file),
+                      "--exclude-tag", "9320=JAV", "--except-row", "999"])
+    assert excinfo.value.code == 1
 
 
 def test_transformed_row_imports_with_both_excludes():
