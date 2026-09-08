@@ -27,7 +27,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-DEFAULT_CSV = REPO / "data" / "proposed_channels_scene_validated.csv"
+DEFAULT_CSV = REPO / "data" / "proposed_channels_new_taxonomy_scene_validated.csv"
 OUTPUT = REPO / "justwatch" / "networks.json"
 
 DIGITS_RE = re.compile(r"^[0-9]+$")
