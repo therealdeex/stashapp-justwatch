@@ -3009,21 +3009,18 @@
       "color": "#8E24AA",
       "section": "performers",
       "family": "performer_spotlight",
-      "count": 0,
+      "count": 64,
       "sort": "shuffle",
       "seed": 1387587944,
       "programmingMode": "fixed",
-      "sourceLabel": "Kurea Hasumi (without JAV)",
+      "sourceLabel": "Kurea Hasumi",
       "source": {
         "type": "filter",
-        "excludeTags": [
-          "9320"
-        ],
         "performers": [
           "8926"
         ]
       },
-      "rationale": "Performer spotlight; 34 scenes under current production tag assignments. Branding is playful; filter columns define membership."
+      "rationale": "Performer spotlight; JAV exemption applied (JAV-only performer, exempted like the all-JAV studio channels). Branding is playful; filter columns define membership."
     },
     {
       "id": "net_e30b23f9",
@@ -3657,21 +3654,18 @@
       "color": "#8E24AA",
       "section": "performers",
       "family": "performer_spotlight",
-      "count": 0,
+      "count": 52,
       "sort": "shuffle",
       "seed": 2018957930,
       "programmingMode": "fixed",
-      "sourceLabel": "Saeko Matsushita (without JAV)",
+      "sourceLabel": "Saeko Matsushita",
       "source": {
         "type": "filter",
-        "excludeTags": [
-          "9320"
-        ],
         "performers": [
           "1661"
         ]
       },
-      "rationale": "Performer spotlight; 50 scenes under current production tag assignments. Branding is playful; filter columns define membership."
+      "rationale": "Performer spotlight; JAV exemption applied (JAV-only performer, exempted like the all-JAV studio channels). Branding is playful; filter columns define membership."
     },
     {
       "id": "net_04dfc47e",
@@ -13100,22 +13094,22 @@
       "color": "#EF6C00",
       "section": "general",
       "family": "tag_pair",
-      "count": 1,
+      "count": 393,
       "sort": "shuffle",
       "seed": 1063977421,
       "programmingMode": "fixed",
-      "sourceLabel": "THEME: Romance × KINK: Chastity/orgasm control (without JAV)",
+      "sourceLabel": "THEME: Romance × ACT: Cunnilingus (without JAV)",
       "source": {
         "type": "filter",
         "tags": [
-          "8027",
-          "8074"
+          "7978",
+          "8027"
         ],
         "excludeTags": [
           "9320"
         ]
       },
-      "rationale": "Tag pair; 216 scenes under current production tag assignments. Branding is playful; filter columns define membership."
+      "rationale": "Tag pair; Romance + Cunnilingus (repointed from the collapsed Romance + Chastity intersection). Branding is playful; filter columns define membership."
     },
     {
       "id": "net_c6721159",
@@ -14539,32 +14533,6 @@
         ]
       },
       "rationale": "Tag triple; 113 scenes under current production tag assignments. Branding is playful; filter columns define membership."
-    },
-    {
-      "id": "net_48963f34",
-      "number": 698,
-      "name": "The Sharing Economy: Counter Intelligence Meets Dress Rehearsal",
-      "glyph": "",
-      "color": "#EF6C00",
-      "section": "general",
-      "family": "tag_triple",
-      "count": 1,
-      "sort": "shuffle",
-      "seed": 773681372,
-      "programmingMode": "fixed",
-      "sourceLabel": "THEME: Wife sharing × SET: Kitchen × WARD: Dress (without JAV)",
-      "source": {
-        "type": "filter",
-        "tags": [
-          "8030",
-          "8044",
-          "8056"
-        ],
-        "excludeTags": [
-          "9320"
-        ]
-      },
-      "rationale": "Tag triple; 94 scenes under current production tag assignments. Branding is playful; filter columns define membership."
     },
     {
       "id": "net_f1b96aa5",
@@ -17159,33 +17127,6 @@
       "rationale": "Performer tag; 54 scenes under current production tag assignments. Branding is playful; filter columns define membership."
     },
     {
-      "id": "net_c0d38785",
-      "number": 798,
-      "name": "Kurea Hasumi: One-Woman Programming",
-      "glyph": "",
-      "color": "#8E24AA",
-      "section": "performers",
-      "family": "performer_tag",
-      "count": 0,
-      "sort": "shuffle",
-      "seed": 220524385,
-      "programmingMode": "fixed",
-      "sourceLabel": "Kurea Hasumi · CAST: 1F (without JAV)",
-      "source": {
-        "type": "filter",
-        "tags": [
-          "7828"
-        ],
-        "excludeTags": [
-          "9320"
-        ],
-        "performers": [
-          "8926"
-        ]
-      },
-      "rationale": "Performer tag; 19 scenes under current production tag assignments. Branding is playful; filter columns define membership. Cast labels describe linked metadata, not sexual orientation or a complete-credit guarantee."
-    },
-    {
       "id": "net_9577f2bd",
       "number": 799,
       "name": "Kendra Lust: Rear View Review",
@@ -17454,33 +17395,6 @@
         ]
       },
       "rationale": "Studio tag; 97 scenes under current production tag assignments. Branding is playful; filter columns define membership."
-    },
-    {
-      "id": "net_46670b82",
-      "number": 809,
-      "name": "Real Wife Stories: The Sharing Economy",
-      "glyph": "",
-      "color": "#00897B",
-      "section": "studios",
-      "family": "studio_tag",
-      "count": 1,
-      "sort": "shuffle",
-      "seed": 242522844,
-      "programmingMode": "fixed",
-      "sourceLabel": "Real Wife Stories · THEME: Wife sharing (without JAV)",
-      "source": {
-        "type": "filter",
-        "tags": [
-          "8030"
-        ],
-        "excludeTags": [
-          "9320"
-        ],
-        "studios": [
-          "60"
-        ]
-      },
-      "rationale": "Studio tag; 540 scenes under current production tag assignments. Branding is playful; filter columns define membership."
     },
     {
       "id": "net_4b7a74c0",
@@ -18050,33 +17964,6 @@
       "rationale": "Studio tag; 238 scenes under current production tag assignments. Branding is playful; filter columns define membership."
     },
     {
-      "id": "net_99d109df",
-      "number": 831,
-      "name": "HotwifeXXX: You Are Here-ish",
-      "glyph": "",
-      "color": "#00897B",
-      "section": "studios",
-      "family": "studio_tag",
-      "count": 0,
-      "sort": "shuffle",
-      "seed": 2116347478,
-      "programmingMode": "fixed",
-      "sourceLabel": "HotwifeXXX · PROD: POV (without JAV)",
-      "source": {
-        "type": "filter",
-        "tags": [
-          "8084"
-        ],
-        "excludeTags": [
-          "9320"
-        ],
-        "studios": [
-          "272"
-        ]
-      },
-      "rationale": "Studio tag; 76 scenes under current production tag assignments. Branding is playful; filter columns define membership."
-    },
-    {
       "id": "net_f75544b2",
       "number": 832,
       "name": "The White Boxxx: Crowd-Funded Coverage",
@@ -18450,33 +18337,6 @@
         ]
       },
       "rationale": "Studio tag; 21 scenes under current production tag assignments. Branding is playful; filter columns define membership."
-    },
-    {
-      "id": "net_55822da3",
-      "number": 846,
-      "name": "Hot Wife XXX: You Are Here-ish",
-      "glyph": "",
-      "color": "#00897B",
-      "section": "studios",
-      "family": "studio_tag",
-      "count": 0,
-      "sort": "shuffle",
-      "seed": 1593244946,
-      "programmingMode": "fixed",
-      "sourceLabel": "Hot Wife XXX · PROD: POV (without JAV)",
-      "source": {
-        "type": "filter",
-        "tags": [
-          "8084"
-        ],
-        "excludeTags": [
-          "9320"
-        ],
-        "studios": [
-          "620"
-        ]
-      },
-      "rationale": "Studio tag; 51 scenes under current production tag assignments. Branding is playful; filter columns define membership."
     },
     {
       "id": "net_d1171abb",
@@ -19830,5 +19690,5 @@
       "rationale": "Performer pair; 12 scenes under current production tag assignments. Branding is playful; filter columns define membership."
     }
   ],
-  "revision": "266ec4a34b1b"
+  "revision": "31004561099d"
 }

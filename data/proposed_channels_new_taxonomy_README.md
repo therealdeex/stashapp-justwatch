@@ -1,6 +1,6 @@
 # The new channel lineup
 
-800 channels, numbered 100–899, using the original CSV's 26-column contract.
+795 channels, numbered 100–899, using the original CSV's 26-column contract.
 All channel names have been refreshed. Tag-channel branding is playful;
 the include/exclude columns remain the precise definition of membership.
 
@@ -81,3 +81,16 @@ scene tags. Then resolve the fourteen canonical tag IDs, recount **all 800**
 rows using the normal recount tool, and compile only after every row has valid
 IDs and counts. Merely creating empty tags would not validate the lineup.
 Keep the existing JAV exemptions when reapplying exclusion policy.
+
+## Retirement notes
+
+- **2026-09-08** — five tag-rider slots retired from the production set after the canonical
+  tagging run emptied their pools: 698 (Wife sharing + Kitchen + Dress), 798 (Kurea Hasumi +
+  CAST: 1F), 809 (Real Wife Stories + Wife sharing), 831/846 (HotwifeXXX / Hot Wife XXX + POV).
+  The pure studio channels (376/397/419) and performer spotlights already cover their content.
+- **2026-09-08** — 225 Kurea Hasumi and 252 Saeko Matsushita exempted from the JAV exclusion
+  (JAV-only performers, same treatment as the all-JAV studio channels).
+- **2026-09-08** — 642 repointed from Romance + Chastity (collapsed to 1 scene) to
+  Romance + Cunnilingus (393 scenes).
+- The draft (`proposed_channels_new_taxonomy.csv`) retains the retired rows for provenance;
+  the production set above is the compile source.
