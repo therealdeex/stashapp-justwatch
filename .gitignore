@@ -4,3 +4,4 @@ __pycache__/
 assets/snapshots/
 .playwright-mcp/
 .zcode/
+.v2c/
