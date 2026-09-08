@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compile the owner's channel CSV into the plugin's networks.json.
 
-The CSV (``data/proposed_channels_scene_validated.csv``) is the authoring
+The CSV (``data/proposed_channels_new_taxonomy_scene_validated.csv``) is the authoring
 artifact: one row per network, scene-count validated against the library.
 This script is the only way networks.json changes; never hand-edit the output.
 

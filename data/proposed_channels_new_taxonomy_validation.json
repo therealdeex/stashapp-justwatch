@@ -1,0 +1,23 @@
+{
+  "validated_at_utc": "2026-09-07T20:58:55Z",
+  "production_scene_total": 20178,
+  "live_channels": 800,
+  "draft_channels": 800,
+  "pending_channels": 14,
+  "minimum_count": 12,
+  "thin_channels_below_5": [],
+  "zero_channels": [],
+  "family_counts": {
+    "performer_spotlight": 276,
+    "studio_spotlight": 114,
+    "tag_spotlight": 60,
+    "tag_pair": 100,
+    "tag_triple": 50,
+    "tag_include_exclude": 40,
+    "performer_tag": 60,
+    "studio_tag": 60,
+    "performer_pair": 40
+  },
+  "original_csv_sha256": "809f824073946712443707020455b24ebadca337b827631505f246bcac9e369c",
+  "new_rules_sha": "a28f5a609fd4b91e2eb1a755766826d05852ee4f85e623a7ce4dda1a6dd174c3"
+}
