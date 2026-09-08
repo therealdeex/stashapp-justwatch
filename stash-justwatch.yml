@@ -7,7 +7,7 @@ description: >-
   deterministic. Ships the owner's curated network tier (channels 100+, from
   the channel CSV) which replaces the TV app's generated sections, and the
   Channel Studio editor page. Targets Stash v0.31.1.
-version: 0.4.0
+version: 0.5.0
 url: https://example.invalid/stash-justwatch
 
 exec:
