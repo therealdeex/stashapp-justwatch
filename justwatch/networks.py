@@ -33,20 +33,26 @@ PATH = Path(__file__).resolve().parent / "networks.json"
 SECTIONS = ("performers", "studios", "general")
 
 DIGITS_RE = re.compile(r"^[0-9]+$")
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 class NetworksError(Exception):
     """The compiled networks file is malformed (a build artifact bug)."""
 
 
-def load() -> dict:
-    """Load networks.json, strictly. Missing file -> empty tier."""
-    if not PATH.exists():
+def load(path: Path | None = None) -> dict:
+    """Load networks.json, strictly. Missing file -> empty tier.
+
+    ``path`` overrides the deployed location (validation and tests compile a
+    preview artifact and load THAT — never the live file by accident).
+    """
+    target = PATH if path is None else path
+    if not target.exists():
         return {"revision": "", "channels": []}
     try:
-        raw = json.loads(PATH.read_text(encoding="utf-8"))
+        raw = json.loads(target.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise NetworksError(f"networks unreadable at {PATH}: {exc}") from exc
+        raise NetworksError(f"networks unreadable at {target}: {exc}") from exc
     if not isinstance(raw, dict):
         raise NetworksError("networks.json is not a JSON object")
     channels = raw.get("channels")
@@ -98,10 +104,39 @@ def _require_channel(channel: Any, i: int) -> None:
     source = channel.get("source")
     if not isinstance(source, dict) or source.get("type") != "filter":
         raise bad("source must be a filter source")
-    if not any(_ids(source.get(kind)) for kind in ("tags", "performers", "studios")):
+    if not any(_ids(source.get(kind)) for kind in (
+            "tags", "performers", "performersAny", "studios", "studiosAny")) \
+            and not _metadata_criteria(source, bad):
         raise bad("source has no include criteria")
     if not isinstance(channel.get("programmingMode"), str):
         raise bad("missing programmingMode")
+
+
+def _metadata_criteria(source: dict, bad) -> bool:
+    """True when the source carries at least one metadata criterion (scene
+    date range / minimum duration / created-at recency); malformed criteria
+    raise (strict loader: a broken build artifact is never half-accepted)."""
+    date = source.get("date")
+    if date is not None:
+        ok = (isinstance(date, dict)
+              and all(isinstance(date.get(k), str) and DATE_RE.match(date[k])
+                      for k in ("from", "to")))
+        if not ok:
+            raise bad("malformed date criterion (expected {from, to} YYYY-MM-DD)")
+        return True
+    duration = source.get("duration")
+    if duration is not None:
+        value = duration.get("min") if isinstance(duration, dict) else None
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise bad("malformed duration criterion (expected {min: seconds})")
+        return True
+    created = source.get("createdAt")
+    if created is not None:
+        value = created.get("withinDays") if isinstance(created, dict) else None
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise bad("malformed createdAt criterion (expected {withinDays: days})")
+        return True
+    return False
 
 
 def _ids(value: Any) -> list[str]:

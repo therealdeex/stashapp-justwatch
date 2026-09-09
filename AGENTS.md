@@ -1,6 +1,6 @@
 # stash-justwatch — project knowledge
 
-**Status:** v0.5.0, contract version 1. Companion plugin for the TV app's
+**Status:** v0.6.0, contract version 1. Companion plugin for the TV app's
 Just Watch feature (repo `~/dev/StashAppAndroidTV`).
 
 ## Architecture
@@ -33,14 +33,23 @@ beyond stdlib (+ optional PyYAML for the API-key fallback). Data flow:
   past unplayable rows, bounded at 1000 raw rows; returns `rotationVersion`
   (ordering hash + catalog revision), `sourceTotal`, `rotationComplete`.
 - `justwatch/networks.py` — the NETWORK TIER: the owner's curated channel list
-  (100–899, 800 networks) compiled from
-  `data/proposed_channels_scene_validated.csv` by `tools/import_channels.py`
-  into `justwatch/networks.json` (strict loader, `NetworksError` on malformed;
-  a MISSING file is an empty tier). `Directory` carries it as the `networks`
-  block; `Lineup` serves `net_` ids through the same rotation; `FullDirectory`
-  sections come from it with zero Stash queries. Replaces the retired autodir
-  tiering (the TV app no longer generates sections client-side when the block
-  is present; `specs.json`/`extract_specs.py` are gone).
+  (100–899, currently 795 networks) compiled from
+  `data/proposed_channels_new_taxonomy_scene_validated.csv` by
+  `tools/import_channels.py` into `justwatch/networks.json` (strict loader,
+  `NetworksError` on malformed; a MISSING file is an empty tier). Since v0.6.0
+  the composite source also supports ANY-of performers/studios
+  (`performersAny`/`studiosAny`), metadata criteria (scene-date range,
+  min-duration, created-at recency with a dynamic rotation epoch), and the
+  authoring CSV's optional `stable_key` decouples network identity from
+  display naming (immutable once in production). `Directory` carries it as
+  the `networks` block; `Lineup` serves `net_` ids through the same rotation;
+  `FullDirectory` sections come from it with zero Stash queries. Replaces the
+  retired autodir tiering (the TV app no longer generates sections client-side
+  when the block is present; `specs.json`/`extract_specs.py` are gone).
+  **Pending (not deployed):** the approved v4-final proposal — 513 networks,
+  `data/proposed_channels_final.csv` + `analysis/just-watch-final/` (catalog,
+  migration map, 24/24 validation) — replaces production only after explicit
+  instruction.
 - `justwatch/snapshots.py` — health snapshots + `save_result.json` side-channel,
   dual-written to `<Dir>/stash-justwatch-data/snapshots/` and
   `<PluginDir>/assets/snapshots/` (the UI reads the assets mirror with

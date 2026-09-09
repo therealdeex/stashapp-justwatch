@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.6.0 (2026-09-09)
+
+Stable network identities + the source semantics the v4-final catalog needs.
+Contract stays v1 (all additive); the current production CSV compiles
+byte-identically through the upgraded importer (golden test). Ships the
+proposed **just-watch-v4-final** catalog package (513 networks) at
+`analysis/just-watch-final/` + `data/proposed_channels_final.csv` — NOT
+deployed; the live networks.json and production CSV are untouched.
+
+- **stable_key** (optional authoring column): decouples network identity
+  from display naming. Blank keeps the exact legacy id/seed derivation; a
+  present key becomes the identity basis. Survivors seed it
+  `"<old number>|<old production name>"` and keep id/seed/rotation
+  byte-for-byte; new channels get semantic keys (`jw:v1:tagpair:7978:8027`).
+  Immutable once in production.
+- **ANY-of criteria**: `include_performer_logic=ANY` → `performersAny`
+  (union), multi-studio `include_studio_logic=ANY` → `studiosAny` (union of
+  subtrees, INCLUDES depth -1). Single-studio rows keep the legacy
+  `studios` shape — no source-identity churn. Enables the aggregate
+  discovery networks without synthetic tags.
+- **Metadata criteria**: scene-date range, minimum duration (inclusive
+  BETWEEN — Stash has no ≥ modifier), and created-at recency
+  (`created_within_days`, resolved to a UTC-midnight cutoff at query time).
+  New Arrivals stays dynamic and its rotation version carries the resolved
+  cutoff epoch (daily invalidation); static sources' versions are unchanged.
+- Importer hardening: families enumerated exactly (9 normal + 7 specials),
+  duplicate stable keys / derived ids rejected, metadata validated at
+  import, `--csv`/`--out` flags, ANY-list/metadata labels summarized.
+- `networks.load(path=...)` so validation compiles a preview artifact and
+  can never load the deployed file by accident; loader accepts the new
+  source keys strictly.
+- v4-final package: corrected tag-pair band (≤2 same-namespace pairs total,
+  explicit counting), locked 15 triples / 4 include-exclude / 16 duos, eight
+  discovery networks as real filters, migration map against the 795-row
+  production CSV (292 survivors byte-identical, 221 new in freed slots, 282
+  numbers freed), 24/24 validation checks incl. 513/513 exact membership
+  reproduction and 100.00% post-JAV coverage. See
+  `analysis/just-watch-final/README.md`.
+
 ## 0.5.0 (2026-09-06)
 
 JAV confinement in the network tier + the recount loop that keeps the CSV's

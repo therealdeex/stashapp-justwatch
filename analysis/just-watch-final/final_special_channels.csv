@@ -1,0 +1,9 @@
+channel_number,channel_name,kind,criterion,entity_count,scene_count,dynamic,note,stable_key
+258,Feature Length (60+ Min),special_duration,,,1566,no,scenes with duration >= 3600 seconds (inclusive),jw:v1:special:feature-length
+259,2010s Vault,special_era,,,10789,no,scenes dated 2010-01-01 through 2019-12-31,jw:v1:special:vault-2010s
+260,2020s Vault,special_era,,,7831,no,scenes dated 2020-01-01 through 2026-12-31 (analysis semantics preserved; the fixed upper bound needs annual regeneration),jw:v1:special:vault-2020s
+261,Fringe Studios,special_fringe_studios,studiosAny,794,2035,no,"ANY of 794 maximal studios/trees with fewer than 10 hierarchical post-JAV scenes (materialized snapshot, pruned to maximal nodes)",jw:v1:special:fringe-studios
+262,New Arrivals (Last 180 Days),special_recent,,,4620,yes,created_at within 180 calendar days of query time (dynamic; generation-time reference anchor 2026-03-12),jw:v1:special:new-arrivals
+263,One-Scene Performers,special_one_scene,performersAny,2013,1797,no,"ANY of 2,013 performers with exactly 1 post-JAV scene (materialized snapshot)",jw:v1:special:one-scene-performers
+264,Prolific Performers (100+),special_prolific,performersAny,69,10596,no,ANY of 69 performers with 100+ post-JAV scenes (materialized snapshot),jw:v1:special:prolific-performers
+265,Rare Performers (<5 Scenes),special_rare_performers,performersAny,3569,5212,no,"ANY of 3,569 performers with 1-4 post-JAV scenes (materialized snapshot; zero-post-JAV performers excluded)",jw:v1:special:rare-performers

@@ -39,7 +39,7 @@ from justwatch.stash_client import (  # noqa: E402
     StashClient,
 )
 
-PLUGIN_VERSION = "0.5.0"
+PLUGIN_VERSION = "0.6.0"
 
 SYNC_MODES = frozenset({
     "capabilities", "directory", "full_directory", "lineup", "preview_lineup",

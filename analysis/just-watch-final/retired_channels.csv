@@ -1,0 +1,504 @@
+current_number,current_name,current_family,disposition,final_name,final_channel_key,old_count,note
+258,Eva Elfie: The Remote Majority,performer_spotlight,replace,Feature Length (60+ Min),jw:v1:special:feature-length,48,slot repurposed: scenes with duration >= 3600 seconds (inclusive)
+259,Isis Love: Premium Procrastination,performer_spotlight,replace,2010s Vault,jw:v1:special:vault-2010s,48,slot repurposed: scenes dated 2010-01-01 through 2019-12-31
+260,Michael Stefano: Doing the Most,performer_spotlight,replace,2020s Vault,jw:v1:special:vault-2020s,48,slot repurposed: scenes dated 2020-01-01 through 2026-12-31 (analysis semantics preserved; the fixed upper bound needs annual regeneration)
+261,Phoenix Marie: The Late Fee Channel,performer_spotlight,replace,Fringe Studios,jw:v1:special:fringe-studios,48,"slot repurposed: ANY of 794 maximal studios/trees with fewer than 10 hierarchical post-JAV scenes (materialized snapshot, pruned to maximal nodes)"
+262,Rocco Reed: Zero Inbox Energy,performer_spotlight,replace,New Arrivals (Last 180 Days),jw:v1:special:new-arrivals,48,slot repurposed: created_at within 180 calendar days of query time (dynamic; generation-time reference anchor 2026-03-12)
+263,Christian Wilde: Please Remain Tuned,performer_spotlight,replace,One-Scene Performers,jw:v1:special:one-scene-performers,47,"slot repurposed: ANY of 2,013 performers with exactly 1 post-JAV scene (materialized snapshot)"
+264,Juliette March: The Extended Lunch Break,performer_spotlight,replace,Prolific Performers (100+),jw:v1:special:prolific-performers,47,slot repurposed: ANY of 69 performers with 100+ post-JAV scenes (materialized snapshot)
+265,Lisey Sweet: Not in the Employee Handbook,performer_spotlight,replace,Rare Performers (<5 Scenes),jw:v1:special:rare-performers,47,"slot repurposed: ANY of 3,569 performers with 1-4 post-JAV scenes (materialized snapshot; zero-post-JAV performers excluded)"
+266,Jason Pierce: Plot Armor Included,performer_spotlight,replace,Married IRL,jw:v1:tag:4721,46,"slot repurposed: canonical THEME tag, 3853 scenes"
+267,Kira Noir: The Agenda Has Changed,performer_spotlight,replace,23-29 (M),jw:v1:tag:7666,46,"slot repurposed: canonical AGE tag, 3558 scenes"
+268,Yurizan Beltran: One More Episode,performer_spotlight,replace,30-39 (F),jw:v1:tag:7674,46,"slot repurposed: canonical AGE tag, 4668 scenes"
+269,Allie Addison: The Not-So-Silent Partner,performer_spotlight,replace,40-49 (M),jw:v1:tag:7680,45,"slot repurposed: canonical AGE tag, 3718 scenes"
+270,Brick Danger: After the Group Chat,performer_spotlight,replace,40-49 (F),jw:v1:tag:7681,45,"slot repurposed: canonical AGE tag, 983 scenes"
+271,Dee Williams: This Meeting Runs Late,performer_spotlight,replace,50-59 (M),jw:v1:tag:7687,45,"slot repurposed: canonical AGE tag, 813 scenes"
+272,Karlo Karrera: The Recommendation Engine,performer_spotlight,replace,1U,jw:v1:tag:7778,45,"slot repurposed: canonical CAST tag, 109 scenes"
+273,Voodoo: Airplane Mode Recommended,performer_spotlight,replace,1M,jw:v1:tag:7855,45,"slot repurposed: canonical CAST tag, 34 scenes"
+274,Bambino: The Couch Has Questions,performer_spotlight,replace,1M1F,jw:v1:tag:7876,44,"slot repurposed: canonical CAST tag, 12279 scenes"
+275,Brad Knight: Nothing on the Calendar,performer_spotlight,replace,2M1F,jw:v1:tag:7889,44,"slot repurposed: canonical CAST tag, 757 scenes"
+276,Charlie Dean: The Ratings Department,performer_spotlight,replace,Black Male,jw:v1:tag:7897,44,"slot repurposed: canonical DEMO tag, 1856 scenes"
+277,Natalia Starr: Full-Time Distraction,performer_spotlight,replace,Latin Male,jw:v1:tag:7910,44,"slot repurposed: canonical DEMO tag, 1109 scenes"
+278,Nerine Mechanique: Nobody Read the Memo,performer_spotlight,replace,Latin Female,jw:v1:tag:7911,44,"slot repurposed: canonical DEMO tag, 2682 scenes"
+279,Tyler Steel: The Opening Credits Club,performer_spotlight,replace,Mixed Male,jw:v1:tag:7938,44,"slot repurposed: canonical DEMO tag, 1082 scenes"
+280,Alyx Star Has the Remote,performer_spotlight,replace,Mixed Female,jw:v1:tag:7939,43,"slot repurposed: canonical DEMO tag, 723 scenes"
+281,Cadence Lux: HR Would Like a Word,performer_spotlight,replace,Blowjob,jw:v1:tag:7977,43,"slot repurposed: canonical ACT tag, 12351 scenes"
+282,Lutro Steel vs. the Bedtime Schedule,performer_spotlight,replace,Cunnilingus,jw:v1:tag:7978,43,"slot repurposed: canonical ACT tag, 7317 scenes"
+283,Alanah Rae: The Plot Thickens,performer_spotlight,replace,Titjob,jw:v1:tag:7980,42,"slot repurposed: canonical ACT tag, 1884 scenes"
+284,Ameena Green & the Missing Script,performer_spotlight,replace,Fingering,jw:v1:tag:7981,42,"slot repurposed: canonical ACT tag, 4398 scenes"
+285,Gianna Dior: Do Not Auto-Play at Work,performer_spotlight,replace,Masturbation,jw:v1:tag:7982,42,"slot repurposed: canonical ACT tag, 2299 scenes"
+286,Jennifer White: Overtime Approved,performer_spotlight,replace,Squirting,jw:v1:tag:7983,42,"slot repurposed: canonical ACT tag, 1074 scenes"
+287,Kayla Kayden Presents: Questionable Decisions,performer_spotlight,replace,Cumshot - face,jw:v1:tag:7986,42,"slot repurposed: canonical ACT tag, 6964 scenes"
+288,Nancy Ace: Main Character Hours,performer_spotlight,replace,Cumshot - body,jw:v1:tag:7988,42,"slot repurposed: canonical ACT tag, 2492 scenes"
+289,Tony Rubino: The Binge Committee,performer_spotlight,replace,Cumshot - internal,jw:v1:tag:7989,42,"slot repurposed: canonical ACT tag, 1694 scenes"
+290,Lilla Katt: The Skip Intro Department,performer_spotlight,replace,DP,jw:v1:tag:7990,41,"slot repurposed: canonical ACT tag, 578 scenes"
+291,Tana Lea: No Meeting Could Replace This,performer_spotlight,replace,Sex toys,jw:v1:tag:7991,41,"slot repurposed: canonical ACT tag, 2121 scenes"
+292,Anikka Albrite: The Unscheduled Special,performer_spotlight,replace,Grinding,jw:v1:tag:7992,40,"slot repurposed: canonical ACT tag, 475 scenes"
+293,Jovan Jordan: Cancel Your Plans,performer_spotlight,replace,Ass-to-mouth,jw:v1:tag:7993,40,"slot repurposed: canonical ACT tag, 2090 scenes"
+294,Little Puck: The Remote Majority,performer_spotlight,replace,Fisting,jw:v1:tag:7994,40,"slot repurposed: canonical ACT tag, 174 scenes"
+295,Maestro Stefanos: Premium Procrastination,performer_spotlight,replace,Small ass,jw:v1:tag:7996,40,"slot repurposed: canonical BODY tag, 1457 scenes"
+296,Alina Li: Doing the Most,performer_spotlight,replace,Medium ass,jw:v1:tag:7997,39,"slot repurposed: canonical BODY tag, 2496 scenes"
+297,Athena Anderson: The Late Fee Channel,performer_spotlight,replace,Curvy,jw:v1:tag:7998,40,"slot repurposed: canonical BODY tag, 1143 scenes"
+298,Kimmy Granger: Zero Inbox Energy,performer_spotlight,replace,Hairy,jw:v1:tag:8001,39,"slot repurposed: canonical BODY tag, 1919 scenes"
+299,Monique Alexander: Please Remain Tuned,performer_spotlight,replace,Big breasts,jw:v1:tag:8003,39,"slot repurposed: canonical BODY tag, 5279 scenes"
+300,Aidra Fox: The Extended Lunch Break,performer_spotlight,replace,Small breasts,jw:v1:tag:8004,38,"slot repurposed: canonical BODY tag, 3027 scenes"
+301,Jack Hammer: Not in the Employee Handbook,performer_spotlight,replace,Medium breasts,jw:v1:tag:8005,38,"slot repurposed: canonical BODY tag, 1571 scenes"
+302,Keisha Grey: Plot Armor Included,performer_spotlight,replace,Augmented breasts,jw:v1:tag:8006,38,"slot repurposed: canonical BODY tag, 2833 scenes"
+303,Kristina Grace: The Agenda Has Changed,performer_spotlight,replace,Muscular,jw:v1:tag:8015,38,"slot repurposed: canonical BODY tag, 1402 scenes"
+304,Penny Pax: One More Episode,performer_spotlight,replace,Big dick,jw:v1:tag:8016,38,"slot repurposed: canonical BODY tag, 5932 scenes"
+305,Ricky Spanish: The Not-So-Silent Partner,performer_spotlight,replace,Uncircumcised,jw:v1:tag:8017,38,"slot repurposed: canonical BODY tag, 1175 scenes"
+306,Ana Foxxx: After the Group Chat,performer_spotlight,replace,Average body,jw:v1:tag:8019,37,"slot repurposed: canonical BODY tag, 1707 scenes"
+307,Cherry Kiss: This Meeting Runs Late,performer_spotlight,replace,Step-family,jw:v1:tag:8022,37,"slot repurposed: canonical THEME tag, 703 scenes"
+308,Chloe Amour: The Recommendation Engine,performer_spotlight,replace,Taboo,jw:v1:tag:8023,37,"slot repurposed: canonical THEME tag, 406 scenes"
+309,Fiona Frost: Airplane Mode Recommended,performer_spotlight,replace,Exhibitionism,jw:v1:tag:8025,37,"slot repurposed: canonical THEME tag, 367 scenes"
+310,GI Joey: The Couch Has Questions,performer_spotlight,replace,First time,jw:v1:tag:8029,37,"slot repurposed: canonical THEME tag, 472 scenes"
+311,Hollywood Cash: Nothing on the Calendar,performer_spotlight,replace,Older/younger,jw:v1:tag:8031,37,"slot repurposed: canonical THEME tag, 383 scenes"
+312,Jade Maris: The Ratings Department,performer_spotlight,replace,Holiday/seasonal,jw:v1:tag:8032,37,"slot repurposed: canonical THEME tag, 227 scenes"
+313,Jane Wilde: Full-Time Distraction,performer_spotlight,replace,Freeuse,jw:v1:tag:8033,37,"slot repurposed: canonical THEME tag, 38 scenes"
+314,Jillian Janson: Nobody Read the Memo,performer_spotlight,replace,Reluctance,jw:v1:tag:8034,37,"slot repurposed: canonical THEME tag, 160 scenes"
+315,Dorian Del Isla: The Opening Credits Club,performer_spotlight,replace,Swingers,jw:v1:tag:8035,36,"slot repurposed: canonical THEME tag, 129 scenes"
+316,Juan El Caballo Loco Has the Remote,performer_spotlight,replace,Office,jw:v1:tag:8041,36,"slot repurposed: canonical SET tag, 177 scenes"
+317,Lexington Steele: HR Would Like a Word,performer_spotlight,replace,Gym,jw:v1:tag:8045,36,"slot repurposed: canonical SET tag, 103 scenes"
+318,Liz Jordan vs. the Bedtime Schedule,performer_spotlight,replace,Club/bar,jw:v1:tag:8046,36,"slot repurposed: canonical SET tag, 54 scenes"
+319,Mandingo: The Plot Thickens,performer_spotlight,replace,Dungeon,jw:v1:tag:8047,36,"slot repurposed: canonical SET tag, 111 scenes"
+320,Max Dyor & the Missing Script,performer_spotlight,replace,School,jw:v1:tag:8049,36,"slot repurposed: canonical SET tag, 89 scenes"
+321,Pablo Ferrari: Do Not Auto-Play at Work,performer_spotlight,replace,Pantyhose,jw:v1:tag:8054,36,"slot repurposed: canonical WARD tag, 125 scenes"
+322,Stella Sedona: Overtime Approved,performer_spotlight,replace,Bikini,jw:v1:tag:8057,36,"slot repurposed: canonical WARD tag, 397 scenes"
+323,Vanna Bardot Presents: Questionable Decisions,performer_spotlight,replace,Uniform,jw:v1:tag:8058,36,"slot repurposed: canonical WARD tag, 371 scenes"
+324,Veronica Avluv: Main Character Hours,performer_spotlight,replace,Latex/leather,jw:v1:tag:8059,36,"slot repurposed: canonical WARD tag, 519 scenes"
+325,Alexis Tae: The Binge Committee,performer_spotlight,replace,Glasses,jw:v1:tag:8060,35,"slot repurposed: canonical WARD tag, 437 scenes"
+326,Anna Claire Clouds: The Skip Intro Department,performer_spotlight,replace,Barefoot,jw:v1:tag:8061,35,"slot repurposed: canonical WARD tag, 475 scenes"
+327,Beretta James: No Meeting Could Replace This,performer_spotlight,replace,Casual,jw:v1:tag:8062,35,"slot repurposed: canonical WARD tag, 2450 scenes"
+328,Blake Blossom: The Unscheduled Special,performer_spotlight,replace,Business,jw:v1:tag:8063,36,"slot repurposed: canonical WARD tag, 325 scenes"
+329,Brock Cooper: Cancel Your Plans,performer_spotlight,replace,Jewelry,jw:v1:tag:8064,35,"slot repurposed: canonical WARD tag, 630 scenes"
+330,Lauren Phillips: The Remote Majority,performer_spotlight,replace,Choking/breath,jw:v1:tag:8069,35,"slot repurposed: canonical KINK tag, 542 scenes"
+331,Matthew Meier: Premium Procrastination,performer_spotlight,replace,Nipple torment,jw:v1:tag:8071,35,"slot repurposed: canonical KINK tag, 273 scenes"
+332,Ricky Rascal: Doing the Most,performer_spotlight,replace,Electro play,jw:v1:tag:8072,35,"slot repurposed: canonical KINK tag, 193 scenes"
+333,Rob Piper: The Late Fee Channel,performer_spotlight,replace,Pegging,jw:v1:tag:8075,35,"slot repurposed: canonical KINK tag, 352 scenes"
+334,Sparky Sin Claire: Zero Inbox Energy,performer_spotlight,replace,CBT,jw:v1:tag:8076,36,"slot repurposed: canonical KINK tag, 359 scenes"
+335,Ken Feels: Please Remain Tuned,performer_spotlight,replace,Wax/temperature,jw:v1:tag:8077,34,"slot repurposed: canonical KINK tag, 45 scenes"
+336,Lawson Jones: The Extended Lunch Break,performer_spotlight,replace,Watersports,jw:v1:tag:8078,34,"slot repurposed: canonical KINK tag, 94 scenes"
+337,Lily Love: Not in the Employee Handbook,performer_spotlight,replace,Large insertion,jw:v1:tag:8079,34,"slot repurposed: canonical KINK tag, 108 scenes"
+338,Luke Longly: Plot Armor Included,performer_spotlight,replace,Sensory deprivation,jw:v1:tag:8080,34,"slot repurposed: canonical KINK tag, 363 scenes"
+339,Syren De Mer: The Agenda Has Changed,performer_spotlight,replace,Pet play,jw:v1:tag:8082,34,"slot repurposed: canonical KINK tag, 33 scenes"
+340,Tina Kay: One More Episode,performer_spotlight,replace,Gonzo,jw:v1:tag:8083,34,"slot repurposed: canonical PROD tag, 6510 scenes"
+341,Ava Addams: The Not-So-Silent Partner,performer_spotlight,replace,Compilation,jw:v1:tag:8087,33,"slot repurposed: canonical PROD tag, 77 scenes"
+342,Jenaveve Jolie: After the Group Chat,performer_spotlight,replace,Reality,jw:v1:tag:8089,33,"slot repurposed: canonical PROD tag, 397 scenes"
+343,Matt Williams: This Meeting Runs Late,performer_spotlight,replace,Bukkake,jw:v1:tag:8668,33,"slot repurposed: canonical ACT tag, 277 scenes"
+344,Reagan Foxx: The Recommendation Engine,performer_spotlight,replace,Oiled,jw:v1:tag:8669,33,"slot repurposed: canonical BODY tag, 1041 scenes"
+345,Scarlit Scandal: Airplane Mode Recommended,performer_spotlight,replace,Sci-fi/Fantasy,jw:v1:tag:9575,33,"slot repurposed: canonical THEME tag, 43 scenes"
+346,Stirling Cooper: The Couch Has Questions,performer_spotlight,replace,Wedding,jw:v1:tag:9576,33,"slot repurposed: canonical THEME tag, 34 scenes"
+347,Vina Sky: Nothing on the Calendar,performer_spotlight,replace,Medical,jw:v1:tag:9580,33,"slot repurposed: canonical KINK tag, 58 scenes"
+348,Angelo Godshack: The Ratings Department,performer_spotlight,replace,Rough sex,jw:v1:tag:9581,32,"slot repurposed: canonical KINK tag, 99 scenes"
+349,Bella Angel: Full-Time Distraction,performer_spotlight,replace,Softcore,jw:v1:tag:9583,32,"slot repurposed: canonical PROD tag, 27 scenes"
+350,Elsa Jean: Nobody Read the Memo,performer_spotlight,replace,Roleplay (no Narrative),jw:v1:taginex:8026:ex8085,32,slot repurposed: locked subtraction channel: THEME: Roleplay minus Narrative
+351,Jessa Rhodes: The Opening Credits Club,performer_spotlight,replace,Spanking/impact (no Gonzo),jw:v1:taginex:8066:ex8083,32,slot repurposed: locked subtraction channel: KINK: Spanking/impact minus Gonzo
+352,Juan Lucho Has the Remote,performer_spotlight,replace,Gonzo (no 1M1F),jw:v1:taginex:8083:ex7876,32,slot repurposed: locked subtraction channel: PROD: Gonzo minus 1M1F
+353,Kenzie Anne: HR Would Like a Word,performer_spotlight,replace,Narrative (no Gonzo),jw:v1:taginex:8085:ex8083,32,slot repurposed: locked subtraction channel: PROD: Narrative minus Gonzo
+354,Leah Gotti vs. the Bedtime Schedule,performer_spotlight,replace,Breast play + Living room,jw:v1:tagpair:8039:10210,32,"slot repurposed: two-tag concept, captures 23% of smaller parent, lift 3.6"
+355,Mona Wales: The Plot Thickens,performer_spotlight,replace,Married IRL + 1M2F,jw:v1:tagpair:4721:7882,32,"slot repurposed: two-tag concept, captures 28% of smaller parent, lift 1.49"
+356,Richie Calhoun & the Missing Script,performer_spotlight,replace,Group + Orgy,jw:v1:tagpair:6188:10214,32,"slot repurposed: two-tag concept, captures 61% of smaller parent, lift 9.75"
+357,Skin Diamond: Do Not Auto-Play at Work,performer_spotlight,replace,1M2F + Facesitting,jw:v1:tagpair:7882:10211,32,"slot repurposed: two-tag concept, captures 29% of smaller parent, lift 3.08"
+358,Adria Rae: Overtime Approved,performer_spotlight,replace,Vaginal sex + Casual,jw:v1:tagpair:7975:8062,31,"slot repurposed: two-tag concept, captures 45% of smaller parent, lift 2.62"
+359,Chris Johnson Presents: Questionable Decisions,performer_spotlight,replace,Fingering + Married IRL,jw:v1:tagpair:4721:7981,31,"slot repurposed: two-tag concept, captures 21% of smaller parent, lift 0.96"
+360,Evelin Stone: Main Character Hours,performer_spotlight,replace,Fingering + Spanking/impact,jw:v1:tagpair:7981:8066,31,"slot repurposed: two-tag concept, captures 41% of smaller parent, lift 1.91"
+361,Levi Cash: The Binge Committee,performer_spotlight,replace,Kissing + 1M2F,jw:v1:tagpair:7882:7984,31,"slot repurposed: two-tag concept, captures 35% of smaller parent, lift 2.77"
+362,Lucy Li: The Skip Intro Department,performer_spotlight,replace,Kissing + Medium breasts,jw:v1:tagpair:7984:8005,31,"slot repurposed: two-tag concept, captures 39% of smaller parent, lift 3.14"
+363,Lulu Chu: No Meeting Could Replace This,performer_spotlight,replace,Cumshot - internal + Taboo,jw:v1:tagpair:7989:8023,31,"slot repurposed: two-tag concept, captures 27% of smaller parent, lift 3.22"
+364,Mandy Flores: The Unscheduled Special,performer_spotlight,replace,Cumshot - internal + POV,jw:v1:tagpair:7989:8084,31,"slot repurposed: two-tag concept, captures 22% of smaller parent, lift 2.65"
+365,Max Fills: Cancel Your Plans,performer_spotlight,replace,Small ass + Outdoor,jw:v1:tagpair:7996:8040,31,"slot repurposed: two-tag concept, captures 26% of smaller parent, lift 3.55"
+366,Mitt Aziani: The Remote Majority,performer_spotlight,replace,Medium ass + Thong,jw:v1:tagpair:7997:8055,31,"slot repurposed: two-tag concept, captures 48% of smaller parent, lift 3.88"
+367,Alina Lopez: Premium Procrastination,performer_spotlight,replace,Athletic + Humiliation,jw:v1:tagpair:8000:8068,30,"slot repurposed: two-tag concept, captures 43% of smaller parent, lift 3.16"
+368,Bella Rossi: Doing the Most,performer_spotlight,replace,Muscular + Amateur,jw:v1:tagpair:8015:8086,30,"slot repurposed: two-tag concept, captures 24% of smaller parent, lift 3.5"
+369,Canela Skin: The Late Fee Channel,performer_spotlight,replace,Average body + Outdoor,jw:v1:tagpair:8019:8040,30,"slot repurposed: two-tag concept, captures 31% of smaller parent, lift 3.73"
+370,Chanel Camryn: Zero Inbox Energy,performer_spotlight,replace,Cheating + Thong,jw:v1:tagpair:8020:8055,30,"slot repurposed: two-tag concept, captures 30% of smaller parent, lift 4.28"
+371,George Uhl: Please Remain Tuned,performer_spotlight,replace,Roleplay + Dom/Sub,jw:v1:tagpair:8026:8067,30,"slot repurposed: two-tag concept, captures 47% of smaller parent, lift 4.0"
+372,Harmony Cage: The Extended Lunch Break,performer_spotlight,replace,Roleplay + Narrative,jw:v1:tagpair:8026:8085,30,"slot repurposed: two-tag concept, captures 74% of smaller parent, lift 6.23"
+373,India Summer: Not in the Employee Handbook,performer_spotlight,replace,Bedroom + Breast play,jw:v1:tagpair:8037:10210,30,"slot repurposed: two-tag concept, captures 28% of smaller parent, lift 3.84"
+374,J. Jay: Plot Armor Included,performer_spotlight,replace,Bedroom + Cheating,jw:v1:tagpair:8020:8037,30,"slot repurposed: two-tag concept, captures 25% of smaller parent, lift 3.46"
+375,Marsha May: The Agenda Has Changed,performer_spotlight,replace,Lingerie + Stockings,jw:v1:tagpair:8051:8053,30,"slot repurposed: two-tag concept, captures 47% of smaller parent, lift 3.59"
+380,Babes: Where the Budget Went,studio_spotlight,replace,Heels + Average body,jw:v1:tagpair:8019:8052,532,"slot repurposed: two-tag concept, captures 34% of smaller parent, lift 3.34"
+398,Touch My Wife: The Late-Night Department,studio_spotlight,replace,Heels + Cheating,jw:v1:tagpair:8020:8052,188,"slot repurposed: two-tag concept, captures 34% of smaller parent, lift 3.27"
+405,Penthouse Gold: Not Your Local News,studio_spotlight,replace,Dress + Bedroom,jw:v1:tagpair:8037:8056,162,"slot repurposed: two-tag concept, captures 26% of smaller parent, lift 3.52"
+411,Deep Lush: The Talent Department,studio_spotlight,replace,Dress + Living room,jw:v1:tagpair:8039:8056,144,"slot repurposed: two-tag concept, captures 27% of smaller parent, lift 3.59"
+413,Interracial Pass: Remote Control Issues,studio_spotlight,replace,Casual + Breast play,jw:v1:tagpair:8062:10210,140,"slot repurposed: two-tag concept, captures 45% of smaller parent, lift 3.74"
+416,Dorcel Club: The Plot Factory,studio_spotlight,replace,Casual + Dress,jw:v1:tagpair:8056:8062,130,"slot repurposed: two-tag concept, captures 47% of smaller parent, lift 3.86"
+426,Love Her Feet: The Unofficial Afterparty,studio_spotlight,replace,Spanking/impact + Athletic,jw:v1:tagpair:8000:8066,93,"slot repurposed: two-tag concept, captures 62% of smaller parent, lift 3.19"
+433,Lethal Hardcore: Remote Control Issues,studio_spotlight,replace,Spanking/impact + Heels,jw:v1:tagpair:8052:8066,75,"slot repurposed: two-tag concept, captures 37% of smaller parent, lift 1.92"
+436,She Will Cheat: The Plot Factory,studio_spotlight,replace,Dom/Sub + Group,jw:v1:tagpair:6188:8067,67,"slot repurposed: two-tag concept, captures 24% of smaller parent, lift 2.15"
+444,Baby Got Boobs: The Streaming Committee,studio_spotlight,replace,Dom/Sub + Sex toys,jw:v1:tagpair:7991:8067,59,"slot repurposed: two-tag concept, captures 34% of smaller parent, lift 3.1"
+445,My Sister's Hot Friend: Not Your Local News,studio_spotlight,replace,Foot fetish + Bathroom,jw:v1:tagpair:8038:8073,59,"slot repurposed: two-tag concept, captures 18% of smaller parent, lift 2.84"
+446,Naughty Office: The Unofficial Afterparty,studio_spotlight,replace,Foot fetish + Barefoot,jw:v1:tagpair:8061:8073,58,"slot repurposed: two-tag concept, captures 23% of smaller parent, lift 3.59"
+447,Sneaky Sex: Script Pending,studio_spotlight,replace,POV + Step-family,jw:v1:tagpair:8022:8084,57,"slot repurposed: two-tag concept, captures 21% of smaller parent, lift 3.86"
+448,Lubed: Channel Surfing Hazard,studio_spotlight,replace,Amateur + Thong,jw:v1:tagpair:8055:8086,56,"slot repurposed: two-tag concept, captures 21% of smaller parent, lift 3.2"
+449,"2 Drops: Prime Time, Questionable Timing",studio_spotlight,replace,1M1F + Vaginal sex + Casual,jw:v1:tagtriple:7876:7975:8062,54,"slot repurposed: locked three-tag micro-channel, <= 75% of any parent pair, 832 scenes"
+450,Nuru Massage: All Hands Off the Remote,studio_spotlight,replace,1M1F + Cheating + Gonzo,jw:v1:tagtriple:7876:8020:8083,54,"slot repurposed: locked three-tag micro-channel, <= 77% of any parent pair, 842 scenes"
+451,Digital Playground Episodes: The Talent Department,studio_spotlight,replace,1M1F + Roleplay + Dom/Sub,jw:v1:tagtriple:7876:8026:8067,53,"slot repurposed: locked three-tag micro-channel, <= 55% of any parent pair, 575 scenes"
+452,Porn World: The Credits Can Wait,studio_spotlight,replace,Vaginal sex + Big dick + Spanking/impact,jw:v1:tagtriple:7975:8016:8066,53,"slot repurposed: locked three-tag micro-channel, <= 66% of any parent pair, 903 scenes"
+453,Porn Force: Remote Control Issues,studio_spotlight,replace,Anal sex + Shaved + Humiliation,jw:v1:tagtriple:7976:8002:8068,52,"slot repurposed: locked three-tag micro-channel, <= 78% of any parent pair, 825 scenes"
+455,ZZ Series: The Rerun Situation,studio_spotlight,replace,Anal sex + Roleplay + Bondage,jw:v1:tagtriple:7976:8026:8065,49,"slot repurposed: locked three-tag micro-channel, <= 80% of any parent pair, 800 scenes"
+456,Submissived: The Plot Factory,studio_spotlight,replace,Blowjob + Roleplay + Narrative,jw:v1:tagtriple:7977:8026:8085,47,"slot repurposed: locked three-tag micro-channel, <= 64% of any parent pair, 694 scenes"
+457,Ashlynn Brooke: Approved by Absolutely Nobody,studio_spotlight,replace,Cunnilingus + Big breasts + Cheating,jw:v1:tagtriple:7978:8003:8020,46,"slot repurposed: locked three-tag micro-channel, <= 79% of any parent pair, 656 scenes"
+458,Pure Mature: The Late-Night Department,studio_spotlight,replace,Cunnilingus + Big dick + Cheating,jw:v1:tagtriple:7978:8016:8020,44,"slot repurposed: locked three-tag micro-channel, <= 77% of any parent pair, 759 scenes"
+459,"Mommy Got Boobs: House Rules, House Exceptions",studio_spotlight,replace,Cunnilingus + Bedroom + Gonzo,jw:v1:tagtriple:7978:8037:8083,43,"slot repurposed: locked three-tag micro-channel, <= 74% of any parent pair, 616 scenes"
+460,My Friend's Hot Mom: Where the Budget Went,studio_spotlight,replace,Fingering + Big dick + Spanking/impact,jw:v1:tagtriple:7981:8016:8066,41,"slot repurposed: locked three-tag micro-channel, <= 54% of any parent pair, 874 scenes"
+462,Taboo Heat: The Never-Ending Pilot,studio_spotlight,replace,Cumshot - face + Shaved + Lingerie,jw:v1:tagtriple:7986:8002:8051,39,"slot repurposed: locked three-tag micro-channel, <= 55% of any parent pair, 773 scenes"
+463,Big Butts Like It Big: Quality Time Control,studio_spotlight,replace,Cumshot - face + Big breasts + Heels,jw:v1:tagtriple:7986:8003:8052,38,"slot repurposed: locked three-tag micro-channel, <= 60% of any parent pair, 716 scenes"
+464,Mean Bitches: The Streaming Committee,studio_spotlight,replace,Cumshot - face + Dress + Gonzo,jw:v1:tagtriple:7986:8056:8083,38,"slot repurposed: locked three-tag micro-channel, <= 77% of any parent pair, 737 scenes"
+465,SexArt: Not Your Local News,studio_spotlight,replace,Cumshot - mouth + Casual + Gonzo,jw:v1:tagtriple:7987:8062:8083,38,"slot repurposed: locked three-tag micro-channel, <= 68% of any parent pair, 720 scenes"
+466,EroticaX: The Unofficial Afterparty,studio_spotlight,replace,Fantasy Massage (Network),jw:v1:studio:1017,36,"slot repurposed: hierarchical network/studio, 67 post-JAV scenes"
+467,Throated: Script Pending,studio_spotlight,replace,Penthouse,jw:v1:studio:1083,36,"slot repurposed: hierarchical network/studio, 165 post-JAV scenes"
+468,Doe Projects: Channel Surfing Hazard,studio_spotlight,replace,Adult Time Originals,jw:v1:studio:1261,35,"slot repurposed: hierarchical network/studio, 411 post-JAV scenes"
+469,"Housewife 1 On 1: Prime Time, Questionable Timing",studio_spotlight,replace,Full Porn Network,jw:v1:studio:1329,34,"slot repurposed: hierarchical network/studio, 105 post-JAV scenes"
+470,Mom XXX: All Hands Off the Remote,studio_spotlight,replace,ExploitedX,jw:v1:studio:1365,34,"slot repurposed: hierarchical network/studio, 302 post-JAV scenes"
+471,Porn Fidelity: The Talent Department,studio_spotlight,replace,XEmpire,jw:v1:studio:144,34,"slot repurposed: hierarchical network/studio, 224 post-JAV scenes"
+472,Wifey: The Credits Can Wait,studio_spotlight,replace,Blowpass (Network),jw:v1:studio:153,34,"slot repurposed: hierarchical network/studio, 107 post-JAV scenes"
+473,POVD: Remote Control Issues,studio_spotlight,replace,NF Media,jw:v1:studio:1547,33,"slot repurposed: hierarchical network/studio, 153 post-JAV scenes"
+474,Wicked: The Binge Bureau,studio_spotlight,replace,Mile High Media,jw:v1:studio:165,35,"slot repurposed: hierarchical network/studio, 214 post-JAV scenes"
+475,X-Art: The Rerun Situation,studio_spotlight,replace,BangBros,jw:v1:studio:168,33,"slot repurposed: hierarchical network/studio, 79 post-JAV scenes"
+476,Miss Penny Barber: The Plot Factory,studio_spotlight,replace,Adult Prime,jw:v1:studio:1738,31,"slot repurposed: hierarchical network/studio, 207 post-JAV scenes"
+477,MYLF X Mandy Flores: Approved by Absolutely Nobody,studio_spotlight,replace,TeamSkeet (Network),jw:v1:studio:176,31,"slot repurposed: hierarchical network/studio, 358 post-JAV scenes"
+478,Vivid: The Late-Night Department,studio_spotlight,replace,MetArt Network,jw:v1:studio:1804,43,"slot repurposed: hierarchical network/studio, 62 post-JAV scenes"
+479,"Arch Angel: House Rules, House Exceptions",studio_spotlight,replace,Mofos,jw:v1:studio:196,30,"slot repurposed: hierarchical network/studio, 143 post-JAV scenes"
+481,LeWood: The Production Meeting,studio_spotlight,replace,Kink,jw:v1:studio:198,30,"slot repurposed: hierarchical network/studio, 1792 post-JAV scenes"
+482,MILF Hunter: The Never-Ending Pilot,studio_spotlight,replace,Dorcel,jw:v1:studio:200,30,"slot repurposed: hierarchical network/studio, 131 post-JAV scenes"
+483,My Dad's Hot Girlfriend: Quality Time Control,studio_spotlight,replace,Kelly Madison Media,jw:v1:studio:203,30,"slot repurposed: hierarchical network/studio, 271 post-JAV scenes"
+484,My Wife's Hot Friend: The Streaming Committee,studio_spotlight,replace,Girlsway (Network),jw:v1:studio:206,30,"slot repurposed: hierarchical network/studio, 82 post-JAV scenes"
+485,My First Sex Teacher: Not Your Local News,studio_spotlight,replace,Fuck You Cash,jw:v1:studio:208,29,"slot repurposed: hierarchical network/studio, 1130 post-JAV scenes"
+486,Hot Wife Fun: The Unofficial Afterparty,studio_spotlight,replace,Metro HD,jw:v1:studio:212,28,"slot repurposed: hierarchical network/studio, 73 post-JAV scenes"
+487,House Of Taboo: Script Pending,studio_spotlight,replace,Nubiles Porn (Network),jw:v1:studio:217,28,"slot repurposed: hierarchical network/studio, 91 post-JAV scenes"
+488,Immoral Live: Channel Surfing Hazard,studio_spotlight,replace,Manipulative Media,jw:v1:studio:2204,28,"slot repurposed: hierarchical network/studio, 205 post-JAV scenes"
+489,"Mrs. Creampie: Prime Time, Questionable Timing",studio_spotlight,replace,Reality Kings,jw:v1:studio:223,28,"slot repurposed: hierarchical network/studio, 910 post-JAV scenes"
+528,Headset & Forget,tag_spotlight,replace,La Touraine,jw:v1:studio:2315,8,"slot repurposed: hierarchical network/studio, 150 post-JAV scenes"
+540,Wishful Thinking Network,tag_spotlight,replace,Brazzers,jw:v1:studio:242,5,"slot repurposed: hierarchical network/studio, 1868 post-JAV scenes"
+550,"Hot Takes, Cold Opens: Meet Oversized Delivery",tag_pair,replace,Love Her Films,jw:v1:studio:2446,33,"slot repurposed: hierarchical network/studio, 102 post-JAV scenes"
+551,Double Booking: Third Seat Included,tag_pair,replace,Naughty America (Network),jw:v1:studio:247,309,"slot repurposed: hierarchical network/studio, 818 post-JAV scenes"
+552,Pool Rules Are Suggestions After Two-Piece,tag_pair,replace,MYLF,jw:v1:studio:251,133,"slot repurposed: hierarchical network/studio, 94 post-JAV scenes"
+553,Pool Rules Are Suggestions: A Slick Production Values Special,tag_pair,replace,Vixen Media Group,jw:v1:studio:2695,112,"slot repurposed: hierarchical network/studio, 1992 post-JAV scenes"
+554,"Rom-Com, Credits Optional Goes Good Lighting Department",tag_pair,replace,Hush Hush Entertainment,jw:v1:studio:2696,276,"slot repurposed: hierarchical network/studio, 140 post-JAV scenes"
+555,The Third-Wheel Deal Presents Reality Needs a Producer,tag_pair,replace,Teens Love Huge Cocks,jw:v1:studio:29,94,"slot repurposed: hierarchical network/studio, 63 post-JAV scenes"
+556,"HR Has Left the Chat: Meanwhile, Business Very Casual",tag_pair,replace,Moms Bang Teens,jw:v1:studio:339,51,"slot repurposed: hierarchical network/studio, 61 post-JAV scenes"
+557,Ensemble Cast Away / Standing Room Only: Crossover Night,tag_pair,replace,Lethal Pass,jw:v1:studio:759,89,"slot repurposed: hierarchical network/studio, 77 post-JAV scenes"
+558,"No Shoes, Full Service: The Bling Outside the Box Department",tag_pair,replace,Devil's Film (Network),jw:v1:studio:840,290,"slot repurposed: hierarchical network/studio, 75 post-JAV scenes"
+559,Double Booking + Standing Room Only: Scheduling Conflict,tag_pair,replace,ManyVids,jw:v1:studio:844,59,"slot repurposed: hierarchical network/studio, 62 post-JAV scenes"
+560,Steam Team Six: Meet Slick Production Values,tag_pair,replace,Porn Pros,jw:v1:studio:883,271,"slot repurposed: hierarchical network/studio, 68 post-JAV scenes"
+561,Neighborhood Watch-ish & the Reality Needs a Producer Situation,tag_pair,replace,LetsDoeIt,jw:v1:studio:927,108,"slot repurposed: hierarchical network/studio, 472 post-JAV scenes"
+562,"Bedtime, Allegedly After No Shoes, Full Service",tag_pair,replace,Babes (Network),jw:v1:studio:980,272,"slot repurposed: hierarchical network/studio, 538 post-JAV scenes"
+563,Knead to Know: A Slick Production Values Special,tag_pair,replace,TeamSkeet (Network) · Narrative,jw:v1:studiotag:176:8085,149,"slot repurposed: TeamSkeet (Network) signature (39% of the network), lift 4.53"
+564,Batteries Not Included Goes Point of Contention,tag_pair,replace,Kink · Sex toys,jw:v1:studiotag:198:7991,213,"slot repurposed: Kink signature (34% of the network), lift 3.3"
+565,Nature Calls the Shots Presents Two-Piece,tag_pair,replace,Kink · Roleplay,jw:v1:studiotag:198:8026,213,"slot repurposed: Kink signature (53% of the network), lift 4.44"
+566,"The Mute Button: Meanwhile, Point of Contention",tag_pair,replace,Kink · Gags/restraints,jw:v1:studiotag:198:8070,124,"slot repurposed: Kink signature (29% of the network), lift 10.11"
+567,Point of Contention / Watt Could Go Wrong: Crossover Night,tag_pair,replace,Fuck You Cash · Amateur,jw:v1:studiotag:208:8086,61,"slot repurposed: Fuck You Cash signature (24% of the network), lift 3.52"
+568,The Mute Button: The Watt Could Go Wrong Department,tag_pair,replace,Reality Kings · Thong,jw:v1:studiotag:223:8055,91,"slot repurposed: Reality Kings signature (22% of the network), lift 4.21"
+569,Material Witness + The Mute Button: Scheduling Conflict,tag_pair,replace,Reality Kings · Casual,jw:v1:studiotag:223:8062,110,"slot repurposed: Reality Kings signature (38% of the network), lift 3.19"
+570,"Bedtime, Allegedly: Meet Bling Outside the Box",tag_pair,replace,Reality Kings · Amateur,jw:v1:studiotag:223:8086,312,"slot repurposed: Reality Kings signature (62% of the network), lift 9.26"
+571,"Slim Pickings, Big Ratings & the Watt Could Go Wrong Situation",tag_pair,replace,Brazzers · Breast play,jw:v1:studiotag:242:10210,116,"slot repurposed: Brazzers signature (28% of the network), lift 4.48"
+572,"The Middle Management After Rom-Com, Credits Optional",tag_pair,replace,Brazzers · Heels,jw:v1:studiotag:242:8052,332,"slot repurposed: Brazzers signature (37% of the network), lift 3.59"
+573,Point Taken: A Bling Outside the Box Special,tag_pair,replace,Brazzers · Dress,jw:v1:studiotag:242:8056,87,"slot repurposed: Brazzers signature (36% of the network), lift 4.85"
+574,Good Lighting Department Goes Crowd-Funded Coverage,tag_pair,replace,Naughty America (Network) · Cumshot - body,jw:v1:studiotag:247:7988,84,"slot repurposed: Naughty America (Network) signature (35% of the network), lift 2.83"
+575,Counter Intelligence Presents Minimal Coverage,tag_pair,replace,Naughty America (Network) · Stockings,jw:v1:studiotag:247:8053,132,"slot repurposed: Naughty America (Network) signature (27% of the network), lift 3.43"
+576,"Counter Intelligence: Meanwhile, Dress Rehearsal",tag_pair,replace,Vixen Media Group · Ass-to-mouth,jw:v1:studiotag:2695:7993,171,"slot repurposed: Vixen Media Group signature (36% of the network), lift 3.5"
+577,Batteries Not Included / Watt Could Go Wrong: Crossover Night,tag_pair,replace,New Sensations · Interactive,jw:v1:studiotag:76:10220,129,"slot repurposed: New Sensations signature (24% of the network), lift 18.07"
+578,HR Has Left the Chat: The Dress Rehearsal Department,tag_pair,replace,Martin Stein & Nancy Ace,jw:v1:perfduo:1063:1064,96,"slot repurposed: locked recurring duo, 25 scenes together, mutuality 0.595, capture 1.0"
+579,Watt Could Go Wrong + Plot Happens: Scheduling Conflict,tag_pair,replace,Little Caprice & Marcello Bravo,jw:v1:perfduo:1066:1067,114,"slot repurposed: locked recurring duo, 12 scenes together, mutuality 0.522, capture 0.667"
+580,The Basement Committee: Meet Roast Department,tag_pair,replace,Ryan Madison & Kelly Madison,jw:v1:perfduo:11:874,87,"slot repurposed: locked recurring duo, 58 scenes together, mutuality 0.239, capture 1.0"
+581,Terms & Conditions Apply & the Counter Intelligence Situation,tag_pair,replace,Adam Ocelot & Eva Elfie,jw:v1:perfduo:1157:1158,171,"slot repurposed: locked recurring duo, 13 scenes together, mutuality 0.271, capture 1.0"
+582,Do Not Adjust Your Set After Plot Happens,tag_pair,replace,Cory Chase & Luke Longly,jw:v1:perfduo:12:1715,187,"slot repurposed: locked recurring duo, 33 scenes together, mutuality 0.224, capture 0.971"
+583,Compact Rear Parking: A Counter Intelligence Special,tag_pair,replace,Steve Holmes & Max Cortes,jw:v1:perfduo:186:3647,148,"slot repurposed: locked recurring duo, 12 scenes together, mutuality 0.071, capture 0.8"
+584,Regular Programming Goes Counter Intelligence,tag_pair,replace,Steve Holmes & Silvia Rubi,jw:v1:perfduo:186:7565,177,"slot repurposed: locked recurring duo, 15 scenes together, mutuality 0.089, capture 1.0"
+585,The Sharing Economy Presents Counter Intelligence,tag_pair,replace,Shane Diesel & Boz,jw:v1:perfduo:239:6762,6,"slot repurposed: locked recurring duo, 28 scenes together, mutuality 0.068, capture 1.0"
+586,"Regular Programming: Meanwhile, Business Very Casual",tag_pair,replace,Mandy Flores & David Flores,jw:v1:perfduo:4598:4791,150,"slot repurposed: locked recurring duo, 14 scenes together, mutuality 0.452, capture 1.0"
+587,Point of Contention / Plot Happens: Crossover Night,tag_pair,replace,Johnny Sins · Rimming,jw:v1:perftag:139:7985,133,"slot repurposed: specialization of Johnny Sins (44% of their scenes), lift 3.32"
+588,Material Witness: The Knot Your Average Department,tag_pair,replace,Johnny Sins · Thong,jw:v1:perftag:139:8055,264,"slot repurposed: specialization of Johnny Sins (24% of their scenes), lift 4.59"
+589,"Slim Pickings, Big Ratings + The Mute Button: Scheduling Conflict",tag_pair,replace,Tyler Nixon · Rimming,jw:v1:perftag:154:7985,257,"slot repurposed: specialization of Tyler Nixon (45% of their scenes), lift 3.37"
+590,Two-Piece: Meet Slick Production Values,tag_pair,replace,Tyler Nixon · Choking/breath,jw:v1:perftag:154:8069,120,"slot repurposed: specialization of Tyler Nixon (39% of their scenes), lift 14.72"
+591,Batteries Not Included & the The Mute Button Situation,tag_pair,replace,Mick Blue · Rimming,jw:v1:perftag:157:7985,310,"slot repurposed: specialization of Mick Blue (30% of their scenes), lift 2.21"
+592,Material Witness After Point of Contention,tag_pair,replace,Xander Corvus · Breast play,jw:v1:perftag:176:10210,57,"slot repurposed: specialization of Xander Corvus (22% of their scenes), lift 3.45"
+593,"Slim Pickings, Big Ratings: A Point of Contention Special",tag_pair,replace,Xander Corvus · Cheating,jw:v1:perftag:176:8020,121,"slot repurposed: specialization of Xander Corvus (23% of their scenes), lift 3.29"
+594,One-Woman Programming Goes Crowd-Funded Coverage,tag_pair,replace,Steve Holmes · Anal sex,jw:v1:perftag:186:7976,143,"slot repurposed: specialization of Steve Holmes (62% of their scenes), lift 3.21"
+595,"Cardio, Allegedly Presents Quality Control Department",tag_pair,replace,Markus Dupree · Anal sex,jw:v1:perftag:21:7976,232,"slot repurposed: specialization of Markus Dupree (64% of their scenes), lift 3.32"
+596,"Pilot Episode Energy: Meanwhile, Do-It-Yourself",tag_pair,replace,Keiran Lee · Rimming,jw:v1:perftag:60:7985,150,"slot repurposed: specialization of Keiran Lee (48% of their scenes), lift 3.56"
+597,The Daily Grind / Solar Panel Discussion: Crossover Night,tag_pair,replace,Keiran Lee · Dress,jw:v1:perftag:60:8056,21,"slot repurposed: specialization of Keiran Lee (37% of their scenes), lift 4.88"
+598,Method Acting Gone Rogue: The Do Not Adjust Your Set Department,tag_pair,replace,Tommy Pistol · Dom/Sub,jw:v1:perftag:61:8067,199,"slot repurposed: specialization of Tommy Pistol (52% of their scenes), lift 4.8"
+599,Point Taken + Oversized Delivery: Scheduling Conflict,tag_pair,retire,,,30,not selected in the v4 final catalog
+600,The Mute Button: Meet Plot Happens,tag_pair,retire,,,234,not selected in the v4 final catalog
+601,"Lip Service & the Rom-Com, Credits Optional Situation",tag_pair,retire,,,389,not selected in the v4 final catalog
+602,Ensemble Cast Away After The Plus-One Exchange,tag_pair,retire,,,60,not selected in the v4 final catalog
+603,Ensemble Cast Away: A Double Booking Special,tag_pair,retire,,,161,not selected in the v4 final catalog
+604,Material Witness Goes Management & Other Issues,tag_pair,retire,,,272,not selected in the v4 final catalog
+605,"Cardio, Allegedly Presents Counter Intelligence",tag_pair,retire,,,222,not selected in the v4 final catalog
+606,"Two-Woman Double Bill: Meanwhile, The Daily Grind",tag_pair,retire,,,154,not selected in the v4 final catalog
+607,Compact Rear Parking / Business Very Casual: Crossover Night,tag_pair,retire,,,114,not selected in the v4 final catalog
+609,"Rom-Com, Credits Optional + Plot Happens: Scheduling Conflict",tag_pair,retire,,,251,not selected in the v4 final catalog
+610,Compact Rear Parking: Meet Minimal Coverage,tag_pair,retire,,,373,not selected in the v4 final catalog
+611,Public Relations Problem & the Roast Department Situation,tag_pair,retire,,,167,not selected in the v4 final catalog
+612,"Slim Pickings, Big Ratings After Do Not Adjust Your Set",tag_pair,retire,,,142,not selected in the v4 final catalog
+613,"Slim Pickings, Big Ratings: A Rom-Com, Credits Optional Special",tag_pair,retire,,,244,not selected in the v4 final catalog
+614,The Mute Button Goes Do Not Adjust Your Set,tag_pair,retire,,,100,not selected in the v4 final catalog
+615,Dress Rehearsal Presents Business Very Casual,tag_pair,retire,,,207,not selected in the v4 final catalog
+616,"Material Witness: Meanwhile, Roast Department",tag_pair,retire,,,228,not selected in the v4 final catalog
+617,Knot Your Average / Point of Contention: Crossover Night,tag_pair,retire,,,216,not selected in the v4 final catalog
+618,Middle of the Rear: The Counter Intelligence Department,tag_pair,retire,,,188,not selected in the v4 final catalog
+619,The Daily Grind + Bling Outside the Box: Scheduling Conflict,tag_pair,retire,,,51,not selected in the v4 final catalog
+620,"The Daily Grind: Meet Bedtime, Allegedly",tag_pair,retire,,,118,not selected in the v4 final catalog
+621,Method Acting Gone Rogue & the Good Lighting Department Situation,tag_pair,retire,,,422,not selected in the v4 final catalog
+622,Point Taken After Dress Code: Whatever,tag_pair,retire,,,175,not selected in the v4 final catalog
+623,Solar Panel Discussion: A Dress Code: Whatever Special,tag_pair,retire,,,106,not selected in the v4 final catalog
+624,The Sharing Economy Goes Business Very Casual,tag_pair,retire,,,4,not selected in the v4 final catalog
+625,Knot Your Average Presents Plot Happens,tag_pair,retire,,,875,not selected in the v4 final catalog
+626,"Roast Department: Meanwhile, Plot Happens",tag_pair,retire,,,937,not selected in the v4 final catalog
+627,"Point Taken / No Shoes, Full Service: Crossover Night",tag_pair,retire,,,56,not selected in the v4 final catalog
+628,The Sharing Economy: The Reality Needs a Producer Department,tag_pair,retire,,,15,not selected in the v4 final catalog
+629,Knot Your Average + Do Not Adjust Your Set: Scheduling Conflict,tag_pair,retire,,,284,not selected in the v4 final catalog
+630,The Basement Committee: Meet The Mute Button,tag_pair,retire,,,37,not selected in the v4 final catalog
+631,"Slim Pickings, Big Ratings & the Knot Your Average Situation",tag_pair,retire,,,850,not selected in the v4 final catalog
+632,Aftermarket Features After Counter Intelligence,tag_pair,retire,,,200,not selected in the v4 final catalog
+633,"Regularly Scheduled Mischief: A No Shoes, Full Service Special",tag_pair,retire,,,343,not selected in the v4 final catalog
+634,"Slim Pickings, Big Ratings Goes Public Relations Problem",tag_pair,retire,,,132,not selected in the v4 final catalog
+635,"Cardio, Allegedly Presents Watt Could Go Wrong",tag_pair,retire,,,112,not selected in the v4 final catalog
+636,"Slim Pickings, Big Ratings: Meanwhile, Good Lighting Department",tag_pair,retire,,,266,not selected in the v4 final catalog
+637,Batteries Not Included / The Basement Committee: Crossover Night,tag_pair,retire,,,66,not selected in the v4 final catalog
+639,The Daily Grind + Couch Potato Confidential: Scheduling Conflict,tag_pair,retire,,,90,not selected in the v4 final catalog
+640,Compact Rear Parking: Meet Steam Team Six,tag_pair,retire,,,165,not selected in the v4 final catalog
+641,Between the Headlines & the Counter Intelligence Situation,tag_pair,retire,,,109,not selected in the v4 final catalog
+642,"Rom-Com, Credits Optional After Please Hold, Indefinitely",tag_pair,retire,,,393,not selected in the v4 final catalog
+645,Batteries Not Included Presents Handle With Flair,tag_pair,retire,,,64,not selected in the v4 final catalog
+646,"The Other Entrance: Meanwhile, Watt Could Go Wrong",tag_pair,retire,,,139,not selected in the v4 final catalog
+647,Roast Department / The Mute Button: Crossover Night,tag_pair,retire,,,500,not selected in the v4 final catalog
+648,Point Taken: The Solar Panel Discussion Department,tag_pair,retire,,,29,not selected in the v4 final catalog
+649,The Daily Grind + Point Taken: Scheduling Conflict,tag_pair,retire,,,40,not selected in the v4 final catalog
+650,The Third-Wheel Deal: Neighborhood Watch-ish Meets Reality Needs a Producer,tag_triple,retire,,,69,not selected in the v4 final catalog
+651,Nature Calls the Shots: Pool Rules Are Suggestions Meets Two-Piece,tag_triple,retire,,,120,not selected in the v4 final catalog
+652,"Bedtime, Allegedly: No Shoes, Full Service Meets Bling Outside the Box",tag_triple,retire,,,183,not selected in the v4 final catalog
+653,Ensemble Cast Away: Double Booking Meets Standing Room Only,tag_triple,retire,,,49,not selected in the v4 final catalog
+654,Pool Rules Are Suggestions: Two-Piece Meets Slick Production Values,tag_triple,retire,,,63,not selected in the v4 final catalog
+655,Neighborhood Watch-ish: Public Relations Problem Meets Roast Department,tag_triple,retire,,,113,not selected in the v4 final catalog
+656,"Nature Calls the Shots: No Shoes, Full Service Meets Bling Outside the Box",tag_triple,retire,,,85,not selected in the v4 final catalog
+657,The Mute Button: Point of Contention Meets Plot Happens,tag_triple,retire,,,74,not selected in the v4 final catalog
+658,Nature Calls the Shots: Pool Rules Are Suggestions Meets Slick Production Values,tag_triple,retire,,,92,not selected in the v4 final catalog
+659,"Lean, Seen & on the Scene",tag_triple,retire,,,89,not selected in the v4 final catalog
+660,Batteries Not Included: The Mute Button Meets Watt Could Go Wrong,tag_triple,retire,,,66,not selected in the v4 final catalog
+661,Point of Contention: Watt Could Go Wrong Meets Plot Happens,tag_triple,retire,,,43,not selected in the v4 final catalog
+662,Neighborhood Watch-ish: The Sharing Economy Meets Reality Needs a Producer,tag_triple,retire,,,11,not selected in the v4 final catalog
+663,"Original Equipment: Hot Takes, Cold Opens Meets Oversized Delivery",tag_triple,retire,,,29,not selected in the v4 final catalog
+664,HR Has Left the Chat: Dress Rehearsal Meets Business Very Casual,tag_triple,retire,,,39,not selected in the v4 final catalog
+665,"Slim Pickings, Big Ratings: The Mute Button Meets Watt Could Go Wrong",tag_triple,retire,,,53,not selected in the v4 final catalog
+666,"Couch Potato Confidential: No Shoes, Full Service Meets Bling Outside the Box",tag_triple,retire,,,68,not selected in the v4 final catalog
+667,"Slim Pickings, Big Ratings: The Mute Button Meets Point of Contention",tag_triple,retire,,,61,not selected in the v4 final catalog
+668,Fuzz Worth Watching: Neighborhood Watch-ish Meets Public Relations Problem,tag_triple,retire,,,76,not selected in the v4 final catalog
+669,Manual Override: The Third-Wheel Deal Meets Reality Needs a Producer,tag_triple,retire,,,83,not selected in the v4 final catalog
+670,Compact Rear Parking: Pool Rules Are Suggestions Meets Slick Production Values,tag_triple,retire,,,42,not selected in the v4 final catalog
+671,"Manual Override: No Shoes, Full Service Meets Bling Outside the Box",tag_triple,retire,,,160,not selected in the v4 final catalog
+672,Point Taken: Bling Outside the Box Meets Oversized Delivery,tag_triple,retire,,,25,not selected in the v4 final catalog
+673,"Solar Panel Discussion: No Shoes, Full Service Meets Bling Outside the Box",tag_triple,retire,,,25,not selected in the v4 final catalog
+674,Two Men & a Plot Twist: Double Booking Meets Scenic Route,tag_triple,retire,,,124,not selected in the v4 final catalog
+675,"Slim Pickings, Big Ratings: Point of Contention Meets Watt Could Go Wrong",tag_triple,retire,,,37,not selected in the v4 final catalog
+676,Terms & Conditions Apply: Steam Team Six Meets Pool Rules Are Suggestions,tag_triple,retire,,,2,not selected in the v4 final catalog
+677,Material Witness: The Mute Button Meets Point of Contention,tag_triple,retire,,,37,not selected in the v4 final catalog
+678,"Special Delivery Desk: No Shoes, Full Service Meets Bling Outside the Box",tag_triple,retire,,,156,not selected in the v4 final catalog
+679,The Mute Button: Do Not Adjust Your Set Meets Plot Happens,tag_triple,retire,,,65,not selected in the v4 final catalog
+680,Regular Programming: Pool Rules Are Suggestions Meets Slick Production Values,tag_triple,retire,,,42,not selected in the v4 final catalog
+681,Nature Calls the Shots: Two-Piece Meets Slick Production Values,tag_triple,retire,,,83,not selected in the v4 final catalog
+682,Poolside Terms & Slippery Conditions,tag_triple,retire,,,19,not selected in the v4 final catalog
+683,The Mute Button: Watt Could Go Wrong Meets Plot Happens,tag_triple,retire,,,48,not selected in the v4 final catalog
+684,Regular Programming: Dress Rehearsal Meets Business Very Casual,tag_triple,retire,,,108,not selected in the v4 final catalog
+685,Neighborhood Watch-ish: Public Relations Problem Meets Reality Needs a Producer,tag_triple,retire,,,35,not selected in the v4 final catalog
+686,Nature Calls the Shots: Park & Recreation Meets Dress Rehearsal,tag_triple,retire,,,66,not selected in the v4 final catalog
+687,Terms & Conditions Apply: The Sharing Economy Meets Counter Intelligence,tag_triple,retire,,,2,not selected in the v4 final catalog
+688,Two Men & a Plot Twist: The Other Entrance Meets Double Booking,tag_triple,retire,,,223,not selected in the v4 final catalog
+689,"Coverage Area Expanded: Rom-Com, Credits Optional Meets Good Lighting Department",tag_triple,retire,,,143,not selected in the v4 final catalog
+690,Batteries Not Included: Point of Contention Meets Plot Happens,tag_triple,retire,,,117,not selected in the v4 final catalog
+691,Compact Rear Parking: Steam Team Six Meets Slick Production Values,tag_triple,retire,,,104,not selected in the v4 final catalog
+692,The Other Entrance: Point of Contention Meets Watt Could Go Wrong,tag_triple,retire,,,46,not selected in the v4 final catalog
+693,Compact Rear Parking: Dress Rehearsal Meets Business Very Casual,tag_triple,retire,,,86,not selected in the v4 final catalog
+694,Ensemble Cast Away: Neighborhood Watch-ish Meets Public Relations Problem,tag_triple,retire,,,53,not selected in the v4 final catalog
+695,"Slim Pickings, Big Ratings: Watt Could Go Wrong Meets Plot Happens",tag_triple,retire,,,76,not selected in the v4 final catalog
+696,Regular Programming: Minimal Coverage Meets Business Very Casual,tag_triple,retire,,,76,not selected in the v4 final catalog
+697,Regular Programming: Counter Intelligence Meets Dress Rehearsal,tag_triple,retire,,,103,not selected in the v4 final catalog
+699,"One-Woman Programming: Rom-Com, Credits Optional Meets Good Lighting Department",tag_triple,retire,,,107,not selected in the v4 final catalog
+700,The Daily Grind; Script Not Found Called in Sick,tag_include_exclude,retire,,,228,not selected in the v4 final catalog
+701,Couch Potato Confidential; Regularly Scheduled Mischief Called in Sick,tag_include_exclude,retire,,,639,not selected in the v4 final catalog
+702,The Daily Grind; Dress Code: Whatever Called in Sick,tag_include_exclude,retire,,,273,not selected in the v4 final catalog
+703,Couch Potato Confidential; Hardware Included Called in Sick,tag_include_exclude,retire,,,628,not selected in the v4 final catalog
+704,Ahead of the Curve; Roast Department Called in Sick,tag_include_exclude,retire,,,605,not selected in the v4 final catalog
+705,Minimal Coverage; Middle of the Rear Called in Sick,tag_include_exclude,retire,,,554,not selected in the v4 final catalog
+706,Ahead of the Curve; Management & Other Issues Called in Sick,tag_include_exclude,retire,,,638,not selected in the v4 final catalog
+707,Minimal Coverage; Special Delivery Desk Called in Sick,tag_include_exclude,retire,,,533,not selected in the v4 final catalog
+708,Two-Woman Double Bill; Hardware Included Called in Sick,tag_include_exclude,retire,,,463,not selected in the v4 final catalog
+709,Unexpected Weather; Sizeable Developments Called in Sick,tag_include_exclude,retire,,,601,not selected in the v4 final catalog
+710,Nature Calls the Shots; Hardware Included Called in Sick,tag_include_exclude,retire,,,618,not selected in the v4 final catalog
+711,"Bedtime, Allegedly; Hardware Included Called in Sick",tag_include_exclude,retire,,,801,not selected in the v4 final catalog
+712,"Bedtime, Allegedly; Expanded Features Called in Sick",tag_include_exclude,retire,,,801,not selected in the v4 final catalog
+713,Ensemble Cast Away; Smooth Operator Called in Sick,tag_include_exclude,retire,,,690,not selected in the v4 final catalog
+714,Nature Calls the Shots; Original Equipment Called in Sick,tag_include_exclude,retire,,,610,not selected in the v4 final catalog
+715,Steam Team Six; Slick Production Values Called in Sick,tag_include_exclude,retire,,,325,not selected in the v4 final catalog
+716,Compact Rear Parking; Dress Code: Whatever Called in Sick,tag_include_exclude,retire,,,777,not selected in the v4 final catalog
+717,Dress Rehearsal; Aftermarket Features Called in Sick,tag_include_exclude,retire,,,829,not selected in the v4 final catalog
+718,Sole Proprietorship; Original Equipment Called in Sick,tag_include_exclude,retire,,,726,not selected in the v4 final catalog
+719,The Sharing Economy; Aftermarket Features Called in Sick,tag_include_exclude,retire,,,179,not selected in the v4 final catalog
+720,Unexpected Weather; Script Not Found Called in Sick,tag_include_exclude,retire,,,519,not selected in the v4 final catalog
+721,Standing Room Only; Expanded Features Called in Sick,tag_include_exclude,retire,,,80,not selected in the v4 final catalog
+722,Bling Outside the Box; Manual Override Called in Sick,tag_include_exclude,retire,,,333,not selected in the v4 final catalog
+723,Neighborhood Watch-ish; Expanded Features Called in Sick,tag_include_exclude,retire,,,328,not selected in the v4 final catalog
+724,Dress Rehearsal; Original Equipment Called in Sick,tag_include_exclude,retire,,,798,not selected in the v4 final catalog
+725,Slick Production Values; Special Delivery Desk Called in Sick,tag_include_exclude,retire,,,592,not selected in the v4 final catalog
+726,Double Booking; Smooth Operator Called in Sick,tag_include_exclude,retire,,,320,not selected in the v4 final catalog
+727,"The Mute Button; Cardio, Allegedly Called in Sick",tag_include_exclude,retire,,,319,not selected in the v4 final catalog
+728,"The Mute Button; Slim Pickings, Big Ratings Called in Sick",tag_include_exclude,retire,,,321,not selected in the v4 final catalog
+729,You Are Here-ish; Ink-redible Programming Called in Sick,tag_include_exclude,retire,,,513,not selected in the v4 final catalog
+730,Knit Happens; Face Value Called in Sick,tag_include_exclude,retire,,,849,not selected in the v4 final catalog
+731,Knit Happens; Original Equipment Called in Sick,tag_include_exclude,retire,,,837,not selected in the v4 final catalog
+732,"Rom-Com, Credits Optional; Good Lighting Department Called in Sick",tag_include_exclude,retire,,,354,not selected in the v4 final catalog
+733,"Bling Outside the Box; Bedtime, Allegedly Called in Sick",tag_include_exclude,retire,,,318,not selected in the v4 final catalog
+734,Two Men & a Plot Twist; Face Value Called in Sick,tag_include_exclude,retire,,,366,not selected in the v4 final catalog
+735,Sole Proprietorship; Sizeable Developments Called in Sick,tag_include_exclude,retire,,,744,not selected in the v4 final catalog
+736,Do-It-Yourself; Sizeable Developments Called in Sick,tag_include_exclude,retire,,,773,not selected in the v4 final catalog
+737,Two-Piece; Nature Calls the Shots Called in Sick,tag_include_exclude,retire,,,184,not selected in the v4 final catalog
+738,Steam Team Six; Between the Headlines Called in Sick,tag_include_exclude,retire,,,446,not selected in the v4 final catalog
+739,Standing Room Only; Sizeable Developments Called in Sick,tag_include_exclude,retire,,,69,not selected in the v4 final catalog
+740,Steve Holmes: Public Relations Problem,performer_tag,retire,,,60,not selected in the v4 final catalog
+741,Tyler Nixon: Handle With Flair,performer_tag,retire,,,44,not selected in the v4 final catalog
+742,"Owen Gray: Rom-Com, Credits Optional",performer_tag,retire,,,73,not selected in the v4 final catalog
+743,Johnny Sins: Flex Scheduling,performer_tag,retire,,,147,not selected in the v4 final catalog
+744,The Pope: The Mute Button,performer_tag,retire,,,42,not selected in the v4 final catalog
+745,Keiran Lee: Compact Rear Parking,performer_tag,retire,,,158,not selected in the v4 final catalog
+746,Aiden Starr: The Plus-One Exchange,performer_tag,retire,,,14,not selected in the v4 final catalog
+748,Jake Adams: Park & Recreation,performer_tag,retire,,,21,not selected in the v4 final catalog
+749,Bonnie Rotten: Unexpected Weather,performer_tag,retire,,,64,not selected in the v4 final catalog
+750,Charles Dera: Flex Scheduling,performer_tag,retire,,,90,not selected in the v4 final catalog
+751,Markus Dupree: Unexpected Weather,performer_tag,retire,,,70,not selected in the v4 final catalog
+753,Scott Nails: Flex Scheduling,performer_tag,retire,,,85,not selected in the v4 final catalog
+754,Kristof Cale: Good Lighting Department,performer_tag,retire,,,38,not selected in the v4 final catalog
+755,Tommy Pistol: Knot Your Average,performer_tag,retire,,,111,not selected in the v4 final catalog
+756,Chloe Temple: Small Screen Energy,performer_tag,retire,,,113,not selected in the v4 final catalog
+757,J Mac: Flex Scheduling,performer_tag,retire,,,71,not selected in the v4 final catalog
+758,Ricky Johnson: Flex Scheduling,performer_tag,retire,,,58,not selected in the v4 final catalog
+759,Iona Grace: Ensemble Cast Away,performer_tag,retire,,,45,not selected in the v4 final catalog
+760,Christian Clay: Scenic Route,performer_tag,retire,,,99,not selected in the v4 final catalog
+761,Danny D: Terms & Conditions Apply,performer_tag,retire,,,65,not selected in the v4 final catalog
+762,Ryan McLane: Do Not Disturb-ish,performer_tag,retire,,,21,not selected in the v4 final catalog
+763,Krysta Kaos: Ensemble Cast Away,performer_tag,retire,,,41,not selected in the v4 final catalog
+764,Dante Colle: Double Booking,performer_tag,retire,,,20,not selected in the v4 final catalog
+765,Dylan Ryan: Ensemble Cast Away,performer_tag,retire,,,38,not selected in the v4 final catalog
+766,Anna Bell Peaks: Reality Needs a Producer,performer_tag,retire,,,16,not selected in the v4 final catalog
+767,Derrick Pierce: Knot Your Average,performer_tag,retire,,,73,not selected in the v4 final catalog
+768,Luna Star: Middle of the Rear,performer_tag,retire,,,97,not selected in the v4 final catalog
+769,Marco Banderas: Standing Room Only,performer_tag,retire,,,7,not selected in the v4 final catalog
+770,"Alberto Blanco: No Shoes, Full Service",performer_tag,retire,,,40,not selected in the v4 final catalog
+771,Jules Jordan: Two Men & a Plot Twist,performer_tag,retire,,,38,not selected in the v4 final catalog
+772,Mickey Mod: Roast Department,performer_tag,retire,,,68,not selected in the v4 final catalog
+773,Gabbie Carter: Point Taken,performer_tag,retire,,,28,not selected in the v4 final catalog
+774,Asa Akira: Knead to Know,performer_tag,retire,,,23,not selected in the v4 final catalog
+775,Anissa Kate: Between the Headlines,performer_tag,retire,,,84,not selected in the v4 final catalog
+776,Adriana Chechik: Unexpected Weather,performer_tag,retire,,,26,not selected in the v4 final catalog
+777,Penny Barber: One-Woman Programming,performer_tag,retire,,,58,not selected in the v4 final catalog
+778,Riley Reid: Less Is More TV,performer_tag,retire,,,109,not selected in the v4 final catalog
+779,Xander Corvus: Between the Headlines,performer_tag,retire,,,93,not selected in the v4 final catalog
+780,John Strong: Standing Room Only,performer_tag,retire,,,7,not selected in the v4 final catalog
+781,Abella Danger: Rear View Review,performer_tag,retire,,,106,not selected in the v4 final catalog
+782,Brandi Love: Aftermarket Features,performer_tag,retire,,,78,not selected in the v4 final catalog
+783,Nicole Aniston: Aftermarket Features,performer_tag,retire,,,84,not selected in the v4 final catalog
+785,"Maestro: Slim Pickings, Big Ratings",performer_tag,retire,,,38,not selected in the v4 final catalog
+786,Krissy Lynn: Aftermarket Features,performer_tag,retire,,,68,not selected in the v4 final catalog
+787,John Long: Inside Information,performer_tag,retire,,,35,not selected in the v4 final catalog
+788,Brad Newman: Knit Happens,performer_tag,retire,,,35,not selected in the v4 final catalog
+789,Stacy Cruz: Lip Service,performer_tag,retire,,,57,not selected in the v4 final catalog
+790,Romi Rain: Aftermarket Features,performer_tag,retire,,,69,not selected in the v4 final catalog
+791,Rebel Lynn: Small Screen Energy,performer_tag,retire,,,42,not selected in the v4 final catalog
+792,Jessy Jones: Regular Programming,performer_tag,retire,,,38,not selected in the v4 final catalog
+793,Cory Chase: Reality Needs a Producer,performer_tag,retire,,,24,not selected in the v4 final catalog
+794,Jordi El Nino Polla: Dress Rehearsal,performer_tag,retire,,,28,not selected in the v4 final catalog
+795,Johnny Castle: Roundabout Programming,performer_tag,retire,,,74,not selected in the v4 final catalog
+796,Abigail Mac: Aftermarket Features,performer_tag,retire,,,57,not selected in the v4 final catalog
+797,Oliver Flynn: Scenic Route,performer_tag,retire,,,54,not selected in the v4 final catalog
+799,Kendra Lust: Rear View Review,performer_tag,retire,,,79,not selected in the v4 final catalog
+800,Premium Bukkake: Crowd-Funded Coverage,studio_tag,retire,,,174,not selected in the v4 final catalog
+801,Hot Milfs Fuck: Handle With Flair,studio_tag,retire,,,56,not selected in the v4 final catalog
+802,Tonight's Girlfriend: Do Not Disturb-ish,studio_tag,retire,,,75,not selected in the v4 final catalog
+803,2 Drops: Forecast: Golden Opportunity,studio_tag,retire,,,25,not selected in the v4 final catalog
+804,Touch My Wife: Reality Needs a Producer,studio_tag,retire,,,118,not selected in the v4 final catalog
+805,Big Naturals: More to the Story,studio_tag,retire,,,32,not selected in the v4 final catalog
+806,"Vixen: No Shoes, Full Service",studio_tag,retire,,,189,not selected in the v4 final catalog
+807,Exploited College Girls: Park & Recreation,studio_tag,retire,,,31,not selected in the v4 final catalog
+808,"Deep Lush: Rom-Com, Credits Optional",studio_tag,retire,,,97,not selected in the v4 final catalog
+810,Sinful XXX: Good Lighting Department,studio_tag,retire,,,121,not selected in the v4 final catalog
+811,Sex and Submission: The Mute Button,studio_tag,retire,,,94,not selected in the v4 final catalog
+812,LA Sublime: Previously On Everything,studio_tag,retire,,,25,not selected in the v4 final catalog
+813,The Upper Floor: Ahead of the Curve,studio_tag,retire,,,171,not selected in the v4 final catalog
+814,XXX Shades: Crowd-Funded Coverage,studio_tag,retire,,,35,not selected in the v4 final catalog
+815,Tushy: Scenic Route,studio_tag,retire,,,387,not selected in the v4 final catalog
+816,Dungeon Sex: The Basement Committee,studio_tag,retire,,,18,not selected in the v4 final catalog
+817,RK Prime: Flex Scheduling,studio_tag,retire,,,179,not selected in the v4 final catalog
+818,The Training of O: Point of Contention,studio_tag,retire,,,35,not selected in the v4 final catalog
+819,Brazzers Exxtra: Flex Scheduling,studio_tag,retire,,,161,not selected in the v4 final catalog
+820,Tushy Raw: Batteries Not Included,studio_tag,retire,,,216,not selected in the v4 final catalog
+821,Nubile Films: Point Taken,studio_tag,retire,,,34,not selected in the v4 final catalog
+822,Mormon Girlz: Two-Woman Double Bill,studio_tag,retire,,,63,not selected in the v4 final catalog
+823,Nuru Massage: Steam Team Six,studio_tag,retire,,,28,not selected in the v4 final catalog
+824,Pure Taboo: Scenic Route,studio_tag,retire,,,185,not selected in the v4 final catalog
+825,Casting Couch X: Couch Potato Confidential,studio_tag,retire,,,110,not selected in the v4 final catalog
+826,Love Her Feet: Knead to Know,studio_tag,retire,,,27,not selected in the v4 final catalog
+827,Passion HD: Lip Service,studio_tag,retire,,,223,not selected in the v4 final catalog
+828,Babes: Two-Woman Double Bill,studio_tag,retire,,,132,not selected in the v4 final catalog
+829,"Men In Pain: Cardio, Allegedly",studio_tag,retire,,,225,not selected in the v4 final catalog
+830,Jules Jordan: Brief Encounters,studio_tag,retire,,,238,not selected in the v4 final catalog
+832,The White Boxxx: Crowd-Funded Coverage,studio_tag,retire,,,48,not selected in the v4 final catalog
+833,Public Disgrace: Ensemble Cast Away,studio_tag,retire,,,56,not selected in the v4 final catalog
+834,MILFs Like it Big: Dress Rehearsal,studio_tag,retire,,,71,not selected in the v4 final catalog
+835,Madonna: Terms & Conditions Apply,studio_tag,retire,,,83,duplicate Madonna identity retired; the unique studio/network concept is preserved (studio concept survives at #407)
+836,Evil Angel: Scenic Route,studio_tag,retire,,,139,not selected in the v4 final catalog
+837,Fucked And Bound: The Mute Button,studio_tag,retire,,,44,not selected in the v4 final catalog
+838,Girlsway: Two-Woman Double Bill,studio_tag,retire,,,34,not selected in the v4 final catalog
+839,Private Society: Inside Information,studio_tag,retire,,,90,not selected in the v4 final catalog
+840,Lubed: Slick Production Values,studio_tag,retire,,,36,not selected in the v4 final catalog
+841,Dirty Wives Club: Knit Happens,studio_tag,retire,,,69,not selected in the v4 final catalog
+842,New Sensations: You Are Here-ish,studio_tag,retire,,,5,not selected in the v4 final catalog
+843,Digital Playground: Regular Programming,studio_tag,retire,,,119,not selected in the v4 final catalog
+844,"Device Bondage: Slim Pickings, Big Ratings",studio_tag,retire,,,74,not selected in the v4 final catalog
+845,Spizoo: Reality Needs a Producer,studio_tag,retire,,,21,not selected in the v4 final catalog
+847,Pornstars Like It Big: Regular Programming,studio_tag,retire,,,63,not selected in the v4 final catalog
+848,Lethal Hardcore: Reality Needs a Producer,studio_tag,retire,,,19,not selected in the v4 final catalog
+849,Deeper: Fuzz Worth Watching,studio_tag,retire,,,127,not selected in the v4 final catalog
+850,Look At Her Now: Flex Scheduling,studio_tag,retire,,,38,not selected in the v4 final catalog
+851,Backroom Casting Couch: Solar Panel Discussion,studio_tag,retire,,,17,not selected in the v4 final catalog
+852,Sneaky Sex: Flex Scheduling,studio_tag,retire,,,30,not selected in the v4 final catalog
+853,Shane Diesel XXX: The Third-Wheel Deal,studio_tag,retire,,,29,not selected in the v4 final catalog
+854,Thundercock: Terms & Conditions Apply,studio_tag,retire,,,37,not selected in the v4 final catalog
+855,Baby Got Boobs: Regular Programming,studio_tag,retire,,,40,not selected in the v4 final catalog
+856,I Have A Wife: Middle of the Rear,studio_tag,retire,,,49,not selected in the v4 final catalog
+857,Elegant Angel: Ring Information Desk,studio_tag,retire,,,108,not selected in the v4 final catalog
+858,Interracial Pass: Two Men & a Plot Twist,studio_tag,retire,,,31,not selected in the v4 final catalog
+859,Dorcel Club: Knit Happens,studio_tag,retire,,,41,not selected in the v4 final catalog
+863,The Pope + Krysta Kaos: Shared Screen Time,performer_pair,retire,,,22,not selected in the v4 final catalog
+864,Dylan Ryan & Maestro Stefanos: The Joint Statement,performer_pair,retire,,,21,not selected in the v4 final catalog
+866,Mick Blue & Markus Dupree: The Buddy System,performer_pair,retire,,,21,not selected in the v4 final catalog
+867,Xander Corvus + Luna Star: Meeting Adjourned,performer_pair,retire,,,20,not selected in the v4 final catalog
+869,Iona Grace + Nerine Mechanique: The Crossover Episode,performer_pair,retire,,,19,not selected in the v4 final catalog
+870,"Manuel Ferrara & Riley Reid: Co-Stars, Co-Conspirators",performer_pair,retire,,,19,not selected in the v4 final catalog
+873,Chris Strokes + Jules Jordan: Double Trouble Desk,performer_pair,retire,,,18,not selected in the v4 final catalog
+874,Danny D & Keiran Lee: The Buddy System,performer_pair,retire,,,18,not selected in the v4 final catalog
+875,Mick Blue + Luna Star: Meeting Adjourned,performer_pair,retire,,,18,not selected in the v4 final catalog
+876,Riley Reid & Mick Blue: Scheduling Conflict,performer_pair,retire,,,18,not selected in the v4 final catalog
+877,Manuel Ferrara + Abella Danger: The Crossover Episode,performer_pair,retire,,,18,not selected in the v4 final catalog
+878,"Skin Diamond & Krysta Kaos: Co-Stars, Co-Conspirators",performer_pair,retire,,,17,not selected in the v4 final catalog
+879,Xander Corvus + Nicole Aniston: Shared Screen Time,performer_pair,retire,,,17,not selected in the v4 final catalog
+880,Alberto Blanco & Christian Clay: The Joint Statement,performer_pair,retire,,,16,not selected in the v4 final catalog
+881,The Pope + Dylan Ryan: Double Trouble Desk,performer_pair,retire,,,16,not selected in the v4 final catalog
+882,The Pope & Iona Grace: The Buddy System,performer_pair,retire,,,16,not selected in the v4 final catalog
+883,Owen Gray + Small Hands: Meeting Adjourned,performer_pair,retire,,,16,not selected in the v4 final catalog
+884,Mia Malkova & Danny Mountain: Scheduling Conflict,performer_pair,retire,,,16,not selected in the v4 final catalog
+885,The Pope + Maestro Stefanos: The Crossover Episode,performer_pair,retire,,,15,not selected in the v4 final catalog
+886,"Casey Calvert & The Pope: Co-Stars, Co-Conspirators",performer_pair,retire,,,14,not selected in the v4 final catalog
+887,Erik Everhard + Dani Daniels: Shared Screen Time,performer_pair,retire,,,14,not selected in the v4 final catalog
+888,Abella Danger & James Deen: The Joint Statement,performer_pair,retire,,,14,not selected in the v4 final catalog
+889,Mick Blue + Abella Danger: Double Trouble Desk,performer_pair,retire,,,14,not selected in the v4 final catalog
+890,Johnny Sins & Keiran Lee: The Buddy System,performer_pair,retire,,,14,not selected in the v4 final catalog
+891,Sparky Sin Claire + Lilla Katt: Meeting Adjourned,performer_pair,retire,,,13,not selected in the v4 final catalog
+892,The Pope & Skin Diamond: Scheduling Conflict,performer_pair,retire,,,13,not selected in the v4 final catalog
+893,Xander Corvus + Danny D: The Crossover Episode,performer_pair,retire,,,13,not selected in the v4 final catalog
+894,"Riley Reid & James Deen: Co-Stars, Co-Conspirators",performer_pair,retire,,,13,not selected in the v4 final catalog
+895,Derrick Pierce + Dylan Ryan: Shared Screen Time,performer_pair,retire,,,13,not selected in the v4 final catalog
+896,Emily Willis & Mick Blue: The Joint Statement,performer_pair,retire,,,13,not selected in the v4 final catalog
+897,Mickey Mod + Owen Gray: Double Trouble Desk,performer_pair,retire,,,13,not selected in the v4 final catalog
+898,Dylan Ryan & Odile: The Buddy System,performer_pair,retire,,,12,not selected in the v4 final catalog
+899,Iona Grace + Krysta Kaos: Meeting Adjourned,performer_pair,retire,,,12,not selected in the v4 final catalog

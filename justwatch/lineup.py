@@ -7,11 +7,17 @@ applied (those tune the TV app's auto-generated channels, not user channels).
 
 from __future__ import annotations
 
+import datetime as _dt
 import hashlib
 import json
 from typing import Any
 
 from justwatch import contract
+
+#: Stash's IntCriterionInput has no GREATER_THAN_EQUALS modifier, so an
+#: inclusive "min" duration is expressed as a BETWEEN with a max-int upper
+#: bound.
+INT_MAX = 2_147_483_647
 
 FIND_SCENES = """
 query JustWatchLineup($filter: FindFilterType!, $scene_filter: SceneFilterType!, $include_paths: Boolean!) {
@@ -97,11 +103,58 @@ def _filter_ids(value: Any) -> list[str]:
 
 
 def _canonical_filter(source: dict) -> tuple:
-    """Hash-stable form of a ``filter`` source: sorted id lists per criterion."""
-    return tuple(
+    """Hash-stable form of a ``filter`` source: sorted id lists per criterion
+    plus the metadata criteria. New criteria appear only when non-empty so a
+    legacy source canonicalizes to its exact historical form (rotation
+    versions never churn from an importer upgrade). ``createdAt`` contributes
+    its authored ``withinDays`` (the resolved cutoff varies by day by design;
+    the epoch in ``rotation_version`` covers that)."""
+    parts = [
         (criterion, tuple(_filter_ids(source.get(criterion))))
         for criterion in ("tags", "excludeTags", "performers", "studios")
-    )
+    ]
+    for criterion in ("performersAny", "studiosAny"):
+        ids = _filter_ids(source.get(criterion))
+        if ids:
+            parts.append((criterion, tuple(ids)))
+    date = source.get("date")
+    if isinstance(date, dict):
+        parts.append(("date", (str(date.get("from", "")), str(date.get("to", "")))))
+    duration = source.get("duration")
+    if isinstance(duration, dict):
+        parts.append(("duration", (int(duration.get("min", 0)),)))
+    created = source.get("createdAt")
+    if isinstance(created, dict):
+        parts.append(("createdAt", (int(created.get("withinDays", 0)),)))
+    return tuple(parts)
+
+
+def created_cutoff(within_days: int, today: _dt.date | None = None) -> str:
+    """The inclusive cutoff date for a created-at recency criterion:
+    ``within_days`` calendar days back from today (UTC).
+
+    A bare ``YYYY-MM-DD`` value parses as midnight, so GREATER_THAN includes
+    the whole boundary day — matching the extraction's ``created_at[:10] >=``
+    reference semantics.
+    """
+    if today is None:
+        today = _dt.datetime.now(_dt.timezone.utc).date()
+    return (today - _dt.timedelta(days=int(within_days))).isoformat()
+
+
+def effective_epoch(source: dict, today: _dt.date | None = None) -> str:
+    """The day-granular epoch of a dynamic source, "" for static sources.
+
+    Only created-at recency is dynamic today: its effective membership moves
+    with the resolved cutoff even though the authored source (``withinDays``)
+    never changes, so clients need the epoch to invalidate caches.
+    """
+    created = source.get("createdAt")
+    if isinstance(created, dict):
+        days = created.get("withinDays")
+        if isinstance(days, int) and not isinstance(days, bool) and days >= 1:
+            return created_cutoff(days, today)
+    return ""
 
 
 def build_scene_filter(source: dict, object_filter: dict | None = None) -> dict:
@@ -109,9 +162,14 @@ def build_scene_filter(source: dict, object_filter: dict | None = None) -> dict:
 
     ``object_filter`` carries a saved filter's stored ``object_filter`` (used
     verbatim); entity sources project directly. A ``filter`` source is the
-    network tier's composite: ALL-of semantics per include criterion (the
-    curation intersections the CSV validated), ``excludeTags`` riding the tags
-    criterion's ``excludes`` (any-of exclusion, hierarchical like the include).
+    network tier's composite: per-criterion include semantics (``tags`` and
+    ``performers``/``studios`` ALL-of — the curation intersections the CSV
+    validated; ``performersAny``/``studiosAny`` ANY-of — the aggregate
+    discovery unions), ``excludeTags`` riding the tags criterion's ``excludes``
+    (any-of exclusion, hierarchical like the include), plus metadata criteria:
+    a scene-date ``BETWEEN`` range, a minimum-duration ``BETWEEN`` (inclusive;
+    Stash has no >= modifier), and created-at recency resolved to a cutoff
+    date at query time (dynamic by design).
     """
     source_type = source.get("type")
     source_id = str(source.get("id", ""))
@@ -132,8 +190,14 @@ def build_scene_filter(source: dict, object_filter: dict | None = None) -> dict:
         tags = _filter_ids(source.get("tags"))
         exclude_tags = _filter_ids(source.get("excludeTags"))
         performers = _filter_ids(source.get("performers"))
+        performers_any = _filter_ids(source.get("performersAny"))
         studios = _filter_ids(source.get("studios"))
-        if not (tags or performers or studios):
+        studios_any = _filter_ids(source.get("studiosAny"))
+        date = source.get("date") if isinstance(source.get("date"), dict) else None
+        duration = source.get("duration") if isinstance(source.get("duration"), dict) else None
+        created = source.get("createdAt") if isinstance(source.get("createdAt"), dict) else None
+        if not (tags or performers or performers_any or studios or studios_any
+                or date or duration or created):
             raise ValueError("filter source has no include criteria")
         if tags or exclude_tags:
             criterion: dict[str, Any] = {
@@ -142,10 +206,29 @@ def build_scene_filter(source: dict, object_filter: dict | None = None) -> dict:
             if exclude_tags:
                 criterion["excludes"] = exclude_tags
             out["tags"] = criterion
-        if performers:
-            out["performers"] = {"value": performers, "modifier": "INCLUDES_ALL"}
-        if studios:
-            out["studios"] = {"value": studios, "modifier": "INCLUDES_ALL", "depth": -1}
+        if performers or performers_any:
+            # ALL intersects the listed performers; ANY unions them (the
+            # aggregate discovery channels). ALL keeps historical precedence
+            # when a source somehow carries both.
+            if performers:
+                out["performers"] = {"value": performers, "modifier": "INCLUDES_ALL"}
+            else:
+                out["performers"] = {"value": performers_any, "modifier": "INCLUDES"}
+        if studios or studios_any:
+            if studios:
+                out["studios"] = {"value": studios, "modifier": "INCLUDES_ALL", "depth": -1}
+            else:
+                out["studios"] = {"value": studios_any, "modifier": "INCLUDES", "depth": -1}
+        if date:
+            out["date"] = {"value": str(date.get("from", "")),
+                           "value2": str(date.get("to", "")),
+                           "modifier": "BETWEEN"}
+        if duration:
+            out["duration"] = {"value": int(duration.get("min", 0)),
+                               "value2": INT_MAX, "modifier": "BETWEEN"}
+        if created:
+            out["created_at"] = {"value": created_cutoff(int(created.get("withinDays", 0))),
+                                 "modifier": "GREATER_THAN"}
         return out
     raise ValueError(f"unknown source type: {source_type!r}")
 
@@ -175,17 +258,27 @@ def build_find_filter(
     return out
 
 
-def rotation_version(source: dict, sort: str, seed: int, size: int) -> str:
+def rotation_version(
+    source: dict, sort: str, seed: int, size: int, today: _dt.date | None = None,
+) -> str:
     """Stable identity of a rotation's ordering: same inputs, same loop.
 
     Callers suffix the catalog revision so a save republishes every rotation;
-    clients compare versions to drop stale cached lineups.
+    clients compare versions to drop stale cached lineups. Dynamic sources
+    (created-at recency) append their resolved cutoff epoch so the version
+    moves with the day; static sources keep the exact historical basis, so an
+    unchanged catalog re-imports to identical versions. ``today`` is
+    injectable for tests.
     """
-    basis = json.dumps(
-        [*source_key(source), sort, int(seed), int(size)],
-        sort_keys=True,
-    )
-    return hashlib.sha1(basis.encode("utf-8")).hexdigest()[:12]
+    basis = [
+        *source_key(source), sort, int(seed), int(size),
+    ]
+    epoch = effective_epoch(source, today)
+    if epoch:
+        basis.append(f"epoch:{epoch}")
+    return hashlib.sha1(
+        json.dumps(basis, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:12]
 
 
 def _scene_item(scene: dict, include_paths: bool) -> dict | None:
