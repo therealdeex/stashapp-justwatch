@@ -1,0 +1,56 @@
+{
+  "aired_history_48h": {
+    "retained_completed_airings": 96,
+    "recorded_intervals": 2
+  },
+  "policy_edit": {
+    "protected": 46,
+    "changed": 44
+  },
+  "deletion_rollback": {
+    "canceled_eligible_airings": 25,
+    "canceled_ids_still_missing_from_deck": 25,
+    "committedThrough_hour": 24.5,
+    "actual_last_committed_hour": 11.5
+  },
+  "long_outage": {
+    "degraded": false,
+    "preserves_current_encore": false
+  },
+  "short_clips": "AttributeError: 'set' object has no attribute 'append'",
+  "order_100_scenes": {
+    "identical_first_two_passes": true
+  },
+  "arrival_credit": {
+    "expected_after_one_slot": 1.15,
+    "actual": 0.1499999999999999
+  },
+  "arrival_outside_deck": "a",
+  "budget_runs": [
+    {
+      "net_00000000": "ready",
+      "net_00000001": "ready",
+      "net_00000002": "index_budget_exhausted"
+    },
+    {
+      "net_00000000": "ready",
+      "net_00000001": "ready",
+      "net_00000002": "index_budget_exhausted"
+    },
+    {
+      "net_00000000": "ready",
+      "net_00000001": "ready",
+      "net_00000002": "index_budget_exhausted"
+    }
+  ],
+  "budget_cursor": {
+    "cursor": 3
+  },
+  "corrupt_channel": "whole prepare raised JSONDecodeError",
+  "daily_repeat_gap_expected_24h": {
+    "medianHours": 48.0,
+    "minHours": 24.0,
+    "p90Hours": 500024.0
+  },
+  "verify_accepts_stale_unrelated_run": true
+}

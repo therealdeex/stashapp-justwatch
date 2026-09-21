@@ -67,17 +67,32 @@ beyond stdlib (+ optional PyYAML for the API-key fallback). Data flow:
 - `justwatch/stash_client.py` — urllib GraphQL client; SessionCookie (Go
   `http.Cookie`: `Name`/`Value` fields) + ApiKey/config.yml fallback.
 - `justwatch/continuing.py` — the CONTINUING engine for network channels
-  (v0.7.0, rollout-gated): full-eligible-library broadcasts with durable
-  consumption state, a rolling 7-day publication, 24-h whole-airing
-  protection, ~15% new-arrival slots (24–72 h first-air target), soft
-  cooldown/time-of-day/spacing preferences, deterministic encore recovery,
-  staggered/deduplicated indexing, and the lightweight `status.json` manifest
-  Directory/Desk/ops read. Activation is ONLY the operator rollout file
-  `<data>/continuing-networks.json` (default absent = everything fixed); an
-  authored CSV `programming_mode=fixed` pins a network off regardless of
-  rollout. See docs/CONTINUING-PROGRAMMING-PLAN.md and
-  docs/PILOT-MANIFEST.md; `tools/simulate_continuing.py` is the repeatable
-  30-day comparison against fixed-50.
+  (v0.7.1, rollout-gated): full-eligible-library broadcasts with a durable
+  ledger (`checkpoint` at the actually-aired boundary + `airedThrough`
+  cursor), ONE exactly-once consumption transition (`apply_airing`) shared by
+  live scheduling and replay, a rolling 7-day publication re-derived each
+  build from checkpoint + committed reservations, 24-h whole-airing
+  protection that survives ordinary policy edits, ~15% new-arrival slots
+  (bounded configurable `newShare`; genuine createdAt-based arrivals only;
+  24–72 h first-air target), soft cooldown/immediate-repeat-guard/
+  time-of-day/spacing preferences with bucketed freshness, deterministic
+  encore recovery from a stored unpruned `encoreBlock`, staggered/
+  deduplicated indexing with cached empty sources, fair budget rotation with
+  a bounded failure backoff, and the lightweight `status.json` manifest
+  (durable facts only — coverage/expiry are derived at READ time; runs are
+  correlated by `runId` from `tools/prepare_programming.py --verify`).
+  Publications are schema 3 with a `generation` token over the whole durable
+  state used as the commit guard; schema-2 dev files migrate on the next
+  prepare with a `.v2.bak` backup (`tools/rollback_continuing.py` restores
+  them / flips the kill switch). Activation is ONLY the operator rollout file
+  `<data>/continuing-networks.json` (default absent = everything fixed;
+  `enabled` must be a real boolean; `"stage": "prepare"` builds publications
+  without advertising them, `"stage": "active"` serves them); an authored CSV
+  `programming_mode=fixed` pins a network off regardless of rollout. See
+  docs/CONTINUING-PROGRAMMING-PLAN.md, docs/CONTINUING-PROGRAMMING-REMEDIATION-PLAN.md
+  and docs/PILOT-MANIFEST.md; `tools/simulate_continuing.py` is the corrected
+  30-day comparison against fixed-50 (independent-ledger gates; the
+  pre-remediation run in analysis/continuing-simulation is SUPERSEDED).
 
 ## Invariants (do not break)
 

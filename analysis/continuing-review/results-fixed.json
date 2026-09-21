@@ -1,0 +1,70 @@
+{
+  "aired_history_48h": {
+    "retained_completed_airings": 96,
+    "recorded_intervals": 96,
+    "every_completion_recorded_once": true
+  },
+  "policy_edit": {
+    "protected": 46,
+    "changed": 0
+  },
+  "deletion_rollback": {
+    "canceled_eligible_airings": 25,
+    "canceled_recoverable": 25,
+    "committedThrough_hour": 11.5,
+    "actual_last_committed_hour": 11.5,
+    "boundary_consistent": true
+  },
+  "long_outage": {
+    "degraded": true,
+    "preserves_current_encore": true
+  },
+  "short_clips": {
+    "exception": null,
+    "cap_warning": true
+  },
+  "order_100_scenes": {
+    "identical_first_two_passes": false
+  },
+  "arrival_credit": {
+    "expected_after_one_slot": 1.15,
+    "actual": 1.15,
+    "selection_is_pure": true
+  },
+  "arrival_outside_deck": "b",
+  "budget_runs": [
+    {
+      "net_00000000": "indexed_empty",
+      "net_00000001": "indexed_empty",
+      "net_00000002": "deferred_index_budget"
+    },
+    {
+      "net_00000002": "indexed_empty",
+      "net_00000000": "indexed_empty",
+      "net_00000001": "indexed_empty"
+    },
+    {
+      "net_00000002": "indexed_empty",
+      "net_00000000": "indexed_empty",
+      "net_00000001": "indexed_empty"
+    }
+  ],
+  "budget_cursor": {
+    "cursors": {
+      "0": 8,
+      "1": 0
+    },
+    "failures": {}
+  },
+  "corrupt_channel": {
+    "victim_reported": true,
+    "peers_ready": true,
+    "status_publishes": true
+  },
+  "daily_repeat_gap_expected_24h": {
+    "medianHours": 24.0,
+    "minHours": 24.0,
+    "p90Hours": 24.0
+  },
+  "verify_accepts_stale_unrelated_run": false
+}

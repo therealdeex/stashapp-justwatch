@@ -1,0 +1,323 @@
+{
+  "continuing": {
+    "Small Mix": {
+      "eligibleAtEnd": 58,
+      "uniqueAired": 58,
+      "coveragePercent": 100.0,
+      "eveningRepetition": 0.155,
+      "sameWindowRecurrence": 0.303,
+      "repeatGaps": {
+        "medianHours": 15.8,
+        "minHours": 6.0,
+        "p90Hours": 30.2
+      },
+      "duplicateConsumptionEvents": 2,
+      "horizonMinHours": 168.0,
+      "publicationKB": 236.4
+    },
+    "Large Mix": {
+      "eligibleAtEnd": 700,
+      "uniqueAired": 678,
+      "coveragePercent": 96.9,
+      "eveningRepetition": 0.003,
+      "sameWindowRecurrence": 0.0,
+      "repeatGaps": {
+        "medianHours": 493.6,
+        "minHours": 253.1,
+        "p90Hours": 612.5
+      },
+      "duplicateConsumptionEvents": 0,
+      "horizonMinHours": 168.0,
+      "publicationKB": 384.3
+    },
+    "Huge Mix": {
+      "eligibleAtEnd": 5000,
+      "uniqueAired": 1437,
+      "coveragePercent": 28.7,
+      "eveningRepetition": 0.0,
+      "sameWindowRecurrence": 0.0,
+      "repeatGaps": null,
+      "duplicateConsumptionEvents": 0,
+      "horizonMinHours": 168.0,
+      "publicationKB": 1470.7
+    },
+    "Overlap A": {
+      "eligibleAtEnd": 504,
+      "uniqueAired": 504,
+      "coveragePercent": 100.0,
+      "eveningRepetition": 0.0,
+      "sameWindowRecurrence": 0.0,
+      "repeatGaps": {
+        "medianHours": 343.9,
+        "minHours": 133.5,
+        "p90Hours": 514.4
+      },
+      "duplicateConsumptionEvents": 0,
+      "horizonMinHours": 168.0,
+      "publicationKB": 396.4
+    },
+    "Overlap B": {
+      "eligibleAtEnd": 500,
+      "uniqueAired": 500,
+      "coveragePercent": 100.0,
+      "eveningRepetition": 0.0,
+      "sameWindowRecurrence": 0.0,
+      "repeatGaps": {
+        "medianHours": 361.2,
+        "minHours": 132.0,
+        "p90Hours": 505.3
+      },
+      "duplicateConsumptionEvents": 0,
+      "horizonMinHours": 168.0,
+      "publicationKB": 396.2
+    },
+    "Short Clips": {
+      "eligibleAtEnd": 199,
+      "uniqueAired": 199,
+      "coveragePercent": 100.0,
+      "eveningRepetition": 0.408,
+      "sameWindowRecurrence": 0.682,
+      "repeatGaps": {
+        "medianHours": 10.6,
+        "minHours": 6.0,
+        "p90Hours": 12.1
+      },
+      "duplicateConsumptionEvents": 7,
+      "horizonMinHours": 168.0,
+      "publicationKB": 1588.9
+    },
+    "Long Form": {
+      "eligibleAtEnd": 60,
+      "uniqueAired": 60,
+      "coveragePercent": 100.0,
+      "eveningRepetition": 0.0,
+      "sameWindowRecurrence": 0.03,
+      "repeatGaps": {
+        "medianHours": 88.5,
+        "minHours": 60.0,
+        "p90Hours": 336.0
+      },
+      "duplicateConsumptionEvents": 0,
+      "horizonMinHours": 168.0,
+      "publicationKB": 95.0
+    },
+    "Recent Window": {
+      "eligibleAtEnd": 30,
+      "uniqueAired": 29,
+      "coveragePercent": 96.7,
+      "eveningRepetition": 0.371,
+      "sameWindowRecurrence": 0.328,
+      "repeatGaps": {
+        "medianHours": 14.7,
+        "minHours": 6.1,
+        "p90Hours": 74.5
+      },
+      "duplicateConsumptionEvents": 1,
+      "horizonMinHours": 168.0,
+      "publicationKB": 239.3
+    }
+  },
+  "fixedBaseline": {
+    "Small Mix": {
+      "uniqueAired": 50,
+      "coveragePercent": 86.2,
+      "eveningRepetition": 0.268,
+      "sameWindowRecurrence": 0.704,
+      "repeatGaps": {
+        "medianHours": 20.4,
+        "minHours": 20.2,
+        "p90Hours": 20.4
+      },
+      "note": "digest-order approximation of Stash random_<seed>, not validated exact"
+    },
+    "Large Mix": {
+      "uniqueAired": 50,
+      "coveragePercent": 7.1,
+      "eveningRepetition": 0.85,
+      "sameWindowRecurrence": 0.911,
+      "repeatGaps": {
+        "medianHours": 24.2,
+        "minHours": 24.0,
+        "p90Hours": 24.2
+      },
+      "note": "digest-order approximation of Stash random_<seed>, not validated exact"
+    },
+    "Huge Mix": {
+      "uniqueAired": 50,
+      "coveragePercent": 1.0,
+      "eveningRepetition": 0.0,
+      "sameWindowRecurrence": 0.773,
+      "repeatGaps": {
+        "medianHours": 16.7,
+        "minHours": 16.7,
+        "p90Hours": 16.7
+      },
+      "note": "digest-order approximation of Stash random_<seed>, not validated exact"
+    },
+    "Overlap A": {
+      "uniqueAired": 50,
+      "coveragePercent": 9.9,
+      "eveningRepetition": 0.041,
+      "sameWindowRecurrence": 0.556,
+      "repeatGaps": {
+        "medianHours": 18.3,
+        "minHours": 18.2,
+        "p90Hours": 18.3
+      },
+      "note": "digest-order approximation of Stash random_<seed>, not validated exact"
+    },
+    "Overlap B": {
+      "uniqueAired": 50,
+      "coveragePercent": 10.0,
+      "eveningRepetition": 0.041,
+      "sameWindowRecurrence": 0.556,
+      "repeatGaps": {
+        "medianHours": 18.3,
+        "minHours": 18.2,
+        "p90Hours": 18.3
+      },
+      "note": "digest-order approximation of Stash random_<seed>, not validated exact"
+    },
+    "Short Clips": {
+      "uniqueAired": 50,
+      "coveragePercent": 25.1,
+      "eveningRepetition": 0.985,
+      "sameWindowRecurrence": 0.976,
+      "repeatGaps": {
+        "medianHours": 2.5,
+        "minHours": 2.5,
+        "p90Hours": 2.5
+      },
+      "note": "digest-order approximation of Stash random_<seed>, not validated exact"
+    },
+    "Long Form": {
+      "uniqueAired": 50,
+      "coveragePercent": 83.3,
+      "eveningRepetition": 0.0,
+      "sameWindowRecurrence": 0.0,
+      "repeatGaps": {
+        "medianHours": 75.0,
+        "minHours": 75.0,
+        "p90Hours": 75.0
+      },
+      "note": "digest-order approximation of Stash random_<seed>, not validated exact"
+    },
+    "Recent Window": {
+      "uniqueAired": 30,
+      "coveragePercent": 100.0,
+      "eveningRepetition": 0.445,
+      "sameWindowRecurrence": 0.871,
+      "repeatGaps": {
+        "medianHours": 13.0,
+        "minHours": 12.9,
+        "p90Hours": 13.0
+      },
+      "note": "digest-order approximation of Stash random_<seed>, not validated exact"
+    }
+  },
+  "gates": {
+    "unexpectedProtectedAiringChanges": 0,
+    "removalDrivenProtectedChanges": 311,
+    "ineligibleFutureAirings": 0,
+    "duplicateConsumptionEvents": 10,
+    "largeFixtureUniqueScheduled": 678,
+    "largeFixtureBeyond50": true,
+    "feasibleArrivalsWithin72h": true,
+    "oldContentNeverFlaggedAsArrival": true,
+    "encoreBoundaryBreaksDuringOutage": 0,
+    "encoreServedThroughoutOutage": true,
+    "horizonNeverBelow24hHealthy": true
+  },
+  "resources": {
+    "prepareCalls": 481,
+    "avgBatchPrepareSeconds": 0.2992,
+    "p95BatchPrepareSeconds": 0.3752,
+    "maxBatchPrepareSeconds": 1.7471,
+    "graphqlQueries": 1592,
+    "peakMemoryMBSampled": 21.3,
+    "largestPublicationKB": 1588.9
+  },
+  "arrivals": {
+    "smallTrickle": {
+      "count": 28,
+      "medianFirstAirHours": 30.2,
+      "maxFirstAirHours": 228.3,
+      "feasibleMaxFirstAirHours": 32.4,
+      "outageAffectedCount": 11
+    },
+    "largeBulkImport200": {
+      "count": 187,
+      "medianFirstAirHours": 197.4,
+      "firstAired": 187,
+      "overdueNeverAired": 13,
+      "oldestPendingAtEndHours": 0
+    },
+    "dynamicChannel": {
+      "firstAired": 0,
+      "overdueNeverAired": 0
+    },
+    "oldContentReeligibility": {
+      "added": 20,
+      "wronglyFlaggedAsArrival": 0,
+      "firstAired": 8
+    }
+  },
+  "duplicateEvents": {
+    "net_00000001": [
+      {
+        "sid": "1028",
+        "atHoursFromStart": 484.3,
+        "gapHours": 246.05
+      },
+      {
+        "sid": "1017",
+        "atHoursFromStart": 479.9,
+        "gapHours": 246.55
+      }
+    ],
+    "net_00000006": [
+      {
+        "sid": "7260",
+        "atHoursFromStart": 480.6,
+        "gapHours": 243.7
+      },
+      {
+        "sid": "7189",
+        "atHoursFromStart": 480.0,
+        "gapHours": 241.7
+      },
+      {
+        "sid": "7199",
+        "atHoursFromStart": 481.8,
+        "gapHours": 243.45
+      },
+      {
+        "sid": "7321",
+        "atHoursFromStart": 480.5,
+        "gapHours": 243.05
+      },
+      {
+        "sid": "7203",
+        "atHoursFromStart": 480.1,
+        "gapHours": 243.25
+      },
+      {
+        "sid": "7192",
+        "atHoursFromStart": 482.4,
+        "gapHours": 244.2
+      },
+      {
+        "sid": "7151",
+        "atHoursFromStart": 481.7,
+        "gapHours": 243.15
+      }
+    ],
+    "net_00000008": [
+      {
+        "sid": "7768",
+        "atHoursFromStart": 479.7,
+        "gapHours": 246.57
+      }
+    ]
+  }
+}
