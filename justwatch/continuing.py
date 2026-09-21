@@ -717,7 +717,6 @@ def build(channel: dict, entries: list[dict], previous: dict | None, now: int, t
     working = copy.deepcopy(checkpoint)
     for airing in programs[:committed]:
         apply_airing(working, airing, channel, index, cfg)
-    scheduled_unique = len(working["airCounts"])
 
     # --- arrival-driven flexible rebuild: when unplaced arrivals wait and a
     # credit is due, regenerate the flexible future so they land inside the
@@ -770,6 +769,11 @@ def build(channel: dict, entries: list[dict], previous: dict | None, now: int, t
         committed_through = max(a["startEpochMs"] for a in programs[:committed])
     else:
         committed_through = now
+    # Unique scenes across the WHOLE published schedule (committed prefix +
+    # flexible future) — the ops surface's variety stat. On a fresh build the
+    # committed prefix is empty by design, so counting only reservations
+    # would read 0 and hide the schedule that actually exists.
+    scheduled_unique = len({a["item"]["id"] for a in programs})
     checkpoint_out = prune_state(checkpoint, index)
     generation = digest([source_sig, policy_sig, fingerprint, committed_through,
                          aired_through, digest(programs), digest(checkpoint_out)])
