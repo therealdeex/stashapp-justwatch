@@ -66,7 +66,7 @@ def read(data_dir, channel_id):
     if not p.exists():
         return None
     data = json.loads(p.read_text())
-    if data.get("schema") not in (1, 2) or not isinstance(data.get("programs"), list):
+    if data.get("schema") not in (1, 2, 3) or not isinstance(data.get("programs"), list):
         raise ValueError("unreadable published schedule")
     return data
 
@@ -247,11 +247,23 @@ def schedule(data_dir, channel_id, at=None, limit=50):
     result = [p for p in programs if p["endEpochMs"] > at][:max(1, min(50, limit))]
     status = "ready"
     # Deterministic emergency loop: every client sees the same airing boundaries.
+    # Continuing publications (schema 3) carry the block explicitly, so the
+    # fallback stays identical even after retention prunes the old programs —
+    # the engine's recovery replays exactly what this loop served.
     if not result and programs and at >= programs[-1]["endEpochMs"]:
         status = "repeat"
-        block = programs[-50:]
+        block = data.get("encoreBlock") or programs[-50:]
+        block = [b for b in block if isinstance(b, dict) and
+                 isinstance(b.get("startEpochMs"), int) and isinstance(b.get("endEpochMs"), int)]
         length = sum(p["endEpochMs"] - p["startEpochMs"] for p in block)
-        cursor = programs[-1]["endEpochMs"] + ((at - programs[-1]["endEpochMs"]) // length) * length
+        if length <= 0:
+            return {"status": "preparing", "programs": []}
+        # Anchor on the BLOCK's own last end: for schema 1/2 (block is
+        # programs[-50:]) that is the historical behavior; for a stored
+        # continuing block it keeps the phase identical to the engine's
+        # recovery math.
+        anchor = block[-1]["endEpochMs"]
+        cursor = anchor + ((at - anchor) // length) * length
         while len(result) < min(50, limit):
             for p in block:
                 end = cursor + p["endEpochMs"] - p["startEpochMs"]

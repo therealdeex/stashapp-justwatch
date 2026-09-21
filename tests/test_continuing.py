@@ -118,7 +118,7 @@ def test_deck_and_counts_survive_restarts_and_hourly_reruns(tmp_path):
     from_file = c.build(ch, lib, reloaded, now=c.HOUR)
     from_memory = c.build(ch, lib, copy.deepcopy(first), now=c.HOUR)
     assert from_file["version"] == from_memory["version"]
-    assert from_file["state"] == from_memory["state"]
+    assert from_file["checkpoint"] == from_memory["checkpoint"]
 
 
 def test_build_is_pure_and_deterministic():
@@ -187,17 +187,17 @@ def test_flexible_consumption_is_not_double_counted_after_replan():
     ch = network()
     lib = entries(100)
     prev = c.build(ch, lib, None, now=0)
-    counts_before = copy.deepcopy(prev["state"]["airCounts"])
-    # A deletion replan discards the flexible future; the durable state must
+    counts_before = copy.deepcopy(prev["checkpoint"]["airCounts"])
+    # A deletion replan discards the flexible future; the durable ledger must
     # not have consumed it in the first place.
-    assert prev["state"]["airCounts"] == counts_before
+    assert prev["checkpoint"]["airCounts"] == counts_before
     lib_after = [e for e in lib if e["id"] != "3"]
     nxt = c.build(ch, lib_after, prev, now=10 * c.HOUR)
     flexible_only_ids = {a["item"]["id"] for a in prev["programs"][prev["committedCount"]:]}
     # Flexible scenes (other than the deleted one) are still queued: they were
     # never durably consumed, so the rebuild re-derives them from the deck.
     for sid in flexible_only_ids - {"3"}:
-        assert sid in nxt["state"]["deck"] or sid in {a["item"]["id"] for a in nxt["programs"]}, \
+        assert sid in nxt["checkpoint"]["deck"] or sid in {a["item"]["id"] for a in nxt["programs"]}, \
             "flexible reservation lost after replan"
 
 
@@ -213,16 +213,35 @@ def test_duration_edit_rebuilds_flexible_future():
         "new durations apply beyond the protected boundary"
 
 
-def test_policy_change_keeps_notice_boundary_and_restarts_state():
+def test_policy_edit_keeps_protection_prefix_and_durable_ledger():
+    """R9 remediation: an ORDINARY policy edit (spacing) is not an eligibility
+    exception — the whole protected prefix (now..now+24h) is preserved
+    verbatim and the durable ledger (lifetime consumption, arrivals) is kept.
+    Only the flexible future beyond the protection window may be re-dealt
+    under the new preference. The previous test expected a ~2-minute notice
+    boundary with a state restart, which contradicted the plan's 24-hour
+    whole-airing protection; that expectation was wrong and is superseded."""
     ch = network()
     lib = entries(100)
     prev = c.build(ch, lib, None, now=0)
     changed = network(programming={"mode": "continuing", "spacing": 3})
-    now = 30_000
-    boundary = next((a["endEpochMs"] for a in prev["programs"] if a["endEpochMs"] >= now + c.NOTICE), now)
+    now = c.HOUR
     result = c.build(changed, lib, prev, now=now)
-    kept = [a for a in prev["programs"] if a["startEpochMs"] < boundary]
-    assert result["programs"][:len(kept)] == kept
+    protected = [a for a in prev["programs"]
+                 if a["endEpochMs"] > now and a["startEpochMs"] < now + c.PROTECT]
+    assert protected, "fixture has a protected region"
+    current = {a["airingId"]: a for a in result["programs"]}
+    for airing in protected:
+        assert current.get(airing["airingId"]) == airing, \
+            "policy edit must keep every protected airing whole"
+    # Lifetime consumption and arrival bookkeeping survive the edit: the
+    # ledger only ADVANCES by airings that actually aired in the meantime,
+    # never resets.
+    for sid, count in prev["checkpoint"]["airCounts"].items():
+        assert result["checkpoint"]["airCounts"].get(sid, 0) >= count, \
+            "policy edit must not reduce lifetime consumption"
+    assert result["checkpoint"]["arrivalBaseline"] == prev["checkpoint"]["arrivalBaseline"]
+    assert result["checkpoint"]["pendingArrivals"] == prev["checkpoint"]["pendingArrivals"]
 
 
 def test_branding_only_edit_does_not_replan():
@@ -272,7 +291,7 @@ def test_arrival_slot_holds_still_until_it_commits():
 def test_bootstrap_does_not_label_whole_library_new():
     ch = network()
     publication = c.build(ch, entries(1000), None, now=0)
-    assert publication["state"]["pendingArrivals"] == [], \
+    assert publication["checkpoint"]["pendingArrivals"] == [], \
         "the first index is the baseline; existing content is not 'new'"
 
 
@@ -282,10 +301,10 @@ def test_bulk_import_drains_gradually_and_reports_capacity():
     prev = c.build(ch, lib, None, now=0)
     lib2 = lib + entries(200, start=5000)
     publication = c.build(ch, lib2, prev, now=c.HOUR)
-    pending = publication["state"]["pendingArrivals"]
+    pending = publication["checkpoint"]["pendingArrivals"]
     assert 0 < len(pending) <= 200, "a bulk import cannot be scheduled all at once"
     first = c.build(ch, lib2, publication, now=2 * c.HOUR)
-    assert first["state"]["arrivalCredits"] < c.MAX_CREDITS or len(first["state"]["pendingArrivals"]) == 0
+    assert first["checkpoint"]["arrivalCredits"] < c.MAX_CREDITS or len(first["checkpoint"]["pendingArrivals"]) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -324,7 +343,7 @@ def test_time_of_day_diversity_uses_local_windows_and_survives_dst():
 def test_empty_source_invents_no_filler():
     publication = c.build(network(), [], None, now=0)
     assert publication["programs"] == []
-    assert publication["state"]["deck"] == []
+    assert publication["checkpoint"]["deck"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -354,8 +373,30 @@ def test_long_outage_finishes_current_encore_then_resumes(tmp_path):
 
 def test_rollout_missing_file_activates_nothing(tmp_path):
     Rollout(tmp_path)  # never written
-    assert c.load_rollout(tmp_path) == {"enabled": False, "networkIds": []}
+    assert c.load_rollout(tmp_path) == {"enabled": False, "networkIds": [], "stage": "active"}
     assert c.active_channels(tmp_path) == []
+
+
+def test_rollout_string_false_is_loud_not_true(tmp_path):
+    """R12: rollout parsing validates booleans — the string \"false\" must
+    never read as enabled=true."""
+    (tmp_path / "continuing-networks.json").write_text(
+        json.dumps({"enabled": "false", "networkIds": ["net_00000001"]}))
+    with pytest.raises(ValueError, match="boolean"):
+        c.load_rollout(tmp_path)
+    assert c.try_load_rollout(tmp_path)["enabled"] is False
+
+
+def test_rollout_prepare_stage_builds_without_advertising(tmp_path, monkeypatch):
+    monkeypatch.setattr(networks, "PATH", tmp_path / "networks.json")
+    networks.PATH.write_text(json.dumps({"channels": [network(cid="net_00000001")]}))
+    Rollout(tmp_path).enable("net_00000001")
+    (tmp_path / "continuing-networks.json").write_text(
+        json.dumps({"enabled": True, "stage": "prepare", "networkIds": ["net_00000001"]}))
+    # Preparation sees the channel; advertising (resolved mode) stays fixed.
+    assert [ch["id"] for ch in c.active_channels(tmp_path)] == ["net_00000001"]
+    assert c.resolved_mode(network(cid="net_00000001"), c.load_rollout(tmp_path)) == "fixed"
+    assert c.scheduled_mode(network(cid="net_00000001"), c.load_rollout(tmp_path)) == c.MODE
 
 
 def test_rollout_activates_listed_networks_and_pins_respect_authored_fixed(tmp_path, monkeypatch):
@@ -489,10 +530,19 @@ def test_status_manifest_round_trip(tmp_path, monkeypatch):
     Rollout(tmp_path).enable(ch["id"])
     publication = c.build(ch, entries(10), None, now=0)
     snapshots.write_json(p.path(tmp_path, ch["id"]), publication)
-    manifest = c.write_status(tmp_path, {"customChannels": {}, "networkChannels": {ch["id"]: "ready"}}, now=0)
-    entry = manifest["channels"][ch["id"]]
-    assert entry["mode"] == c.MODE and entry["ready"] and entry["coverageHours"] > 0
-    assert c.read_status(tmp_path)["channels"][ch["id"]] == entry
+    manifest = c.write_status(tmp_path, {"runId": "x", "networkChannels": {ch["id"]: "ready"}}, now=0)
+    stored = manifest["channels"][ch["id"]]
+    assert stored["mode"] == c.MODE and stored["published"] and not stored["empty"]
+    assert "coverageHours" not in stored, "coverage is derived at read time, never stored"
+    # Read-time freshness: covered right after publication, expiring later
+    # WITHOUT any scheduler write, and dead once the coverage is gone.
+    live = c.read_status(tmp_path, now=0)
+    entry = live["channels"][ch["id"]]
+    assert entry["ready"] and entry["coverageHours"] > 0 and not entry["expiring"]
+    later = c.read_status(tmp_path, now=int(publication["preparedThrough"]) - 6 * c.HOUR)
+    assert later["channels"][ch["id"]]["expiring"], "status ages without writes"
+    dead = c.read_status(tmp_path, now=int(publication["preparedThrough"]) + c.HOUR)
+    assert not dead["channels"][ch["id"]]["ready"]
 
 
 def test_dynamic_epoch_expires_index_cache(tmp_path, monkeypatch):
@@ -533,7 +583,7 @@ def test_additions_never_drain_cumulative_exposure_counts():
         if hour % 24 == 12:
             lib = lib + [dict(entries(1, start=1000 + hour)[0], id=f"new{hour}")]
         prev = c.build(ch, lib, prev, now=hour * c.HOUR)
-        counts = sum(prev["state"]["airCounts"].values())
+        counts = sum(prev["checkpoint"]["airCounts"].values())
         assert counts >= total, f"cumulative counts regressed at hour {hour}"
         total = counts
     assert total > 24 * 10, "hourly cycling must accumulate durable history"
@@ -554,11 +604,11 @@ def test_deleted_scene_leaves_the_deck_even_without_a_future_airing():
     future_ids = {a["item"]["id"] for a in prev["programs"] if a["endEpochMs"] > 24 * 5 * c.HOUR}
     # Still queued this pass AND not scheduled in the future — the exact
     # state whose deck entry would crash the next pick after deletion.
-    victim = next(i for i in prev["state"]["deck"] if i not in future_ids)
-    assert victim in prev["state"]["deck"]
+    victim = next(i for i in prev["checkpoint"]["deck"] if i not in future_ids)
+    assert victim in prev["checkpoint"]["deck"]
     lib_after = [e for e in lib if e["id"] != victim]
     nxt = c.build(ch, lib_after, prev, now=24 * 5 * c.HOUR)  # must not raise
-    assert victim not in nxt["state"]["deck"]
+    assert victim not in nxt["checkpoint"]["deck"]
     assert victim not in {a["item"]["id"] for a in nxt["programs"]
                           if a["endEpochMs"] > 24 * 5 * c.HOUR}
 

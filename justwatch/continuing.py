@@ -2,30 +2,50 @@
 
 Activation is rollout-gated: an operator file in the DATA directory
 (``continuing-networks.json``) lists the network ids that run continuing
-schedules. Deploying new code alone never activates anything, and networks.json
-(the compiled editorial artifact) is never the switch — the two concerns stay
-separate exactly like the catalog vs. the compiled tier.
+schedules and a stage (``prepare`` builds publications without advertising
+them; ``active`` serves them). Deploying new code alone never activates
+anything, and networks.json (the compiled editorial artifact) is never the
+switch — the two concerns stay separate exactly like the catalog vs. the
+compiled tier.
 
-Engine shape (docs/CONTINUING-PROGRAMMING-PLAN.md, phase 2/3):
+Engine shape (docs/CONTINUING-PROGRAMMING-PLAN.md phase 2/3, remediated per
+docs/CONTINUING-PROGRAMMING-REMEDIATION-PLAN.md):
 
-* One publication file per channel, schema 2, stored beside the custom
+* One publication file per channel, schema 3, stored beside the custom
   (schema 1) publications. Airings carry wall-clock start/end like always.
-* Durable consumption state (pass/deck/counts/last-scheduled/recent/arrivals)
-  lives in the file and is advanced ONLY at the COMMITTED boundary — the
-  airings that start before ``now + PROTECT`` (whole-airing protection). The
-  flexible future beyond that boundary is provisional: building it mutates a
-  working copy of the state, so discarding it on a replan can never
-  double-count or lose scenes (the trap the old single-shot builder had).
-* Retained flexible airings are replayed into the working copy at the start of
-  every build, which reproduces exactly the provisional state that placed them.
-* New library arrivals (ids that appear in the index without a source change)
-  enter a pending queue and a persistent credit accumulator spends ~15% of
-  flexible slots on them; a bootstrap credit lets the first arrival air at the
-  first arrival-driven replan instead of waiting for credits to accrue.
-* Selection is bounded (a scan window over the deterministic deck order), with
-  a soft priority tuple: repeat cooldown > same-local-window avoidance >
-  performer/studio spacing > exposure fairness > deck order. Every preference
-  relaxes rather than blocks on thin libraries.
+* ONE consumption transition (``apply_airing``) advances pass/deck/counts/
+  recency/credits/arrivals. Live scheduling and replay both call it exactly
+  once per airing, so a replayed timeline always lands on the state the live
+  loop built — the double-spend/replay-mismatch trap the schema-2 engine had.
+* The DURABLE ledger is the ``checkpoint``: consumption state at the
+  actually-aired boundary (``airedThrough``). It advances only when wall clock
+  passes an airing's end, via an independent actual-airing cursor — scheduled
+  exposure and actual airings stay distinct, and time-of-day preferences see
+  real multi-airing history.
+* The durable ``state`` an airing sees is always RE-DERIVED per build:
+  checkpoint + replay of the committed reservations (airings inside the
+  now+PROTECT whole-airing protection that have not completed). Canceled
+  reservations are therefore released by construction — a cut scene simply
+  never entered the checkpoint, so it is still in the pass deck.
+* Policy edits (spacing/repeatHours/newShare) keep the 24-hour protected
+  prefix and the whole durable ledger; only the flexible future beyond it is
+  rebuilt. Lifetime consumption is never reset by a preference change.
+* New library arrivals (ids that appear in the index without a source change,
+  whose createdAt is not older than the index baseline) enter a pending queue
+  and a persistent credit accumulator spends ~15% of flexible slots on them.
+  ANY first exposure satisfies a pending arrival — a scene picked normally is
+  never re-picked as an arrival.
+* Selection (``pick_next``) is PURE and bounded (a scan window over the
+  deterministic deck order), with a soft priority tuple: repeat cooldown >
+  same-local-window avoidance > performer/studio spacing > exposure fairness
+  > coarse recency bucket > deck order. Recency is bucketed so the per-pass
+  shuffle stays meaningful (a homogeneous library does not replay the same
+  permutation every pass), and every preference relaxes rather than blocks
+  on thin libraries.
+* Publications carry a ``generation`` token over the whole durable state
+  (programs + checkpoint + cursors + signatures), used as the commit guard:
+  a stale write with an identical program list but different state is
+  rejected, and rollout activation is revalidated inside the commit lock.
 
 Timestamps in storage and API are UTC epoch milliseconds; the local viewing
 timezone for time-of-day comparisons comes from ``JUSTWATCH_PROGRAMMING_TZ``
@@ -39,6 +59,7 @@ import json
 import math
 import os
 import re
+import shutil
 import time
 import zoneinfo
 from pathlib import Path
@@ -55,9 +76,8 @@ PROTECT = 24 * HOUR
 RETENTION = 48 * HOUR
 #: How long aired intervals feed time-of-day metrics.
 AIRED_RETENTION = 30 * 24 * HOUR
-#: Two cache lifetimes of client notice before a policy replan moves the future.
-NOTICE = 120_000
-#: Share of flexible slots offered to new arrivals (plan default).
+#: Share of flexible slots offered to new arrivals (plan default; authored
+#: ``newShare`` policy overrides within the bounded range).
 NEW_SHARE = 0.15
 NEW_SHARE_MIN = 0.05
 NEW_SHARE_MAX = 0.30
@@ -65,6 +85,14 @@ NEW_SHARE_MAX = 0.30
 #: import's burst while the share drains the rest over time.
 MAX_CREDITS = 4.0
 CANDIDATE_SCAN = 256
+#: Recency bucketing (R3): stale candidates rank by 12h buckets capped at 7
+#: days, so exact-minute recency never dominates the per-pass deck shuffle
+#: (a homogeneous library must not replay one permutation). Airings within
+#: REPEAT_GUARD are instead hard-avoided by exact recency: no immediate
+#: repeat when alternatives exist, without a permanent global order.
+RECENCY_BUCKET = 12 * HOUR
+RECENCY_BUCKETS = 14
+REPEAT_GUARD = 6 * HOUR
 MAX_PROGRAMS = 20_000
 MAX_INDEX = 100_000
 INDEX_TTL = 6 * HOUR
@@ -76,8 +104,11 @@ AIRED_GLOBAL = 200_000
 #: Three-hour local viewing window, compared over the last seven days.
 TOD_WINDOW_HOURS = 3
 TOD_COMPARE = 7 * 24 * HOUR
+#: Consecutive per-channel failures before preparation backs off a source.
+FAILURE_BACKOFF_LIMIT = 3
+FAILURE_BACKOFF = 2 * HOUR
 
-SCHEMA = 2
+SCHEMA = 3
 MODE = "continuing"
 
 QUERY = """
@@ -106,6 +137,10 @@ def programming_timezone(name: str | None = None) -> zoneinfo.ZoneInfo | _dt.tim
         return _dt.timezone.utc
 
 
+def _utc_date(ms: int) -> _dt.date:
+    return _dt.datetime.fromtimestamp(ms / 1000, _dt.timezone.utc).date()
+
+
 # ---------------------------------------------------------------------------
 # Rollout: the operational activation switch (never networks.json)
 # ---------------------------------------------------------------------------
@@ -116,15 +151,18 @@ def rollout_path(data_dir: str | Path) -> Path:
 
 
 def load_rollout(data_dir: str | Path) -> dict:
-    """The activation allowlist: ``{"enabled": bool, "networkIds": [...]}``.
+    """The activation allowlist: ``{"enabled": bool, "networkIds": [...],
+    "stage": "prepare"|"active"}``.
 
     A missing file is the shipped default (nothing activated). A present but
     malformed file raises — an operator half-editing the rollout must get a
-    loud failure in the task, not a silently narrowed activation.
+    loud failure in the task, not a silently narrowed activation. ``enabled``
+    must be a real boolean (the string "false" is a loud error, not true),
+    and ``stage`` distinguishes preparing publications from advertising them.
     """
     path = rollout_path(data_dir)
     if not path.exists():
-        return {"enabled": False, "networkIds": []}
+        return {"enabled": False, "networkIds": [], "stage": "active"}
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -136,7 +174,13 @@ def load_rollout(data_dir: str | Path) -> dict:
         not isinstance(i, str) or not _NETWORK_ID_RE.match(i) for i in ids
     ):
         raise ValueError("continuing rollout networkIds must be a list of net_XXXXXXXX ids")
-    return {"enabled": bool(raw.get("enabled", True)), "networkIds": ids}
+    enabled = raw.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ValueError("continuing rollout 'enabled' must be a boolean")
+    stage = raw.get("stage", "active")
+    if stage not in ("prepare", "active"):
+        raise ValueError("continuing rollout 'stage' must be \"prepare\" or \"active\"")
+    return {"enabled": enabled, "networkIds": ids, "stage": stage}
 
 
 def try_load_rollout(data_dir: str | Path) -> dict:
@@ -149,7 +193,7 @@ def try_load_rollout(data_dir: str | Path) -> dict:
     try:
         return load_rollout(data_dir)
     except ValueError:
-        return {"enabled": False, "networkIds": []}
+        return {"enabled": False, "networkIds": [], "stage": "active"}
 
 
 def authored_mode(channel: dict) -> str:
@@ -161,11 +205,11 @@ def authored_mode(channel: dict) -> str:
     return mode if mode in ("fixed", MODE, "explore", "discovery") else ""
 
 
-def resolved_mode(channel: dict, rollout: dict) -> str:
-    """Precedence: an explicit authored ``fixed`` policy PINS a network off
-    (editorial veto); otherwise the rollout allowlist decides activation.
-    Authored ``continuing`` records intent but never bypasses the rollout —
-    broad activation stays a deliberate operator step."""
+def scheduled_mode(channel: dict, rollout: dict) -> str:
+    """Whether the channel is SCHEDULED for continuing programming under the
+    rollout (either stage). An explicit authored ``fixed`` policy PINS a
+    network off (editorial veto); authored ``continuing`` never bypasses the
+    rollout — broad activation stays a deliberate operator step."""
     if authored_mode(channel) == "fixed":
         return "fixed"
     if rollout.get("enabled") and channel.get("id") in rollout.get("networkIds", []):
@@ -173,33 +217,69 @@ def resolved_mode(channel: dict, rollout: dict) -> str:
     return "fixed"
 
 
-def active_channels(data_dir: str | Path) -> list[dict]:
-    """Network channel rows currently activated for continuing programming."""
+def resolved_mode(channel: dict, rollout: dict) -> str:
+    """The ADVERTISED mode: a staged (``prepare``) rollout builds publications
+    without serving them — compatible TVs stay on fixed playback until the
+    operator flips the stage at a whole-airing boundary, so activation can
+    never put a TV on a schedule that was never published."""
+    if scheduled_mode(channel, rollout) != MODE:
+        return "fixed"
+    return MODE if rollout.get("stage", "active") == "active" else "fixed"
+
+
+def scheduled_channels(data_dir: str | Path) -> list[dict]:
+    """Network rows with publications prepared under the rollout (both stages)."""
     rollout = load_rollout(data_dir)
     if not rollout["enabled"]:
         return []
     return [
         ch for ch in networks.load()["channels"]
-        if resolved_mode(ch, rollout) == MODE
+        if scheduled_mode(ch, rollout) == MODE
     ]
+
+
+def active_channels(data_dir: str | Path) -> list[dict]:
+    """Network channel rows currently activated for continuing programming.
+
+    Preparation runs against the scheduled set (both stages); advertising is
+    gated separately by :func:`resolved_mode`."""
+    return scheduled_channels(data_dir)
 
 
 def network_policy(channel: dict) -> dict:
     """The continuing scheduling policy for a network (authored overrides for
-    the numeric knobs only; mode/spotlight stay the engine's own)."""
+    the numeric knobs only; mode/spotlight stay the engine's own). ``newShare``
+    is the bounded configurable arrival share from the plan (default 15%)."""
     cfg = {"mode": MODE, "spacing": 1, "repeatHours": 48,
-           "spotlight": "none", "spotlightDay": 5, "spotlightHour": 20}
+           "spotlight": "none", "spotlightDay": 5, "spotlightHour": 20,
+           "newShare": NEW_SHARE}
     authored = channel.get("programming")
     if isinstance(authored, dict):
         for key in ("spacing", "repeatHours"):
             value = authored.get(key)
             if type(value) is int:
                 cfg[key] = max(0, min(24 if key == "spacing" else 336, value))
+        share = authored.get("newShare")
+        if isinstance(share, (int, float)) and not isinstance(share, bool):
+            cfg["newShare"] = max(NEW_SHARE_MIN, min(NEW_SHARE_MAX, float(share)))
     return cfg
 
 
+def source_signature_of(channel: dict) -> str:
+    """Identity of WHERE content comes from and HOW the deck is dealt: source,
+    sort, seed. A change re-deals the deck (the flexible future rebuilds);
+    membership deltas ride the deletion/arrival machinery instead."""
+    return digest([channel["source"], channel["sort"], channel["seed"]])
+
+
+def policy_signature_of(channel: dict) -> str:
+    """Identity of the soft PREFERENCES only. A change rebuilds the flexible
+    future but never touches the protected prefix or the durable ledger."""
+    return digest(network_policy(channel))
+
+
 def signature_of(channel: dict) -> str:
-    return digest([channel["source"], channel["sort"], channel["seed"], network_policy(channel)])
+    return digest([source_signature_of(channel), policy_signature_of(channel)])
 
 
 # ---------------------------------------------------------------------------
@@ -258,7 +338,7 @@ def index_jitter(channel_id: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Selection state: fold/ledger primitives (pure — replay-safe by construction)
+# Selection state: the one exactly-once transition (pure pick + single fold)
 # ---------------------------------------------------------------------------
 
 
@@ -270,31 +350,92 @@ def empty_state(now: int) -> dict:
     }
 
 
-def fold_airing(state: dict, airing: dict, channel: dict | None = None,
-                index: dict | None = None) -> None:
-    """Apply one airing's consumption to a state. Used for committed
-    advancement (durable), for replaying retained flexible airings into the
-    working copy, and in tests — one function, one semantics.
+def _refill_pass(state: dict, channel: dict, index: dict) -> None:
+    """Deal the next pass deck (deterministic: seed + pass number + index)."""
+    state["pass"] += 1
+    state["deck"] = sorted(index, key=lambda i: digest([channel["seed"], state["pass"], i]))
 
-    When the folded scene is not in the (empty) deck, the airing came from a
-    LATER pass: advance the pass and re-deal the full pass deck first (the
-    same digest rule the build loop uses), so the durable state's pass/deck
-    track exactly what committed — otherwise every rebuild would re-deal
-    pass one and the never-aired tail of a large library could never surface."""
+
+def apply_airing(state: dict, airing: dict, channel: dict | None = None,
+                 index: dict | None = None, cfg: dict | None = None) -> None:
+    """THE single consumption transition (R1/R2 remediation).
+
+    Construction and replay both advance a state by calling this EXACTLY ONCE
+    per airing — live scheduling, reservation replay after a checkpoint
+    restore, and schema-2 timeline migration included — so a replayed timeline
+    always reproduces the state the live loop built.
+
+    Semantics:
+    * an empty deck deals the next pass (identical digest rule everywhere);
+    * the scene leaves the remaining deck (once — no double membership);
+    * counts/lastScheduled/recent record the SCHEDULED exposure;
+    * ANY exposure satisfies a pending arrival (a scene picked normally is
+      never re-pickable as an arrival — the out-of-deck re-pick trap);
+    * only an arrival-flagged slot spends a credit; every airing accrues the
+      configurable share.
+    """
+    cfg = cfg or {}
+    share = float(cfg.get("newShare", NEW_SHARE))
     sid = airing["item"]["id"]
-    if sid not in state["deck"] and not state["deck"] and channel is not None and index:
-        state["pass"] += 1
-        state["deck"] = sorted(index, key=lambda i: digest([channel["seed"], state["pass"], i]))
+    if not state["deck"] and channel is not None and index:
+        _refill_pass(state, channel, index)
     if sid in state["deck"]:
         state["deck"].remove(sid)
-    counts = state["airCounts"]
-    counts[sid] = counts.get(sid, 0) + 1
+    state["airCounts"][sid] = state["airCounts"].get(sid, 0) + 1
     state["lastScheduled"][sid] = airing["startEpochMs"]
     state["recent"] = (state["recent"] + [airing["item"]])[-10:]
-    credits = state["arrivalCredits"] + NEW_SHARE - (1.0 if airing.get("arrival") else 0.0)
-    state["arrivalCredits"] = max(0.0, min(MAX_CREDITS, credits))
-    if airing.get("arrival"):
+    if state["pendingArrivals"]:
         state["pendingArrivals"] = [a for a in state["pendingArrivals"] if a["id"] != sid]
+    credits = state["arrivalCredits"] + share - (1.0 if airing.get("arrival") else 0.0)
+    state["arrivalCredits"] = max(0.0, min(MAX_CREDITS, credits))
+
+
+def validate_checkpoint(raw) -> dict:
+    """Strict structural validation of the durable ledger (R12): a schema-3
+    publication with a missing or corrupt checkpoint RAISES — it is never
+    silently defaulted to a fresh empty pass (which would re-air and
+    re-count content). Returns a detached deep copy safe to mutate."""
+    def fail(why: str) -> None:
+        raise ValueError(f"corrupt continuing state: {why}")
+
+    if not isinstance(raw, dict):
+        fail("checkpoint missing or not an object")
+    allowed = {"pass", "deck", "airCounts", "lastScheduled", "recent",
+               "arrivalCredits", "pendingArrivals", "arrivalBaseline"}
+    missing = allowed - set(raw)
+    if missing:
+        fail(f"missing fields {sorted(missing)}")
+    if type(raw["pass"]) is not int or raw["pass"] < 0:
+        fail("pass")
+    if not isinstance(raw["deck"], list) or any(not isinstance(i, str) for i in raw["deck"]):
+        fail("deck")
+    if not isinstance(raw["airCounts"], dict) or any(
+        not isinstance(k, str) or type(v) is not int or v < 0
+        for k, v in raw["airCounts"].items()
+    ):
+        fail("airCounts")
+    if not isinstance(raw["lastScheduled"], dict) or any(
+        not isinstance(k, str) or type(v) is not int
+        for k, v in raw["lastScheduled"].items()
+    ):
+        fail("lastScheduled")
+    if not isinstance(raw["recent"], list) or any(
+        not isinstance(r, dict) or not isinstance(r.get("id"), str) for r in raw["recent"]
+    ):
+        fail("recent")
+    credits = raw["arrivalCredits"]
+    if isinstance(credits, bool) or not isinstance(credits, (int, float)) \
+            or not (0.0 <= float(credits) <= MAX_CREDITS):
+        fail("arrivalCredits")
+    if not isinstance(raw["pendingArrivals"], list) or any(
+        not isinstance(a, dict) or not isinstance(a.get("id"), str)
+        or type(a.get("firstSeenAt")) is not int
+        for a in raw["pendingArrivals"]
+    ):
+        fail("pendingArrivals")
+    if type(raw["arrivalBaseline"]) is not int:
+        fail("arrivalBaseline")
+    return copy.deepcopy({key: raw[key] for key in allowed})
 
 
 def prune_state(state: dict, index: dict) -> dict:
@@ -342,9 +483,14 @@ def record_aired(aired: dict, airing: dict, now: int) -> None:
         aired[airing["item"]["id"]] = intervals[-AIRED_PER_SCENE:]
 
 
-# ---------------------------------------------------------------------------
-# Builder
-# ---------------------------------------------------------------------------
+def _created_ms(value: str) -> int | None:
+    """Parse a Stash created_at timestamp; None when absent/unparseable."""
+    if not value:
+        return None
+    try:
+        return int(_dt.datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp() * 1000)
+    except Exception:
+        return None
 
 
 def _tod_window(at_ms: int, tz) -> int:
@@ -362,21 +508,33 @@ def _tod_conflict(aired: dict, last_scheduled: dict, sid: str, at_ms: int, windo
     return False
 
 
-def _pick_next(working: dict, index: dict, aired: dict, cursor: int, tz, cfg: dict):
-    """Choose the next scene: an arrival when credits allow, else the best
-    candidate in a bounded scan window of the deck (deck order is already the
-    deterministic shuffle, so the window is a fair sample). Returns
-    ``(scene_id, is_arrival, relaxed)``."""
-    pending = [a for a in working["pendingArrivals"] if a["id"] in index]
-    working["pendingArrivals"] = pending
+def pick_next(working: dict, index: dict, aired: dict, cursor: int, tz, cfg: dict):
+    """PURE candidate choice (R2 remediation: no state mutation — the caller
+    applies the chosen airing through :func:`apply_airing` exactly once).
+
+    An arrival is only ever chosen from the REMAINING deck, so a scene picked
+    normally (whose first exposure already cleared its pending entry) can
+    never be re-picked as an arrival, and an arrival can never come from
+    outside the current pass.
+
+    Among deck candidates the soft priority tuple decides: repeat cooldown >
+    just-aired guard > same-local-window avoidance > performer/studio spacing
+    > exposure fairness > freshness > deck position. Freshness (R3
+    remediation): never-aired first; then stale candidates ranked by COARSE
+    recency buckets (12h, capped at 7 days) so exact-minute recency never
+    recreates the whole previous pass order — the per-pass shuffle stays
+    meaningful among stale candidates and a homogeneous library does not
+    replay one permutation; anything aired within REPEAT_GUARD ranks after
+    every stale candidate by exact recency, so the just-aired scene is truly
+    last without imposing a permanent order on the rest. On a thin source the
+    tiers collapse and every preference relaxes rather than blocks.
+    Returns ``(scene_id, is_arrival, relaxed)``.
+    """
+    pending = [a for a in working["pendingArrivals"]
+               if a["id"] in index and a["id"] in working["deck"]]
     if pending and working["arrivalCredits"] >= 1.0:
         first = min(pending, key=lambda a: (a["firstSeenAt"], a["id"]))
-        sid = first["id"]
-        working["arrivalCredits"] -= 1.0
-        working["pendingArrivals"] = [a for a in pending if a["id"] != sid]
-        if sid in working["deck"]:
-            working["deck"].remove(sid)
-        return sid, True, False
+        return first["id"], True, False
     deck = working["deck"]
     window = deck[:CANDIDATE_SCAN]
     counts = working["airCounts"]
@@ -389,23 +547,28 @@ def _pick_next(working: dict, index: dict, aired: dict, cursor: int, tz, cfg: di
         position, sid = position_and_id
         entry = index[sid]
         over_cooldown = 1 if cursor - last.get(sid, -10**18) < cooldown_ms else 0
-        tod = 1 if _tod_conflict(aired, last, sid, cursor, window_index, tz) else 0
+        rec = last.get(sid)
+        if rec is None:
+            just_aired = 0
+            freshness = (0, 0)  # never aired: first exposure wins
+        else:
+            age = cursor - rec
+            just_aired = 1 if age < REPEAT_GUARD else 0
+            if just_aired:
+                freshness = (2, age)  # most recent last, even past tod/spacing
+            else:
+                # stale: coarse buckets, staler first — bucketed so that the
+                # within-bucket order is the per-pass shuffle, not last pass.
+                freshness = (1, RECENCY_BUCKETS - min(age // RECENCY_BUCKET, RECENCY_BUCKETS))
+        tod = 0 if just_aired else (1 if _tod_conflict(aired, last, sid, cursor, window_index, tz) else 0)
         spacing = 0
-        if neighbors:
+        if neighbors and not just_aired:
             for r in neighbors:
                 if (entry["studioId"] and entry["studioId"] == r.get("studioId")) or \
                         set(entry["performerIds"]) & set(r.get("performerIds", [])):
                     spacing = 1
                     break
-        # Least-recently-aired tie-breaking (never-aired first: 0 sorts before
-        # any real timestamp) — without it, a pass-boundary rebuild could
-        # re-pick the scene that just aired at the pass's end. On single-digit
-        # decks where every candidate ties above this key, consecutive passes
-        # can repeat one another's order; that is inherent to a tiny library
-        # (the deck shuffle itself still varies per pass) and recorded as a
-        # limitation rather than "fixed" by blocking picks.
-        recency = last.get(sid, 0)
-        return (over_cooldown, tod, spacing, counts.get(sid, 0), recency, position)
+        return (over_cooldown, just_aired, tod, spacing, counts.get(sid, 0), freshness, position)
 
     best_position, best = min(enumerate(window), key=key)
     relaxed = key((best_position, best))[:3] != (0, 0, 0)
@@ -415,152 +578,168 @@ def _pick_next(working: dict, index: dict, aired: dict, cursor: int, tz, cfg: di
 def build(channel: dict, entries: list[dict], previous: dict | None, now: int, tz=None) -> dict:
     """Pure publication builder; deterministic for the same inputs and time.
 
-    ``previous`` is the prior publication dict (schema 2) or None. The durable
-    state in the result reflects ONLY committed airings; the flexible future is
-    provisional and replayed from that state on every subsequent build.
+    ``previous`` is the prior publication dict (schema 3, or schema 2 for the
+    one-shot migration path) or None. The durable ledger in the result is the
+    CHECKPOINT (actual-aired boundary); the committed future is re-derived
+    from it every build, and the flexible future beyond the protection window
+    is provisional.
     """
     tz = tz or programming_timezone()
     now = int(now)
     cfg = network_policy(channel)
     index = {e["id"]: e for e in entries}
     fingerprint = index_fingerprint(entries)
-    signature = signature_of(channel)
-    epoch = lineup.effective_epoch(source=channel["source"])
+    source_sig = source_signature_of(channel)
+    policy_sig = policy_signature_of(channel)
+    epoch = lineup.effective_epoch(channel["source"], today=_utc_date(now))
     old = previous if isinstance(previous, dict) else {}
     old_programs = [p for p in old.get("programs", [])
-                    if isinstance(p, dict) and p.get("endEpochMs", 0) > now - RETENTION]
-    warnings: set[str] = set(old.get("warnings", [])) if old.get("configuration") == signature else set()
+                    if isinstance(p, dict) and isinstance(p.get("item"), dict)
+                    and isinstance(p.get("item", {}).get("id"), str)
+                    and isinstance(p.get("startEpochMs"), int)
+                    and isinstance(p.get("endEpochMs"), int)]
+    warnings: set[str] = set()
     degraded = False
 
-    if old.get("configuration") != signature:
-        # Policy/source change: restart selection state, re-baseline arrivals,
-        # keep whole airings through a short client-notice boundary.
-        boundary = next((p["endEpochMs"] for p in old_programs if p["endEpochMs"] >= now + NOTICE), now)
-        kept = [p for p in old_programs if p["startEpochMs"] < boundary]
-        state = empty_state(now)
-        for airing in kept:
-            fold_airing(state, airing, channel, index)
-        aired = prune_aired(old.get("aired", {}), now)
-        programs = kept
-        committed = len(kept)
-        cursor = max(now, kept[-1]["endEpochMs"] if kept else now)
+    # --- durable ledger: strict on schema 3, timeline-rebuilt on migration ---
+    if old.get("schema") == SCHEMA:
+        checkpoint = validate_checkpoint(old.get("checkpoint"))
     else:
-        state = copy.deepcopy(old.get("state") or empty_state(now))
-        aired = dict(old.get("aired") or {})
-        # The committed boundary is identified by AIRING TIME, never by index:
-        # the retained list's front is pruned every run (48h retention), so a
-        # positional cursor would silently stop advancing as the window slides.
-        prev_through = int(old.get("committedThrough", 0))
-        cutoff = now + PROTECT
-        committed = 0
-        for airing in old_programs:
-            if airing["startEpochMs"] < cutoff:
-                committed += 1
-            else:
-                break
-        old_ids = set(old.get("indexIds", []))
-        removed = old_ids - set(index)
-        added = set(index) - old_ids
-        # Ids that left the source vanish from every state structure NOW —
-        # even when no future airing references them (no replan trigger): a
-        # deck entry for a deleted scene would crash or re-air it.
-        if removed:
-            state = prune_state(state, index)
-        # Replan triggers, computed BEFORE folding so a cut inside the newly
-        # committed region never folds airings that are about to be canceled.
-        replan_from = None
-        if removed:
-            affected = next((i for i, p in enumerate(old_programs)
-                             if p["endEpochMs"] > now and p["item"]["id"] not in index), None)
-            if affected is not None:
-                replan_from = affected
-        if replan_from is None and old.get("indexFingerprint") not in ("", None) \
-                and old.get("indexFingerprint") != fingerprint and old_programs:
-            # A changed fingerprint alone is NOT a replan: additions are the
-            # arrival machinery's job. Only common ids whose DURATION moved
-            # invalidate published flexible lengths.
-            prior_index = {e["id"]: e for e in (old.get("index") or [])}
-            if any(i in prior_index and prior_index[i].get("duration") != index[i]["duration"]
-                   for i in index):
-                replan_from = committed
-        if replan_from is not None:
-            # Release the canceled future's reservations: fold (and aired-record)
-            # only up to the cut, give back the cut airings' exposure counts, and
-            # prune the removed ids from every state structure. Give-back covers
-            # only the durably folded committed region — flexible airings were
-            # never counted, so "giving them back" would drain real history.
-            # Cut scenes stay out of this pass's deck (their fold may already be
-            # durable); the next pass refill resurfaces them, so nothing is lost.
-            keep_upto = min(committed, replan_from)
-            for airing in old_programs[:keep_upto]:
-                if prev_through < airing["startEpochMs"] < cutoff:
-                    fold_airing(state, airing, channel, index)
-                    record_aired(aired, airing, now)
-            for airing in old_programs[keep_upto:committed]:
-                sid = airing["item"]["id"]
-                if state["airCounts"].get(sid, 0) > 0:
-                    state["airCounts"][sid] -= 1
-            committed = keep_upto
-            programs = old_programs[:keep_upto]
-            state = prune_state(state, index)
-            cursor = max(now, programs[-1]["endEpochMs"] if programs else now)
-        else:
-            for airing in old_programs[:committed]:
-                if prev_through < airing["startEpochMs"] < cutoff:
-                    fold_airing(state, airing, channel, index)
-                    record_aired(aired, airing, now)
-            programs = list(old_programs)
-            cursor = max(now, programs[-1]["endEpochMs"] if programs else now)
-        if added:
-            for sid in sorted(added, key=lambda i: digest([channel["seed"], i])):
-                state["deck"].append(sid)
-                state["pendingArrivals"].append({"id": sid, "firstSeenAt": now})
+        # Schema 2 (or none): its counters are unreliable by review finding —
+        # reconstruct the ledger from the client-visible timeline instead of
+        # trusting stored counts. Completed airings fold exactly once below.
+        checkpoint = empty_state(now)
+    # Deep-copy the aired intervals: nested lists must never alias the input
+    # publication (a shallow dict copy let record_aired mutate prior history).
+    aired: dict = {}
+    for sid, intervals in (old.get("aired") or {}).items():
+        if isinstance(intervals, list):
+            aired[sid] = [list(iv) for iv in intervals if isinstance(iv, (list, tuple)) and len(iv) == 2]
+    aired_through = int(old.get("airedThrough", 0) or 0)
 
-    # Outage recovery: if the schedule expired, finish the deterministic encore
-    # airing currently on air before fresh programming resumes (shared fallback
-    # math with the custom engine — every client sees the same boundaries).
-    if programs and programs[-1]["endEpochMs"] <= now:
-        block = [p for p in old.get("programs", []) if isinstance(p, dict)][-50:] or programs[-50:]
-        length = sum(p["endEpochMs"] - p["startEpochMs"] for p in block)
-        if length > 0:
+    # --- actual-history advance (R4): independent, idempotent wall-clock ---
+    # Every airing that completed since the cursor last advanced folds into
+    # the checkpoint EXACTLY ONCE, identified by its end time — never only
+    # when future slots first become protected.
+    for airing in old_programs:
+        if airing["endEpochMs"] > now or airing["endEpochMs"] <= aired_through:
+            continue
+        apply_airing(checkpoint, airing, channel, index, cfg)
+        record_aired(aired, airing, now)
+        aired_through = airing["endEpochMs"]
+
+    # --- encore source: captured BEFORE retention pruning (R10). A long
+    # outage outruns the 48h retained window; recovery must loop the stored
+    # block, which mirrors exactly what the read surface (programming.schedule)
+    # served while the scheduler was dark. ---
+    stored_block = old.get("encoreBlock")
+    encore_block = [a for a in (stored_block if isinstance(stored_block, list)
+                                else old_programs[-50:])
+                    if isinstance(a, dict) and isinstance(a.get("item"), dict)]
+    programs = [p for p in old_programs if p["endEpochMs"] > now - RETENTION]
+
+    # --- committed boundary: whole airings through now+PROTECT ---
+    cutoff = now + PROTECT
+    committed = 0
+    for airing in programs:
+        if airing["startEpochMs"] < cutoff:
+            committed += 1
+        else:
+            break
+
+    # --- eligibility reconciliation (R1): cut at the EARLIEST invalid airing
+    # only. Everything valid before it is preserved; the checkpoint predates
+    # every cut reservation, so canceled ELIGIBLE scenes are still in the pass
+    # deck — released by construction, not by error-prone count subtraction. ---
+    invalid = next((i for i, airing in enumerate(programs)
+                    if airing["endEpochMs"] > now and airing["item"]["id"] not in index), None)
+    if invalid is not None:
+        programs = programs[:invalid]
+        committed = min(committed, invalid)
+        warnings.add("Upcoming airings changed: one or more scenes are no longer "
+                     "available in this channel's source.")
+
+    # --- rebuild triggers for the flexible future ---
+    prior_index_map = {e["id"]: e for e in (old.get("index") or []) if isinstance(e, dict)}
+    durations_changed = any(
+        sid in prior_index_map and prior_index_map[sid].get("duration") != entry["duration"]
+        for sid, entry in index.items()
+    )
+    policy_changed = old.get("policySignature") not in ("", None) and old.get("policySignature") != policy_sig
+    deal_changed = old.get("sourceSignature") not in ("", None) and old.get("sourceSignature") != source_sig
+    if (durations_changed or policy_changed or deal_changed) and len(programs) > committed:
+        programs = programs[:committed]
+
+    # --- membership deltas: additions enter the deck; genuinely NEW content
+    # (createdAt not older than the index baseline; missing timestamps count
+    # as new) also becomes a pending arrival. Old content that merely became
+    # eligible joins the pass queue with no freshness promise. ---
+    old_index_ids = old.get("indexIds")
+    if isinstance(old_index_ids, list):
+        added = set(index) - set(old_index_ids)
+        removed = set(old_index_ids) - set(index)
+        if added:
+            baseline = checkpoint["arrivalBaseline"]
+            for sid in sorted(added, key=lambda i: digest([channel["seed"], i])):
+                if sid not in checkpoint["deck"]:
+                    checkpoint["deck"].append(sid)
+                created = _created_ms(index[sid].get("createdAt") or "")
+                if created is None or created >= baseline:
+                    checkpoint["pendingArrivals"].append({"id": sid, "firstSeenAt": now})
+
+    checkpoint = prune_state(checkpoint, index)
+
+    # --- encore recovery (R10): schedule expired — finish the airing clients
+    # are already watching (from the UNPRUNED stored block), then resume. The
+    # test for "expired" cannot rely on retained programs: a long outage
+    # outruns the 48h retention window and leaves the retained list empty.
+    # The encore is a committed airing like any other: folded exactly once by
+    # the reservation replay / actual-history cursor, never inline here. ---
+    schedule_expired = (not programs) or programs[-1]["endEpochMs"] <= now
+    if schedule_expired:
+        block = [a for a in encore_block if a.get("item", {}).get("id") in index]
+        length = sum(a["endEpochMs"] - a["startEpochMs"] for a in block)
+        if block and length > 0:
             offset = block[-1]["endEpochMs"] + ((now - block[-1]["endEpochMs"]) // length) * length
             for airing in block:
                 end = offset + airing["endEpochMs"] - airing["startEpochMs"]
                 if end > now:
-                    encore = {**airing, "startEpochMs": offset, "endEpochMs": end,
-                              "airingId": digest([channel["id"], offset, airing["item"]["id"]]),
-                              "block": "Encore"}
-                    programs.append(encore)
-                    fold_airing(state, encore, channel, index)
-                    record_aired(aired, encore, now)
+                    programs.append({**airing, "startEpochMs": offset, "endEpochMs": end,
+                                     "airingId": digest([channel["id"], offset, airing["item"]["id"]]),
+                                     "block": "Encore"})
                     committed = len(programs)
                     degraded = True
                     break
                 offset = end
-        cursor = max(cursor, programs[-1]["endEpochMs"])
 
-    # Arrival-driven replan: when unplaced arrivals are waiting and credits are
-    # due, rebuild the flexible future so they land inside the 24–72h target.
-    # An arrival already placed in the retained flexible zone is left alone —
-    # its first airing must not slide an hour every run waiting to commit.
-    # The committed prefix is untouched either way.
-    if len(programs) > committed and state["arrivalCredits"] >= 1.0:
+    # --- durable state = checkpoint + committed reservations, replayed
+    # through the one transition (exactly-once, both directions) ---
+    working = copy.deepcopy(checkpoint)
+    for airing in programs[:committed]:
+        apply_airing(working, airing, channel, index, cfg)
+    scheduled_unique = len(working["airCounts"])
+
+    # --- arrival-driven flexible rebuild: when unplaced arrivals wait and a
+    # credit is due, regenerate the flexible future so they land inside the
+    # 24-72h target. A placed (retained) arrival holds still until it commits. ---
+    if len(programs) > committed and working["arrivalCredits"] >= 1.0:
         placed = {a["item"]["id"] for a in programs[committed:] if a.get("arrival")}
-        unplaced = [a for a in state["pendingArrivals"] if a["id"] not in placed]
-        if unplaced:
+        if any(a["id"] not in placed for a in working["pendingArrivals"]):
             programs = programs[:committed]
-            cursor = max(now, programs[-1]["endEpochMs"] if programs else now)
+            working = copy.deepcopy(checkpoint)
+            for airing in programs[:committed]:
+                apply_airing(working, airing, channel, index, cfg)
 
-    working = copy.deepcopy(state)
     for airing in programs[committed:]:
-        fold_airing(working, airing, channel, index)  # provisional replay
+        apply_airing(working, airing, channel, index, cfg)
+
+    cursor = max(now, programs[-1]["endEpochMs"] if programs else now)
 
     relaxed_any = False
     while index and cursor < now + HORIZON and len(programs) < MAX_PROGRAMS:
         if not working["deck"]:
-            working["pass"] += 1
-            working["deck"] = sorted(index, key=lambda i: digest([channel["seed"], working["pass"], i]))
-        sid, is_arrival, relaxed = _pick_next(working, index, aired, cursor, tz, cfg)
+            _refill_pass(working, channel, index)
+        sid, is_arrival, relaxed = pick_next(working, index, aired, cursor, tz, cfg)
         relaxed_any = relaxed_any or relaxed
         item = index[sid]
         end = cursor + max(1000, round(item["duration"] * 1000))
@@ -569,43 +748,52 @@ def build(channel: dict, entries: list[dict], previous: dict | None, now: int, t
         if is_arrival:
             airing["arrival"] = True
         programs.append(airing)
-        fold_airing(working, airing, channel, index)
+        apply_airing(working, airing, None, None, cfg)
         cursor = end
     if relaxed_any:
         warnings.add("Some repeat, time-of-day, or spacing preferences could not be met by this lineup.")
     if cursor < now + HORIZON and index and len(programs) >= MAX_PROGRAMS:
-        warnings.append("This source contains very short programs; the preparation limit was reached. "
-                        "The scheduler will continue on its next run.")
-    pending_ages = [now - a["firstSeenAt"] for a in state["pendingArrivals"]]
+        warnings.add("This source contains very short programs; the preparation limit was reached. "
+                     "The scheduler will continue on its next run.")
+    pending_ages = [now - a["firstSeenAt"] for a in checkpoint["pendingArrivals"]]
     if pending_ages and max(pending_ages) > 72 * HOUR:
         # Bulk imports drain at the configured share; report honestly instead
         # of promising a deadline the capacity cannot meet.
         warnings.add(f"{len(pending_ages)} new additions are waiting; at a "
-                     f"{round(NEW_SHARE * 100)}% share the oldest has waited "
+                     f"{round(float(cfg['newShare']) * 100)}% share the oldest has waited "
                      f"{max(pending_ages) // HOUR}h and the rest drain gradually.")
 
     aired = prune_aired(aired, now)
-    # The durable commit cursor: the start time of the last committed airing
-    # (monotone — next run folds exactly the airings beyond it).
-    committed_through = max(
-        [prev_through if old.get("configuration") == signature else 0]
-        + [a["startEpochMs"] for a in programs[:committed]]
-    ) if committed else max(prev_through if old.get("configuration") == signature else 0, 0)
+    # The commit cursor is DERIVED from the retained timeline (R1): it can
+    # never claim a boundary beyond the airings actually kept.
+    if programs and committed:
+        committed_through = max(a["startEpochMs"] for a in programs[:committed])
+    else:
+        committed_through = now
+    checkpoint_out = prune_state(checkpoint, index)
+    generation = digest([source_sig, policy_sig, fingerprint, committed_through,
+                         aired_through, digest(programs), digest(checkpoint_out)])
     publication = {
         "schema": SCHEMA,
         "channelId": channel["id"],
         "mode": MODE,
-        "configuration": signature,
+        "configuration": digest([source_sig, policy_sig]),
+        "sourceSignature": source_sig,
+        "policySignature": policy_sig,
         "programs": programs,
         "committedCount": committed,
         "committedThrough": committed_through,
+        "airedThrough": aired_through,
         "preparedThrough": cursor,
         "sourceTotal": len(index),
+        "scheduledUnique": scheduled_unique,
         "warnings": sorted(warnings),
         "version": digest(programs),
+        "generation": generation,
         "generatedAt": now,
-        "state": prune_state(state, index),
+        "checkpoint": checkpoint_out,
         "aired": aired,
+        "encoreBlock": [a for a in (encore_block if degraded else programs[-50:])],
         "index": entries,
         "indexIds": list(index),
         "indexFingerprint": fingerprint,
@@ -617,17 +805,30 @@ def build(channel: dict, entries: list[dict], previous: dict | None, now: int, t
 
 
 def read(data_dir: str | Path, channel_id: str) -> dict | None:
-    """A continuing publication (schema 2), or None when never published.
+    """A continuing publication, or None when never published.
 
-    A schema-1 file at a network path (a custom-engine artifact that can only
-    exist on a hand-migrated dev box) reads through ``programming.read``; the
-    next prepare replaces it with schema 2 state.
+    Schema 3 validates strictly (R12): a corrupt program list or ledger
+    raises — it is never silently normalized into a fresh editable state.
+    A schema-2 file (the pre-remediation dev schema) reads loosely so the
+    read surface keeps serving it; the next prepare migrates it to schema 3
+    with a backup. A schema-1 file at a network path (a custom-engine
+    artifact that can only exist on a hand-migrated dev box) reads through
+    ``programming.read``.
     """
     path = programming.path(data_dir, channel_id)
     if not path.exists():
         return None
     data = json.loads(path.read_text())
-    if data.get("schema") == SCHEMA:
+    schema = data.get("schema") if isinstance(data, dict) else None
+    if schema == SCHEMA:
+        if not isinstance(data.get("programs"), list):
+            raise ValueError("unreadable published schedule")
+        validate_checkpoint(data.get("checkpoint"))
+        for key in ("committedCount", "airedThrough", "preparedThrough"):
+            if type(data.get(key)) is not int:
+                raise ValueError(f"corrupt continuing state: {key}")
+        return data
+    if schema == 2:
         if not isinstance(data.get("programs"), list) or not isinstance(data.get("state"), dict):
             raise ValueError("unreadable published schedule")
         return data
@@ -645,7 +846,8 @@ def _scheduler_path(data_dir: str | Path) -> Path:
 
 def _load_scheduler(data_dir: str | Path) -> dict:
     try:
-        return json.loads(_scheduler_path(data_dir).read_text(encoding="utf-8"))
+        data = json.loads(_scheduler_path(data_dir).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
     except (OSError, json.JSONDecodeError):
         return {}
 
@@ -655,9 +857,12 @@ def _write_scheduler(data_dir: str | Path, state: dict) -> None:
 
 
 def _index_due(prior: dict | None, signature: str, epoch: str, now: int, channel: dict) -> bool:
-    if prior is None or prior.get("configuration") != signature:
+    if prior is None or prior.get("sourceSignature") != signature or prior.get("schema") != SCHEMA:
         return True
-    if prior.get("schema") != SCHEMA or not prior.get("index"):
+    # A cached EMPTY index is a successful result: it is reused until the TTL
+    # like any other (an empty source must not monopolize the budget by being
+    # "always due").
+    if not isinstance(prior.get("index"), list):
         return True
     if prior.get("indexEpoch", "") != epoch:
         return True  # dynamic-source membership moved with its cutoff day
@@ -665,11 +870,36 @@ def _index_due(prior: dict | None, signature: str, epoch: str, now: int, channel
     return now - int(prior.get("indexedAt", 0)) >= ttl
 
 
+def _backup_v2(path: Path) -> None:
+    """Keep the pre-migration schema-2 publication (rollback path)."""
+    backup = path.with_name(path.name + ".v2.bak")
+    if not backup.exists():
+        shutil.copy2(path, backup)
+
+
+#: Outcomes that mean real work was completed for a channel this run.
+SUCCESS_OUTCOMES = frozenset({"ready", "recovered_from_outage", "indexed_empty"})
+#: Named operational states that are neither success nor failure (R7).
+DEFERRED_OUTCOMES = frozenset({"deferred_index_budget", "backoff",
+                               "changed_during_build", "deactivated_during_build"})
+
+
+def outcome_class(outcome: str) -> str:
+    if outcome in SUCCESS_OUTCOMES:
+        return "success"
+    if outcome in DEFERRED_OUTCOMES:
+        return "deferred"
+    return "failure"
+
+
 def prepare(client, data_dir, channel_id: str | None = None, now: int | None = None,
             budget: int = INDEX_BUDGET) -> dict:
-    """Advance every activated network's publication. Per-channel failure
-    isolation; one shared source-dedup cache; a persisted fair cursor so a
-    bounded batch cannot always service the same first channels."""
+    """Advance every scheduled network's publication. Per-channel failure
+    isolation (build, ordering AND status reads — R6); one shared
+    source-dedup cache; fair work rotation WITHIN priority classes so a
+    bounded budget cannot always service the same first channels; cached
+    empty indexes; a bounded consecutive-failure backoff; and a full-state
+    commit guard with activation revalidation under the lock (R12)."""
     data_dir = Path(data_dir)
     now = now_ms() if now is None else now
     channels = active_channels(data_dir)
@@ -679,26 +909,59 @@ def prepare(client, data_dir, channel_id: str | None = None, now: int | None = N
     if not channels:
         return {"channels": outcomes}
 
-    # Coverage-first ordering: whatever expires soonest is prepared first.
-    def coverage(ch: dict) -> int:
-        prior = read(data_dir, ch["id"])
-        if prior is None or prior.get("configuration") != signature_of(ch):
-            return -1
-        return int(prior.get("preparedThrough", 0)) - now
+    # Ordering reads are isolated per channel (R6): one malformed publication
+    # makes its own channel urgent; it never aborts the sort or its peers.
+    def coverage_of(ch: dict):
+        try:
+            prior = read(data_dir, ch["id"])
+        except Exception:
+            return None
+        if not isinstance(prior, dict) or prior.get("sourceSignature") != source_signature_of(ch):
+            return None
+        return int(prior.get("preparedThrough", 0))
 
-    ordered = sorted(channels, key=coverage)
-    cursor_pos = int(_load_scheduler(data_dir).get("cursor", 0)) % len(ordered)
-    ordered = ordered[cursor_pos:] + ordered[:cursor_pos]
+    urgent, extending = [], []
+    for ch in channels:
+        cov = coverage_of(ch)
+        if cov is None or cov <= now:
+            urgent.append(ch)  # missing/mismatched/expired/corrupt: build now
+        else:
+            extending.append((cov, ch))
+    extending.sort(key=lambda pair: pair[0])  # nearest expiry first
+    extending = [ch for _, ch in extending]
+
+    scheduler = _load_scheduler(data_dir)
+    cursors = scheduler.get("cursors") if isinstance(scheduler.get("cursors"), dict) else {}
+    failures = scheduler.get("failures") if isinstance(scheduler.get("failures"), dict) else {}
+
+    def rotate(rows: list, cls: int) -> list:
+        if not rows:
+            return rows
+        cur = int(cursors.get(str(cls), 0)) % len(rows)
+        return rows[cur:] + rows[:cur]
+
+    ordered = [(0, ch) for ch in rotate(urgent, 0)] + [(1, ch) for ch in rotate(extending, 1)]
+    serviced = {0: 0, 1: 0}
 
     source_cache: dict = {}
     indexed = 0
-    for channel in ordered:
+    for cls, channel in ordered:
+        cid = channel["id"]
         try:
-            signature = signature_of(channel)
-            prior = read(data_dir, channel["id"])
-            due = _index_due(prior, signature, lineup.effective_epoch(channel["source"]), now, channel)
+            rec = failures.get(cid)
+            if isinstance(rec, dict) and rec.get("count", 0) >= FAILURE_BACKOFF_LIMIT \
+                    and now - int(rec.get("lastAt", 0)) < FAILURE_BACKOFF:
+                outcomes[cid] = "backoff"
+                continue
+            signature = source_signature_of(channel)
+            prior = read(data_dir, cid)
+            if isinstance(prior, dict) and prior.get("schema") == 2:
+                _backup_v2(programming.path(data_dir, cid))
+            due = _index_due(prior, signature,
+                             lineup.effective_epoch(channel["source"], today=_utc_date(now)),
+                             now, channel)
             if due and indexed >= budget:
-                outcomes[channel["id"]] = "index_budget_exhausted"
+                outcomes[cid] = "deferred_index_budget"
                 continue
             if due:
                 entries = index_source(client, channel, source_cache)
@@ -707,25 +970,41 @@ def prepare(client, data_dir, channel_id: str | None = None, now: int | None = N
             else:
                 entries = prior["index"]
                 indexed_at = int(prior.get("indexedAt", now))
-            publication = build(channel, entries, prior if prior and prior.get("schema") == SCHEMA else None, now)
+            publication = build(channel, entries,
+                                prior if isinstance(prior, dict) and prior.get("schema") == SCHEMA else None,
+                                now)
             publication["indexedAt"] = indexed_at
-            # Commit guard: membership or a sibling writer may have moved under
-            # us during indexing; never overwrite a newer generation.
+            outcomes[cid] = "indexed_empty" if not publication["programs"] else (
+                "recovered_from_outage" if publication["degraded"] else "ready")
+            # Commit guard: membership, activation, or a sibling writer may
+            # have moved under us during indexing; never overwrite a newer
+            # generation. The guard token covers the WHOLE durable state
+            # (programs + ledger + cursors), not just the program digest.
+            prior_generation = prior.get("generation") if isinstance(prior, dict) else None
             with catalog_lock_for(data_dir):
-                latest = networks.get(channel["id"])
-                if latest is None or signature_of(latest) != signature:
-                    outcomes[channel["id"]] = "changed_during_build"
+                rollout = try_load_rollout(data_dir)
+                latest = networks.get(cid)
+                if latest is None or scheduled_mode(latest, rollout) != MODE \
+                        or source_signature_of(latest) != signature:
+                    outcomes[cid] = "deactivated_during_build"
                     continue
-                current = read(data_dir, channel["id"])
-                if current is not None and current.get("schema") == SCHEMA \
-                        and (prior is None or current.get("version") != prior.get("version")):
-                    outcomes[channel["id"]] = "changed_during_build"
+                current = read(data_dir, cid)
+                if current is not None and current.get("generation") != prior_generation:
+                    outcomes[cid] = "changed_during_build"
                     continue
-                programming.snapshots.write_json(programming.path(data_dir, channel["id"]), publication)
-            outcomes[channel["id"]] = "ready" if not publication["degraded"] else "recovered_from_outage"
+                programming.snapshots.write_json(programming.path(data_dir, cid), publication)
+            serviced[cls] += 1
+            failures.pop(cid, None)
         except Exception as exc:  # one channel must never block the tier
-            outcomes[channel["id"]] = f"{type(exc).__name__}: {exc}"
-    _write_scheduler(data_dir, {"cursor": cursor_pos + len(outcomes)})
+            outcomes[cid] = f"{type(exc).__name__}: {exc}"
+            record = failures.get(cid)
+            count = record.get("count", 0) + 1 if isinstance(record, dict) else 1
+            failures[cid] = {"count": count, "lastAt": now}
+
+    _write_scheduler(data_dir, {
+        "cursors": {str(cls): int(cursors.get(str(cls), 0)) + serviced[cls] for cls in (0, 1)},
+        "failures": failures,
+    })
     return {"channels": outcomes}
 
 
@@ -742,7 +1021,8 @@ def status_path(data_dir: str | Path) -> Path:
     return Path(data_dir) / "programming" / "status.json"
 
 
-def read_status(data_dir: str | Path) -> dict:
+def read_manifest(data_dir: str | Path) -> dict:
+    """The STORED manifest: durable facts only (no derived freshness)."""
     try:
         data = json.loads(status_path(data_dir).read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else {}
@@ -750,35 +1030,68 @@ def read_status(data_dir: str | Path) -> dict:
         return {}
 
 
-def channel_status(publication: dict | None, now: int, mode: str) -> dict:
+def channel_status(publication: dict | None, mode: str) -> dict:
+    """Durable per-channel facts stored in the manifest. Coverage/expiry are
+    deliberately NOT stored (R7): they are derived at READ time by
+    :func:`status_view`, so they age truthfully without a scheduler write."""
     if not publication:
-        return {"mode": mode, "ready": False}
-    counts = publication.get("airCounts") or publication.get("state", {}).get("airCounts") or {}
-    prepared_through = int(publication.get("preparedThrough", 0))
-    coverage_hours = max(0, round((prepared_through - now) / HOUR, 1))
+        return {"mode": mode, "published": False}
     return {
         "mode": mode,
-        "ready": True,
+        "published": True,
+        "empty": not publication.get("programs"),
         "version": publication.get("version"),
         "generatedAt": publication.get("generatedAt"),
-        "preparedThrough": prepared_through,
-        "coverageHours": coverage_hours,
+        "preparedThrough": int(publication.get("preparedThrough", 0)),
         "sourceTotal": publication.get("sourceTotal"),
-        "scheduledUnique": len(counts),
+        "scheduledUnique": publication.get("scheduledUnique"),
         "degraded": bool(publication.get("degraded")),
         "warnings": publication.get("warnings", []),
-        # Alert threshold: a healthy hourly scheduler never lets ready coverage
-        # drop below 24h; anything below is one missed run from encore.
-        "expiring": coverage_hours < 24,
+        "indexedAt": publication.get("indexedAt"),
     }
 
 
+def status_view(manifest: dict, now: int) -> dict:
+    """Live read-side projection (R7): coverage, expiry and readiness are
+    computed from stored timestamps against the READER'S clock — sync reads
+    stay lightweight (arithmetic on the manifest, never schedule files) and
+    stale manifests report stale truth instead of frozen coverage."""
+    now = int(now)
+    channels: dict[str, dict] = {}
+    for cid, entry in (manifest.get("channels") or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        view = dict(entry)
+        prepared_through = int(entry.get("preparedThrough", 0))
+        coverage = max(0.0, round((prepared_through - now) / HOUR, 1))
+        view["coverageHours"] = coverage
+        view["ready"] = bool(entry.get("published")) and coverage > 0
+        # Alert threshold: a healthy hourly scheduler never lets ready coverage
+        # drop below 24h; anything below is one missed run from encore.
+        view["expiring"] = view["ready"] and coverage < 24
+        view["encore"] = bool(entry.get("degraded"))
+        channels[cid] = view
+    return {
+        "schema": manifest.get("schema"),
+        "generatedAt": manifest.get("generatedAt"),
+        "lastRun": manifest.get("lastRun"),
+        "now": now,
+        "channels": channels,
+    }
+
+
+def read_status(data_dir: str | Path, now: int | None = None) -> dict:
+    """The live status view (read-only): last run + per-channel publication
+    status with freshness derived at read time."""
+    return status_view(read_manifest(data_dir), now_ms() if now is None else now)
+
+
 def write_status(data_dir: str | Path, run: dict, now: int | None = None) -> dict:
-    """Atomically publish the lightweight status manifest: per-channel schedule
-    status (custom + network) plus the last run's outcomes, so Directory and
-    ops tooling never parse large schedule files. Entries for channels that
-    are no longer active (deactivated rollout, fixed-mode edit) are dropped —
-    stale "continuing" rows would lie about what is airing."""
+    """Atomically publish the lightweight status manifest: per-channel durable
+    facts (custom + network) plus the last run's correlated outcomes, so
+    Directory and ops tooling never parse large schedule files. Entries for
+    channels that are no longer scheduled (deactivated rollout, fixed-mode
+    edit) are dropped — stale "continuing" rows would lie about what airs."""
     data_dir = Path(data_dir)
     now = now_ms() if now is None else now
     channels: dict[str, dict] = {}
@@ -787,15 +1100,25 @@ def write_status(data_dir: str | Path, run: dict, now: int | None = None) -> dic
             mode = programming.policy(channel.get("programming"))["mode"]
             if mode == "fixed":
                 continue
-            prior = programming.read(data_dir, channel["id"])
-            channels[channel["id"]] = channel_status(prior, now, mode)
+            try:
+                prior = programming.read(data_dir, channel["id"])
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                channels[channel["id"]] = {"mode": mode, "published": False, "error": str(exc)[:200]}
+                continue
+            channels[channel["id"]] = channel_status(prior, mode)
     except catalog.CatalogError:
         pass  # a corrupt catalog must not take the status manifest down
-    for channel in active_channels_safe(data_dir):
-        prior = read(data_dir, channel["id"])
-        channels[channel["id"]] = channel_status(prior, now, MODE)
+    for channel in scheduled_channels_safe(data_dir):
+        cid = channel["id"]
+        try:
+            prior = read(data_dir, cid)
+            channels[cid] = channel_status(prior, MODE)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            # Per-channel isolation (R6): a corrupt publication degrades its
+            # own row; the manifest (and every peer) still publishes.
+            channels[cid] = {"mode": MODE, "published": False, "error": str(exc)[:200]}
     manifest = {
-        "schema": 1,
+        "schema": 2,
         "generatedAt": now,
         "lastRun": run,
         "channels": channels,
@@ -804,11 +1127,15 @@ def write_status(data_dir: str | Path, run: dict, now: int | None = None) -> dic
     return manifest
 
 
-def active_channels_safe(data_dir: str | Path) -> list[dict]:
+def scheduled_channels_safe(data_dir: str | Path) -> list[dict]:
     try:
-        return active_channels(data_dir)
+        return scheduled_channels(data_dir)
     except (ValueError, networks.NetworksError):
         return []
+
+
+#: Read-path alias: sync surfaces must never fail over a broken rollout.
+active_channels_safe = scheduled_channels_safe
 
 
 def desk(data_dir: str | Path, offset: int = 0, limit: int = 50) -> dict:
@@ -823,7 +1150,8 @@ def desk(data_dir: str | Path, offset: int = 0, limit: int = 50) -> dict:
     ]
     total = len(rows)
     return {
-        "rollout": {"enabled": rollout["enabled"], "active": total},
+        "rollout": {"enabled": rollout["enabled"], "stage": rollout.get("stage", "active"),
+                    "active": total},
         "total": total,
         "offset": offset,
         "channels": rows[offset:offset + max(1, min(200, limit))],
