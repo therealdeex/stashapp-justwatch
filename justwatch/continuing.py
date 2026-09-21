@@ -397,7 +397,11 @@ def _pick_next(working: dict, index: dict, aired: dict, cursor: int, tz, cfg: di
                         set(entry["performerIds"]) & set(r.get("performerIds", [])):
                     spacing = 1
                     break
-        return (over_cooldown, tod, spacing, counts.get(sid, 0), position)
+        # Least-recently-aired tie-breaking (never-aired first: 0 sorts before
+        # any real timestamp) — without it, a pass-boundary rebuild could
+        # re-pick the scene that just aired at the pass's end.
+        recency = last.get(sid, 0)
+        return (over_cooldown, tod, spacing, counts.get(sid, 0), recency, position)
 
     best_position, best = min(enumerate(window), key=key)
     relaxed = key((best_position, best))[:3] != (0, 0, 0)
@@ -453,6 +457,11 @@ def build(channel: dict, entries: list[dict], previous: dict | None, now: int, t
         old_ids = set(old.get("indexIds", []))
         removed = old_ids - set(index)
         added = set(index) - old_ids
+        # Ids that left the source vanish from every state structure NOW —
+        # even when no future airing references them (no replan trigger): a
+        # deck entry for a deleted scene would crash or re-air it.
+        if removed:
+            state = prune_state(state, index)
         # Replan triggers, computed BEFORE folding so a cut inside the newly
         # committed region never folds airings that are about to be canceled.
         replan_from = None
@@ -463,21 +472,27 @@ def build(channel: dict, entries: list[dict], previous: dict | None, now: int, t
                 replan_from = affected
         if replan_from is None and old.get("indexFingerprint") not in ("", None) \
                 and old.get("indexFingerprint") != fingerprint and old_programs:
-            # Duration edits: rebuild the flexible future at the committed
-            # boundary (kept airings keep their published lengths).
-            replan_from = committed
+            # A changed fingerprint alone is NOT a replan: additions are the
+            # arrival machinery's job. Only common ids whose DURATION moved
+            # invalidate published flexible lengths.
+            prior_index = {e["id"]: e for e in (old.get("index") or [])}
+            if any(i in prior_index and prior_index[i].get("duration") != index[i]["duration"]
+                   for i in index):
+                replan_from = committed
         if replan_from is not None:
             # Release the canceled future's reservations: fold (and aired-record)
             # only up to the cut, give back the cut airings' exposure counts, and
-            # prune the removed ids from every state structure. Cut scenes stay
-            # out of this pass's deck (their fold may already be durable); the
-            # next pass refill resurfaces them, so nothing is ever lost.
+            # prune the removed ids from every state structure. Give-back covers
+            # only the durably folded committed region — flexible airings were
+            # never counted, so "giving them back" would drain real history.
+            # Cut scenes stay out of this pass's deck (their fold may already be
+            # durable); the next pass refill resurfaces them, so nothing is lost.
             keep_upto = min(committed, replan_from)
             for airing in old_programs[:keep_upto]:
                 if prev_through < airing["startEpochMs"] < cutoff:
                     fold_airing(state, airing, channel, index)
                     record_aired(aired, airing, now)
-            for airing in old_programs[keep_upto:]:
+            for airing in old_programs[keep_upto:committed]:
                 sid = airing["item"]["id"]
                 if state["airCounts"].get(sid, 0) > 0:
                     state["airCounts"][sid] -= 1

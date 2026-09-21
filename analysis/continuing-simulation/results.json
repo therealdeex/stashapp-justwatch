@@ -1,0 +1,236 @@
+{
+  "continuing": {
+    "Small Mix": {
+      "eligibleAtEnd": 58,
+      "uniqueAired": 58,
+      "coveragePercent": 100.0,
+      "eveningRepetition": 0.256,
+      "sameWindowRecurrence": 0.621,
+      "repeatGaps": {
+        "medianHours": 355.4,
+        "minHours": 0.4,
+        "p90Hours": 492316.8
+      },
+      "horizonMinHours": 168.0,
+      "publicationKB": 192.3
+    },
+    "Large Mix": {
+      "eligibleAtEnd": 700,
+      "uniqueAired": 700,
+      "coveragePercent": 100.0,
+      "eveningRepetition": 0.0,
+      "sameWindowRecurrence": 0.138,
+      "repeatGaps": {
+        "medianHours": 341.6,
+        "minHours": 0.9,
+        "p90Hours": 492405.9
+      },
+      "horizonMinHours": 168.0,
+      "publicationKB": 364.4
+    },
+    "Huge Mix": {
+      "eligibleAtEnd": 5000,
+      "uniqueAired": 2121,
+      "coveragePercent": 42.4,
+      "eveningRepetition": 0.0,
+      "sameWindowRecurrence": 0.0,
+      "repeatGaps": null,
+      "horizonMinHours": 168.0,
+      "publicationKB": 1386.8
+    },
+    "Overlap A": {
+      "eligibleAtEnd": 481,
+      "uniqueAired": 481,
+      "coveragePercent": 100.0,
+      "eveningRepetition": 0.0,
+      "sameWindowRecurrence": 0.0,
+      "repeatGaps": {
+        "medianHours": 340.1,
+        "minHours": 168.3,
+        "p90Hours": 492313.0
+      },
+      "horizonMinHours": 168.0,
+      "publicationKB": 324.2
+    },
+    "Overlap B": {
+      "eligibleAtEnd": 500,
+      "uniqueAired": 500,
+      "coveragePercent": 100.0,
+      "eveningRepetition": 0.0,
+      "sameWindowRecurrence": 0.0,
+      "repeatGaps": {
+        "medianHours": 366.7,
+        "minHours": 163.5,
+        "p90Hours": 492287.7
+      },
+      "horizonMinHours": 168.0,
+      "publicationKB": 329.5
+    },
+    "Short Clips": {
+      "eligibleAtEnd": 199,
+      "uniqueAired": 199,
+      "coveragePercent": 100.0,
+      "eveningRepetition": 0.255,
+      "sameWindowRecurrence": 0.87,
+      "repeatGaps": {
+        "medianHours": 365.6,
+        "minHours": 10.0,
+        "p90Hours": 492271.8
+      },
+      "horizonMinHours": 168.0,
+      "publicationKB": 1470.8
+    },
+    "Long Form": {
+      "eligibleAtEnd": 60,
+      "uniqueAired": 60,
+      "coveragePercent": 100.0,
+      "eveningRepetition": 0.0,
+      "sameWindowRecurrence": 0.0,
+      "repeatGaps": {
+        "medianHours": 360.0,
+        "minHours": 88.5,
+        "p90Hours": 492285.0
+      },
+      "horizonMinHours": 168.0,
+      "publicationKB": 65.5
+    },
+    "Recent Window": {
+      "eligibleAtEnd": 180,
+      "uniqueAired": 179,
+      "coveragePercent": 99.4,
+      "eveningRepetition": 0.471,
+      "sameWindowRecurrence": 0.448,
+      "repeatGaps": {
+        "medianHours": 239.2,
+        "minHours": 2.2,
+        "p90Hours": 492410.6
+      },
+      "horizonMinHours": 168.0,
+      "publicationKB": 175.8
+    }
+  },
+  "fixedBaseline": {
+    "Small Mix": {
+      "uniqueAired": 50,
+      "coveragePercent": 86.2,
+      "eveningRepetition": 0.273,
+      "sameWindowRecurrence": 0.711,
+      "repeatGaps": {
+        "medianHours": 367.8,
+        "minHours": 20.2,
+        "p90Hours": 492273.2
+      }
+    },
+    "Large Mix": {
+      "uniqueAired": 50,
+      "coveragePercent": 7.1,
+      "eveningRepetition": 0.734,
+      "sameWindowRecurrence": 0.767,
+      "repeatGaps": {
+        "medianHours": 370.0,
+        "minHours": 24.6,
+        "p90Hours": 492276.3
+      }
+    },
+    "Huge Mix": {
+      "uniqueAired": 50,
+      "coveragePercent": 1.0,
+      "eveningRepetition": 0.0,
+      "sameWindowRecurrence": 0.773,
+      "repeatGaps": {
+        "medianHours": 366.7,
+        "minHours": 16.7,
+        "p90Hours": 492272.3
+      }
+    },
+    "Overlap A": {
+      "uniqueAired": 50,
+      "coveragePercent": 10.4,
+      "eveningRepetition": 0.041,
+      "sameWindowRecurrence": 0.556,
+      "repeatGaps": {
+        "medianHours": 366.7,
+        "minHours": 18.2,
+        "p90Hours": 492272.1
+      }
+    },
+    "Overlap B": {
+      "uniqueAired": 50,
+      "coveragePercent": 10.0,
+      "eveningRepetition": 0.041,
+      "sameWindowRecurrence": 0.556,
+      "repeatGaps": {
+        "medianHours": 366.7,
+        "minHours": 18.2,
+        "p90Hours": 492272.1
+      }
+    },
+    "Short Clips": {
+      "uniqueAired": 50,
+      "coveragePercent": 25.1,
+      "eveningRepetition": 0.985,
+      "sameWindowRecurrence": 0.976,
+      "repeatGaps": {
+        "medianHours": 360.0,
+        "minHours": 2.5,
+        "p90Hours": 492264.2
+      }
+    },
+    "Long Form": {
+      "uniqueAired": 50,
+      "coveragePercent": 83.3,
+      "eveningRepetition": 0.0,
+      "sameWindowRecurrence": 0.0,
+      "repeatGaps": {
+        "medianHours": 375.0,
+        "minHours": 75.0,
+        "p90Hours": 492286.5
+      }
+    },
+    "Recent Window": {
+      "uniqueAired": 50,
+      "coveragePercent": 27.8,
+      "eveningRepetition": 0.443,
+      "sameWindowRecurrence": 0.231,
+      "repeatGaps": {
+        "medianHours": 368.3,
+        "minHours": 21.5,
+        "p90Hours": 492274.0
+      }
+    }
+  },
+  "gates": {
+    "unexpectedProtectedAiringChanges": 0,
+    "membershipRemovalDrivenChanges": 445,
+    "ineligibleFutureAirings": 0,
+    "largeFixtureUniqueScheduled": 700,
+    "largeFixtureBeyond50": true,
+    "feasibleArrivalsWithin72h": true,
+    "duplicateConsumptionWithinPass": 0,
+    "encoreWindowsDuringOutage": 60,
+    "horizonNeverBelow24hHealthy": true
+  },
+  "resources": {
+    "prepareCalls": 5288,
+    "avgPrepareSeconds": 0.0256,
+    "p95PrepareSeconds": 0.0781,
+    "maxPrepareSeconds": 0.427,
+    "graphqlQueries": 2119,
+    "peakMemoryMBAtDay20": 22.3,
+    "largestPublicationKB": 1470.8
+  },
+  "arrivals": {
+    "smallTrickle": {
+      "count": 28,
+      "medianFirstAirHours": 28.3,
+      "maxFirstAirHours": 72.2,
+      "feasibleMaxFirstAirHours": 32.2,
+      "outageAffectedCount": 3
+    },
+    "largeBulkImport200": {
+      "count": 138,
+      "medianFirstAirHours": 254.6,
+      "oldestPendingAtEndHours": 475.0
+    }
+  }
+}

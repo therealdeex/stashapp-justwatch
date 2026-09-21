@@ -514,3 +514,70 @@ def test_dynamic_epoch_expires_index_cache(tmp_path, monkeypatch):
                     dt.timedelta(days=1, hours=2)).timestamp() * 1000)
     c.prepare(client, tmp_path, now=next_day)
     assert len(client.calls) > first_calls
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for defects the 30-day simulation exposed
+# ---------------------------------------------------------------------------
+
+
+def test_additions_never_drain_cumulative_exposure_counts():
+    """A fingerprint change caused by ADDITIONS must not run the removal
+    give-back: flexible airings were never durably counted, so "giving them
+    back" drained real history (counts oscillated to zero at every reindex)."""
+    ch = network()
+    lib = entries(30, duration=25 * 60)
+    prev = c.build(ch, lib, None, now=0)
+    total = 0
+    for hour in range(1, 24 * 10):
+        if hour % 24 == 12:
+            lib = lib + [dict(entries(1, start=1000 + hour)[0], id=f"new{hour}")]
+        prev = c.build(ch, lib, prev, now=hour * c.HOUR)
+        counts = sum(prev["state"]["airCounts"].values())
+        assert counts >= total, f"cumulative counts regressed at hour {hour}"
+        total = counts
+    assert total > 24 * 10, "hourly cycling must accumulate durable history"
+
+
+def test_deleted_scene_leaves_the_deck_even_without_a_future_airing():
+    """A scene whose airings are all in the past when it is deleted triggers
+    no replan — but its deck entry must still vanish, or the next pick
+    crashes/re-airs a deleted scene."""
+    ch = network()
+    # A pass far longer than the horizon (1000 x 25min = 417h) leaves deck
+    # scenes beyond every build's scheduling window — no future airing, the
+    # exact no-replan case the simulation crash exposed.
+    lib = entries(1000, duration=25 * 60)
+    prev = c.build(ch, lib, None, now=0)
+    for hour in range(1, 24 * 5):
+        prev = c.build(ch, lib, prev, now=hour * c.HOUR)
+    future_ids = {a["item"]["id"] for a in prev["programs"] if a["endEpochMs"] > 24 * 5 * c.HOUR}
+    # Still queued this pass AND not scheduled in the future — the exact
+    # state whose deck entry would crash the next pick after deletion.
+    victim = next(i for i in prev["state"]["deck"] if i not in future_ids)
+    assert victim in prev["state"]["deck"]
+    lib_after = [e for e in lib if e["id"] != victim]
+    nxt = c.build(ch, lib_after, prev, now=24 * 5 * c.HOUR)  # must not raise
+    assert victim not in nxt["state"]["deck"]
+    assert victim not in {a["item"]["id"] for a in nxt["programs"]
+                          if a["endEpochMs"] > 24 * 5 * c.HOUR}
+
+
+def test_pass_boundary_does_not_immediately_repeat_the_just_aired_scene():
+    """LRU tie-breaking: a pass-boundary rebuild must not re-pick the scene
+    that just aired at the previous pass's end."""
+    ch = network()
+    lib = entries(30, duration=25 * 60)
+    prev = c.build(ch, lib, None, now=0)
+    timeline = {}
+    for hour in range(1, 24 * 12):
+        prev = c.build(ch, lib, prev, now=hour * c.HOUR)
+        for a in prev["programs"]:
+            timeline[a["airingId"]] = (a["startEpochMs"], a["item"]["id"])
+    starts = sorted(timeline.values())
+    by_scene = {}
+    for start, sid in starts:
+        by_scene.setdefault(sid, []).append(start)
+    worst = min((b - a for starts_ in by_scene.values()
+                 for a, b in zip(starts_, starts_[1:])), default=c.HOUR)
+    assert worst > 6 * c.HOUR, f"scene repeated after only {worst / c.HOUR}h"
