@@ -180,24 +180,49 @@ was NOT touched.**
   /opt/stash-dev/stash-justwatch-data --restore-v2-backups --dry-run` →
   3 backups found, nothing modified.
 
-## Remaining device checks (dev stick .105 / USB G072JN0734330EBH)
+## Device verification (dev stick .105 / USB G072JN0734330EBH) — partially performed
 
-A headed device session was not available in this pass, so these flows
-remain UNVERIFIED on hardware and are the first to exercise on the dev stick:
+The authorized dev stick was docked and reachable over USB; the debug APK
+(`0.9.1-124-g992119f7-106-armeabi-v7a`, same debug keystore) installed with
+`adb install -r` (Success) and the session ran against dev Stash :9998
+(the stick's configured server, confirmed in its prefs).
 
-1. Tune/skip/guide on an activated continuing network with the new APK +
-   schema-3 publication (incl. the 50-airing page boundary and the guide's
-   24 h window).
-2. Failed-airing recovery on device: a deleted scene under the player must
-   hop to the next valid airing; after a skip-ahead, a failure must advance
-   beyond the failed slot (ViewModel tests cover the logic; hardware must
-   confirm the player-generation wiring end to end).
-3. Activation/rollback: flip the rollout stage to `prepare`, confirm TVs
-   still advertise fixed; flip to `active` at a whole-airing boundary;
-   confirm guide/landing now/next agree; then `--deactivate` and confirm
-   return to fixed playback.
-4. Schedule expiry: stop the hourly timer for >48 h, observe encore labeling
-   and post-outage continuity across the expiry boundary on hardware.
+Verified on hardware:
+
+1. Install, launch, and the Just Watch entry render with plugin data: the
+   landing page resolves custom channels' now/next from publications
+   ("CH 3 · Discovery Lab — NOW PLAYING … 41 min left", "CH 4 · Studio
+   Showcase").
+2. The TV guide renders the plugin's network tier (My Channels / General /
+   Studios / Performers bands) and channel 229's row shows its PUBLISHED
+   continuing schedule as five program cells with whole-airing boundaries
+   (3:12–3:47, 3:47–4:22, 4:22–4:58, 4:58–5:33, 5:33–6:08) — the schema-3
+   publication is served and displayed.
+3. The player pipeline works on hardware: Watch Now on a channel with a
+   published schedule starts playback (active HEVC hardware decode observed
+   in MediaCodec logs over time) and the OSD shows the publication's
+   "Up next" airing; the OSD menu (Options / TV guide / Your dial /
+   Previous channel / Back to live / channel-number pad) is functional.
+4. Honest off-air: tuning networks whose sources match nothing in the dev
+   library lands on the bounded "Channel off the air" fallback with
+   recoverable actions — no crash, no invented content (the tier airs empty
+   against a foreign library, as documented).
+5. No runtime crashes in logcat across the whole session.
+
+Remaining device checks (need a guided session — blind adb focus control in
+the live guide proved unreliable for these):
+
+1. Tune DIRECTLY into a continuing network's playback in the player (guide
+   focus lands on 229's row and renders its schedule; the player path itself
+   is proven via CH 3's published schedule — the pipeline is channel-kind
+   agnostic — but an explicit net_-channel playback was not captured).
+2. Skip-to-next-program and failed-airing recovery with an actually deleted
+   scene under the player (requires deliberately removing dev library
+   content — not done without separate approval).
+3. Activation staging observed by a TV: `stage: prepare` (TVs stay fixed) →
+   `active` at a whole-airing boundary → `--deactivate` (return to fixed).
+4. Schedule-expiry encore labeling across a real >48 h scheduler outage on
+   hardware.
 
 ## Production actions NOT performed
 
