@@ -11,7 +11,7 @@
         "minHours": 6.0,
         "p90Hours": 30.2
       },
-      "duplicateConsumptionEvents": 2,
+      "duplicateConsumptionEvents": 0,
       "horizonMinHours": 168.0,
       "publicationKB": 236.4
     },
@@ -82,7 +82,7 @@
         "minHours": 6.0,
         "p90Hours": 12.1
       },
-      "duplicateConsumptionEvents": 7,
+      "duplicateConsumptionEvents": 0,
       "horizonMinHours": 168.0,
       "publicationKB": 1588.9
     },
@@ -112,7 +112,7 @@
         "minHours": 6.1,
         "p90Hours": 74.5
       },
-      "duplicateConsumptionEvents": 1,
+      "duplicateConsumptionEvents": 0,
       "horizonMinHours": 168.0,
       "publicationKB": 239.3
     }
@@ -219,7 +219,7 @@
     "unexpectedProtectedAiringChanges": 0,
     "removalDrivenProtectedChanges": 311,
     "ineligibleFutureAirings": 0,
-    "duplicateConsumptionEvents": 10,
+    "duplicateConsumptionEvents": 0,
     "largeFixtureUniqueScheduled": 678,
     "largeFixtureBeyond50": true,
     "feasibleArrivalsWithin72h": true,
@@ -230,9 +230,9 @@
   },
   "resources": {
     "prepareCalls": 481,
-    "avgBatchPrepareSeconds": 0.2992,
-    "p95BatchPrepareSeconds": 0.3752,
-    "maxBatchPrepareSeconds": 1.7471,
+    "avgBatchPrepareSeconds": 0.2998,
+    "p95BatchPrepareSeconds": 0.374,
+    "maxBatchPrepareSeconds": 1.7048,
     "graphqlQueries": 1592,
     "peakMemoryMBSampled": 21.3,
     "largestPublicationKB": 1588.9
@@ -262,62 +262,5 @@
       "firstAired": 8
     }
   },
-  "duplicateEvents": {
-    "net_00000001": [
-      {
-        "sid": "1028",
-        "atHoursFromStart": 484.3,
-        "gapHours": 246.05
-      },
-      {
-        "sid": "1017",
-        "atHoursFromStart": 479.9,
-        "gapHours": 246.55
-      }
-    ],
-    "net_00000006": [
-      {
-        "sid": "7260",
-        "atHoursFromStart": 480.6,
-        "gapHours": 243.7
-      },
-      {
-        "sid": "7189",
-        "atHoursFromStart": 480.0,
-        "gapHours": 241.7
-      },
-      {
-        "sid": "7199",
-        "atHoursFromStart": 481.8,
-        "gapHours": 243.45
-      },
-      {
-        "sid": "7321",
-        "atHoursFromStart": 480.5,
-        "gapHours": 243.05
-      },
-      {
-        "sid": "7203",
-        "atHoursFromStart": 480.1,
-        "gapHours": 243.25
-      },
-      {
-        "sid": "7192",
-        "atHoursFromStart": 482.4,
-        "gapHours": 244.2
-      },
-      {
-        "sid": "7151",
-        "atHoursFromStart": 481.7,
-        "gapHours": 243.15
-      }
-    ],
-    "net_00000008": [
-      {
-        "sid": "7768",
-        "atHoursFromStart": 479.7,
-        "gapHours": 246.57
-      }
-    ]
-  }
+  "duplicateEvents": {}
 }

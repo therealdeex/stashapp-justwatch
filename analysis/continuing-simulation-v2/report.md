@@ -72,7 +72,7 @@ Stash's random_<seed> sort, not a validated exact reproduction.
   "unexpectedProtectedAiringChanges": 0,
   "removalDrivenProtectedChanges": 311,
   "ineligibleFutureAirings": 0,
-  "duplicateConsumptionEvents": 10,
+  "duplicateConsumptionEvents": 0,
   "largeFixtureUniqueScheduled": 678,
   "largeFixtureBeyond50": true,
   "feasibleArrivalsWithin72h": true,
@@ -88,9 +88,9 @@ Stash's random_<seed> sort, not a validated exact reproduction.
 ```json
 {
   "prepareCalls": 481,
-  "avgBatchPrepareSeconds": 0.2992,
-  "p95BatchPrepareSeconds": 0.3752,
-  "maxBatchPrepareSeconds": 1.7471,
+  "avgBatchPrepareSeconds": 0.2998,
+  "p95BatchPrepareSeconds": 0.374,
+  "maxBatchPrepareSeconds": 1.7048,
   "graphqlQueries": 1592,
   "peakMemoryMBSampled": 21.3,
   "largestPublicationKB": 1588.9
