@@ -60,9 +60,9 @@ def main():
     else:
         raise SystemExit("task still running after --timeout; check ProgrammingStatus later")
 
-    status = query(args.url, api_key, 'query { runPluginOperation(plugin_id: "stash-justwatch", '
-                    'args_map: {mode: "ProgrammingStatus"}) { output } }')
-    output = (status.get("runPluginOperation") or {}).get("output") or {}
+    status = query(args.url, api_key, 'mutation { runPluginOperation(plugin_id: "stash-justwatch", '
+                    'args: {mode: "ProgrammingStatus"}) }')
+    output = status.get("runPluginOperation") or {}
     last_run = output.get("lastRun") or {}
     print(json.dumps({
         "statusGeneratedAt": output.get("generatedAt"),

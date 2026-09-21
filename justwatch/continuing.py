@@ -399,7 +399,11 @@ def _pick_next(working: dict, index: dict, aired: dict, cursor: int, tz, cfg: di
                     break
         # Least-recently-aired tie-breaking (never-aired first: 0 sorts before
         # any real timestamp) — without it, a pass-boundary rebuild could
-        # re-pick the scene that just aired at the pass's end.
+        # re-pick the scene that just aired at the pass's end. On single-digit
+        # decks where every candidate ties above this key, consecutive passes
+        # can repeat one another's order; that is inherent to a tiny library
+        # (the deck shuffle itself still varies per pass) and recorded as a
+        # limitation rather than "fixed" by blocking picks.
         recency = last.get(sid, 0)
         return (over_cooldown, tod, spacing, counts.get(sid, 0), recency, position)
 
@@ -772,15 +776,16 @@ def channel_status(publication: dict | None, now: int, mode: str) -> dict:
 def write_status(data_dir: str | Path, run: dict, now: int | None = None) -> dict:
     """Atomically publish the lightweight status manifest: per-channel schedule
     status (custom + network) plus the last run's outcomes, so Directory and
-    ops tooling never parse large schedule files."""
+    ops tooling never parse large schedule files. Entries for channels that
+    are no longer active (deactivated rollout, fixed-mode edit) are dropped —
+    stale "continuing" rows would lie about what is airing."""
     data_dir = Path(data_dir)
     now = now_ms() if now is None else now
-    channels: dict[str, dict] = dict(read_status(data_dir).get("channels") or {})
+    channels: dict[str, dict] = {}
     try:
         for channel in catalog.load(data_dir).get("channels", []):
             mode = programming.policy(channel.get("programming"))["mode"]
             if mode == "fixed":
-                channels.pop(channel["id"], None)
                 continue
             prior = programming.read(data_dir, channel["id"])
             channels[channel["id"]] = channel_status(prior, now, mode)

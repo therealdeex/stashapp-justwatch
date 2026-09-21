@@ -1,6 +1,6 @@
 # stash-justwatch — project knowledge
 
-**Status:** v0.6.0, contract version 1. Companion plugin for the TV app's
+**Status:** v0.7.0, contract version 1. Companion plugin for the TV app's
 Just Watch feature (repo `~/dev/StashAppAndroidTV`).
 
 ## Architecture
@@ -66,6 +66,18 @@ beyond stdlib (+ optional PyYAML for the API-key fallback). Data flow:
   and `desk` are read-only and never mutate a publication.
 - `justwatch/stash_client.py` — urllib GraphQL client; SessionCookie (Go
   `http.Cookie`: `Name`/`Value` fields) + ApiKey/config.yml fallback.
+- `justwatch/continuing.py` — the CONTINUING engine for network channels
+  (v0.7.0, rollout-gated): full-eligible-library broadcasts with durable
+  consumption state, a rolling 7-day publication, 24-h whole-airing
+  protection, ~15% new-arrival slots (24–72 h first-air target), soft
+  cooldown/time-of-day/spacing preferences, deterministic encore recovery,
+  staggered/deduplicated indexing, and the lightweight `status.json` manifest
+  Directory/Desk/ops read. Activation is ONLY the operator rollout file
+  `<data>/continuing-networks.json` (default absent = everything fixed); an
+  authored CSV `programming_mode=fixed` pins a network off regardless of
+  rollout. See docs/CONTINUING-PROGRAMMING-PLAN.md and
+  docs/PILOT-MANIFEST.md; `tools/simulate_continuing.py` is the repeatable
+  30-day comparison against fixed-50.
 
 ## Invariants (do not break)
 
@@ -75,12 +87,20 @@ beyond stdlib (+ optional PyYAML for the API-key fallback). Data flow:
   channels.
 - **The network tier is the compiled CSV, verbatim.** Networks are read-only:
   they never enter catalog.json, are never editable via SaveCatalog, never
-  get health snapshots (the CSV-validated `count` IS the health), and stay
-  fixed-mode. `networks.json` is a build artifact — change the CSV and
-  re-import; ids/seeds hash the row identity, so a re-import never reshuffles
-  rotations. Network source ids are DATABASE ids of the Stash the CSV was
-  validated against; against any other library the tier airs empty. Absent
-  file = absent `networks` block = clients keep their legacy generation.
+  get health snapshots (the CSV-validated `count` IS the health), and are
+  FIXED-MODE by default. The one sanctioned exception (v0.7.0, plan
+  docs/CONTINUING-PROGRAMMING-PLAN.md): a network activated through the
+  rollout file runs a CONTINUING schedule — still CSV-authored membership
+  (identities, seeds, source/exclusion semantics unchanged), still outside
+  catalog.json, still no health snapshots (scheduling status is the separate
+  `status.json` surface, never health). `networks.json` is a build artifact —
+  change the CSV and re-import; ids/seeds hash the row identity, so a
+  re-import never reshuffles rotations. Network source ids are DATABASE ids
+  of the Stash the CSV was validated against; against any other library the
+  tier airs empty. Absent file = absent `networks` block = clients keep their
+  legacy generation. Deploying new plugin code alone NEVER activates
+  continuing mode; removing/disabling the rollout file is the rollback, and
+  old clients keep the unchanged fixed Lineup contract either way.
 - **Nowhere-tags (v0.5.0):** every network row EXCEPT the four all-JAV
   studios (407 Madonna Selects, 461 Nagae Style Showcase, 480 Hunter Vault,
   835 Madonna: Wrong Side of the Bed Nights — the sanctioned exception, noted
@@ -152,6 +172,10 @@ Networks" (legacy legend otherwise).
   `reloadPlugins` mutation). Dev Stash listens on **:9998** (all interfaces) —
   LAN `192.168.8.123:9998`, tailscale `100.99.132.40:9998`; the API key file is
   `/opt/stash-dev/API_KEY`. Use port 9998 consistently for this server.
+- Continuing-networks rollout on dev: `/opt/stash-dev/stash-justwatch-data/continuing-networks.json`
+  (left active 2026-09-21 with net_8091d3ea/net_461ab3e3 — the two networks
+  whose filters match the 10-scene dev library — plus net_04685144 as an
+  honest zero-coverage example). Delete the file to return dev to all-fixed.
 - Programming scheduler: systemd user units `stash-justwatch-programming.{service,timer}`
   (hourly), env at `~/.config/stash-justwatch/scheduler.env` (`STASH_URL`,
   `STASH_API_KEY_FILE`). Install steps are in README.
@@ -193,7 +217,8 @@ Networks" (legacy legend otherwise).
 | PreviewLineup | `PreviewLineup` | yes | editor: draft channel rotation + preview paths |
 | GetCatalog | `GetCatalog` | yes | editor: full catalog + health |
 | ValidateCatalog | `ValidateCatalog` | yes | validate + resolve, no write |
-| Schedule | `Schedule` | yes | TV: the channel's published airings at a wall-clock time |
+| Schedule | `Schedule` | yes | TV: the channel's published airings at a wall-clock time (custom AND activated network ids) |
+| ProgrammingStatus | `ProgrammingStatus` | yes | ops: durable last-run + per-channel schedule status (a queued task id is NOT success) |
 | PreviewProgramming | `PreviewProgramming` | yes | editor: dry-run a draft programming policy |
 | ProgrammingDesk | `ProgrammingDesk` | yes | editor: publication status + overlap stats |
 | SaveCatalog | `SaveCatalog` | task | lock → validate → write → snapshot → per-request result |

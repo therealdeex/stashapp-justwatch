@@ -54,14 +54,49 @@ same rotation), newest, oldest, top rated, longest, shortest.
 
 ## Published programming
 
-Instead of airing a raw rotation, a channel can publish a concrete 72-hour
-schedule: **fixed** (the plain rotation), **explore**, or **discovery**
-ordering, optional spacing between repeat performers/studios, a repeat
-cooldown, and a weekly studio or performer spotlight block. The **Prepare
-Programming** task builds each channel's publication (it pages the source
-index in bounded chunks and rebuilds only changed channels); the TV app's
-`Schedule` op serves the airings at wall-clock times, and the Channel Studio
-previews draft policies without publishing.
+Instead of airing a raw rotation, a channel can publish a concrete schedule:
+**fixed** (the plain rotation), **explore**, or **discovery** ordering,
+optional spacing between repeat performers/studios, a repeat cooldown, and a
+weekly studio or performer spotlight block. The **Prepare Programming** task
+builds each channel's publication (it pages the source index in bounded
+chunks and rebuilds only changed channels); the TV app's `Schedule` op
+serves the airings at wall-clock times, and the Channel Studio previews draft
+policies without publishing. Custom channels publish a 72-hour horizon
+(schema 1); every preparation also writes a lightweight
+`programming/status.json` manifest (last run + per-channel coverage) that
+`Directory`, `ProgrammingDesk`, and the `ProgrammingStatus` op read instead
+of the schedule files.
+
+## Continuing network programming (v0.7.0, rollout-gated)
+
+Activated networks replace the fixed 50-item rotation with a **continuing**
+broadcast over their whole eligible library: a per-channel shuffled deck
+consumed once per pass (ordering varies between passes), a rolling **7-day**
+publication replenished hourly, whole airings protected through **now+24h**,
+~15% of flexible slots prioritizing genuine new library additions (first
+airing targeted within 24–72h; bulk imports drain gradually and say so), soft
+48h repeat cooldown / local time-of-day window / performer-studio spacing
+preferences that relax instead of blocking, and a deterministic encore during
+scheduler outages, reported as degraded operation.
+
+Activation is an operator file in the plugin DATA directory — never
+networks.json and never automatic:
+
+```json
+// <stash Dir>/stash-justwatch-data/continuing-networks.json
+{ "enabled": true, "networkIds": ["net_XXXXXXXX", "..."] }
+```
+
+An authored `programming_mode=fixed` in the CSV pins a network off regardless
+of rollout. Rollback = set `enabled: false` or delete the file. The pilot
+manifest, activation checklist, and rollback detail live in
+`docs/PILOT-MANIFEST.md`; the design/acceptance contract is
+`docs/CONTINUING-PROGRAMMING-PLAN.md`; the repeatable 30-day comparison
+against the fixed-50 baseline is `tools/simulate_continuing.py` (results in
+`analysis/continuing-simulation/`).
+
+Verify a preparation run from its durable outcome (a queued task id is NOT
+success):
 
 Run it hourly with the bundled systemd user units:
 
@@ -74,6 +109,10 @@ cp tools/systemd/stash-justwatch-programming.service \
 systemctl --user daemon-reload
 systemctl --user enable --now stash-justwatch-programming.timer
 ```
+
+`tools/prepare_programming.py --verify` queues the task, waits for the job to
+finish, then prints the per-channel outcomes from `ProgrammingStatus`.
+
 
 ## Install
 
@@ -97,8 +136,9 @@ versions.
 
 Sync ops (`runPluginOperation`): `Capabilities`, `Directory` (custom channels
 + the `networks` block), `FullDirectory`, `Lineup` (also serves `net_`
-channels), `PreviewLineup`, `GetCatalog`, `ValidateCatalog`, `Schedule`,
-`PreviewProgramming`, `ProgrammingDesk`.
+channels), `PreviewLineup`, `GetCatalog`, `ValidateCatalog`, `Schedule`
+(custom and activated network ids), `PreviewProgramming`, `ProgrammingDesk`,
+`ProgrammingStatus`.
 Task ops (`runPluginTask`): `SaveCatalog`, `RefreshData`, `PrepareProgramming`
 — writes run as tasks so snapshot regeneration never blocks a GraphQL
 connection.
