@@ -579,9 +579,16 @@ class TestContinuingNetworks:
         from justwatch import programming as prog, snapshots
         self._networks(tmp_path, monkeypatch)
         self._rollout(data_dir)
-        publication = continuing.build(self._channel(), [], None, now=0)
+        # Live status (read-time coverage, R7): the publication must cover the
+        # reader's wall clock for the directory to advertise it as ready.
+        now = int(__import__("time").time() * 1000)
+        publication = continuing.build(self._channel(),
+            [{"id": str(i), "title": f"S{i}", "duration": 600,
+              "studioId": "1", "studio": "St", "performerIds": [],
+              "date": "", "createdAt": "", "preview": ""} for i in range(5)],
+            None, now=now)
         snapshots.write_json(prog.path(data_dir, self.NET), publication)
-        continuing.write_status(data_dir, {"networkChannels": {self.NET: "ready"}}, now=0)
+        continuing.write_status(data_dir, {"runId": "t", "networkChannels": {self.NET: "ready"}}, now=now)
         result = dispatch(envelope, {"mode": "Directory"}, fake_client)
         row = next(r for r in result["networks"]["channels"] if r["id"] == self.NET)
         assert row["programmingMode"] == "continuing"
