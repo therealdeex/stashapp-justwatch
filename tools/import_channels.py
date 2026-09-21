@@ -218,6 +218,19 @@ def check_logic(row: dict) -> None:
         fail(f"row {number}: exclude_tag_logic {row['exclude_tag_logic']!r} (expected ANY)")
 
 
+def authored_programming(row: dict) -> dict | None:
+    """The optional ``programming_mode`` column: "" (absent) = no authored
+    policy (the rollout alone decides activation), "fixed" = an editorial pin
+    that no rollout can override, "continuing" = recorded intent, still
+    rollout-gated. Compiled as a validated ``programming`` object on the row;
+    the legacy ``programmingMode`` string stays "fixed" for old readers (the
+    RESOLVED mode is a runtime overlay in Directory, never this artifact)."""
+    mode = (row.get("programming_mode") or "").strip().lower()
+    if mode not in ("", "fixed", "continuing"):
+        fail(f"row {row['channel_number']}: programming_mode {mode!r} (expected fixed or continuing)")
+    return {"mode": mode} if mode else None
+
+
 def _any_summary(names: list[str], noun: str) -> str:
     if len(names) <= 4:
         return ", ".join(names) + " (any)"
@@ -301,7 +314,7 @@ def import_csv(csv_path: Path) -> dict:
             fail(f"row {number}: network id {channel_id} collides with row "
                  f"{seen_ids[channel_id]}")
         seen_ids[channel_id] = number
-        channels.append({
+        channel = {
             "id": channel_id,
             "number": number,
             "name": name,
@@ -316,7 +329,11 @@ def import_csv(csv_path: Path) -> dict:
             "sourceLabel": source_label(row),
             "source": build_source(row),
             "rationale": row["rationale"].strip(),
-        })
+        }
+        programming_obj = authored_programming(row)
+        if programming_obj:
+            channel["programming"] = programming_obj
+        channels.append(channel)
 
     channels.sort(key=lambda c: c["number"])
     try:

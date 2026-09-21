@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from justwatch import catalog, main
+from justwatch import catalog, continuing, main, networks
 
 
 def dispatch(envelope: dict, args: dict, fake_client) -> dict:
@@ -503,3 +503,150 @@ class TestHealth:
         channels = self._refresh(envelope, assets_dir, fake_client)["channels"]
         assert channels["ch_deadbeef"]["healthStatus"] == "ok"
         assert channels["ch_00000002"]["healthStatus"] == "unavailable"
+
+
+class TestContinuingNetworks:
+    """The continuing-programming op surface: rollout-gated Schedule/Directory,
+    the status manifest, capabilities, and the prepare task."""
+
+    NET = "net_00000001"
+
+    def _networks(self, tmp, monkeypatch, *, pin=False):
+        from justwatch import networks as net_mod
+        rows = [{
+            "id": self.NET, "number": 100, "name": "Pilot One", "glyph": "\uf005",
+            "color": "#123456", "section": "general", "family": "tag_spotlight",
+            "count": 12, "sort": "shuffle", "seed": 17, "programmingMode": "fixed",
+            "source": {"type": "filter", "tags": ["42"]},
+        }]
+        if pin:
+            rows[0]["programming"] = {"mode": "fixed"}
+        monkeypatch.setattr(net_mod, "PATH", tmp / "networks.json")
+        net_mod.PATH.write_text(json.dumps({"revision": "r", "channels": rows}))
+
+    def _rollout(self, data_dir, enabled=True):
+        (data_dir).mkdir(parents=True, exist_ok=True)
+        (data_dir / "continuing-networks.json").write_text(
+            json.dumps({"enabled": enabled, "networkIds": [self.NET]}))
+
+    def _index_client(self, n=12):
+        from justwatch.stash_client import GraphQLClientError
+
+        class Index:
+            def submit(self, query, variables=None):
+                if "ContinuingIndex" in query:
+                    return {"findScenes": {"count": n, "scenes": [
+                        {"id": str(i), "title": f"S{i}", "date": None, "created_at": None,
+                         "studio": {"id": "1", "name": "St"}, "performers": [],
+                         "files": [{"duration": 600}], "paths": {"preview": "/p"}}
+                        for i in range(n)]}}
+                raise GraphQLClientError(f"unexpected query {query[:40]}")
+
+        return Index()
+
+    def test_capabilities_advertise_network_programming(self, envelope, fake_client):
+        caps = dispatch(envelope, {"mode": "Capabilities"}, fake_client)
+        feature = caps["features"]["programming"]
+        assert feature["networks"] is True
+        assert feature["horizonHours"] == 168 and feature["protectedHours"] == 24
+        assert caps["operations"]["programmingStatus"] == "ProgrammingStatus"
+
+    def test_schedule_for_fixed_network_is_fixed(self, envelope, data_dir, fake_client, tmp_path, monkeypatch):
+        self._networks(tmp_path, monkeypatch)  # no rollout file
+        result = dispatch(envelope, {"mode": "Schedule", "channelId": self.NET}, fake_client)
+        assert result == {"status": "fixed", "programs": []}
+
+    def test_schedule_serves_activated_network_publication(
+        self, envelope, data_dir, fake_client, tmp_path, monkeypatch,
+    ):
+        from justwatch import programming as prog, snapshots
+        self._networks(tmp_path, monkeypatch)
+        self._rollout(data_dir)
+        publication = continuing.build(
+            self._channel(), [{"id": str(i), "title": f"S{i}", "duration": 600,
+                               "studioId": "1", "studio": "St", "performerIds": [],
+                               "date": "", "createdAt": "", "preview": ""} for i in range(5)],
+            None, now=0)
+        snapshots.write_json(prog.path(data_dir, self.NET), publication)
+        page = dispatch(envelope, {"mode": "Schedule", "channelId": self.NET, "at": "0"}, fake_client)
+        assert page["status"] == "ready" and len(page["programs"]) == 50
+        assert page["channelId"] == self.NET
+        assert page["programs"][0]["startEpochMs"] == 0
+
+    def test_directory_overlays_resolved_mode_and_status(
+        self, envelope, data_dir, fake_client, tmp_path, monkeypatch,
+    ):
+        from justwatch import programming as prog, snapshots
+        self._networks(tmp_path, monkeypatch)
+        self._rollout(data_dir)
+        publication = continuing.build(self._channel(), [], None, now=0)
+        snapshots.write_json(prog.path(data_dir, self.NET), publication)
+        continuing.write_status(data_dir, {"networkChannels": {self.NET: "ready"}}, now=0)
+        result = dispatch(envelope, {"mode": "Directory"}, fake_client)
+        row = next(r for r in result["networks"]["channels"] if r["id"] == self.NET)
+        assert row["programmingMode"] == "continuing"
+        assert row["schedule"]["coverageHours"] >= 0
+
+    def test_directory_without_rollout_keeps_compiled_modes(
+        self, envelope, data_dir, fake_client, tmp_path, monkeypatch,
+    ):
+        self._networks(tmp_path, monkeypatch)
+        result = dispatch(envelope, {"mode": "Directory"}, fake_client)
+        row = next(r for r in result["networks"]["channels"] if r["id"] == self.NET)
+        assert row["programmingMode"] == "fixed" and "schedule" not in row
+        # revision is the compiled content identity (recomputed on load), and
+        # runtime status overlays never churn it.
+        assert result["networks"]["revision"] == networks.revision(result["networks"]["channels"])
+
+    def test_authored_fixed_pin_beats_rollout(
+        self, envelope, data_dir, fake_client, tmp_path, monkeypatch,
+    ):
+        self._networks(tmp_path, monkeypatch, pin=True)
+        self._rollout(data_dir)
+        result = dispatch(envelope, {"mode": "Directory"}, fake_client)
+        row = next(r for r in result["networks"]["channels"] if r["id"] == self.NET)
+        assert row["programmingMode"] == "fixed"
+
+    def test_disabled_rollout_deactivates(self, envelope, data_dir, fake_client, tmp_path, monkeypatch):
+        self._networks(tmp_path, monkeypatch)
+        self._rollout(data_dir, enabled=False)
+        result = dispatch(envelope, {"mode": "Schedule", "channelId": self.NET}, fake_client)
+        assert result["status"] == "fixed"
+
+    def test_prepare_task_publishes_network_and_status(
+        self, envelope, data_dir, tmp_path, monkeypatch,
+    ):
+        from justwatch import catalog as cat
+        self._networks(tmp_path, monkeypatch)
+        self._rollout(data_dir)
+        cat.save(data_dir, cat.empty())
+        monkeypatch.setattr(
+            "justwatch.main._HANDLERS", dict(main._HANDLERS))  # isolation no-op
+        result = main._dispatch({**envelope, "args": {"mode": "PrepareProgramming"},
+                                 "server_connection": {**envelope["server_connection"],
+                                                       "Dir": str(data_dir.parent)}},
+                                client=self._index_client())
+        assert result["networks"][self.NET] == "ready"
+        status = continuing.read_status(data_dir)
+        assert status["channels"][self.NET]["mode"] == "continuing"
+        assert status["lastRun"]["networkChannels"][self.NET] == "ready"
+
+    def test_programming_status_op_reads_manifest(self, envelope, data_dir, fake_client):
+        continuing.write_status(data_dir, {"networkChannels": {}}, now=123)
+        result = dispatch(envelope, {"mode": "ProgrammingStatus"}, fake_client)
+        assert result["generatedAt"] == 123
+
+    def test_desk_includes_bounded_network_section(self, envelope, data_dir, fake_client, tmp_path, monkeypatch):
+        self._networks(tmp_path, monkeypatch)
+        self._rollout(data_dir)
+        continuing.write_status(data_dir, {"networkChannels": {self.NET: "ready"}}, now=0)
+        result = dispatch(envelope, {"mode": "ProgrammingDesk"}, fake_client)
+        assert result["networks"]["rollout"]["enabled"] is True
+        assert result["networks"]["total"] == 1
+        assert result["networks"]["channels"][0]["id"] == self.NET
+
+    def _channel(self):
+        return {"id": self.NET, "number": 100, "name": "Pilot One", "glyph": "\uf005",
+                "color": "#123456", "section": "general", "family": "tag_spotlight",
+                "count": 12, "sort": "shuffle", "seed": 17, "programmingMode": "fixed",
+                "source": {"type": "filter", "tags": ["42"]}}

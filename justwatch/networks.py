@@ -110,6 +110,15 @@ def _require_channel(channel: Any, i: int) -> None:
         raise bad("source has no include criteria")
     if not isinstance(channel.get("programmingMode"), str):
         raise bad("missing programmingMode")
+    programming_obj = channel.get("programming")
+    if programming_obj is not None:
+        # Authored continuing intent (compiled from the CSV's optional
+        # programming_mode column). ``fixed`` is an editorial pin that no
+        # rollout can override; the resolved mode Directory reports is a
+        # runtime decision (rollout-gated), never this field alone.
+        if not isinstance(programming_obj, dict) or \
+                programming_obj.get("mode") not in ("fixed", "continuing", "explore", "discovery"):
+            raise bad("programming.mode must be one of fixed/continuing/explore/discovery")
 
 
 def _metadata_criteria(source: dict, bad) -> bool:
@@ -145,12 +154,39 @@ def _ids(value: Any) -> list[str]:
     return [str(x) for x in value if DIGITS_RE.match(str(x))]
 
 
-def directory_payload() -> dict | None:
+def directory_payload(
+    resolved_modes: dict[str, str] | None = None,
+    schedule_status: dict[str, dict] | None = None,
+) -> dict | None:
     """The ``networks`` block for the Directory response, or None when the
-    deployment has no networks file (clients keep their fallback path)."""
+    deployment has no networks file (clients keep their fallback path).
+
+    ``resolved_modes``/``schedule_status`` overlay the runtime view onto the
+    compiled rows: activated continuing networks report ``programmingMode:
+    "continuing"`` plus a lightweight ``schedule`` status block (from the
+    status manifest — never the schedule files themselves). The tier revision
+    stays the COMPILED artifact's identity: runtime schedule status must not
+    churn network-revision-driven client caches.
+    """
     document = load()
     if not document["channels"]:
         return None
+    if resolved_modes or schedule_status:
+        channels = []
+        for channel in document["channels"]:
+            row = dict(channel)
+            mode = (resolved_modes or {}).get(channel["id"])
+            if mode:
+                row["programmingMode"] = mode
+            entry = (schedule_status or {}).get(channel["id"])
+            if entry and entry.get("ready"):
+                row["schedule"] = {
+                    key: entry[key]
+                    for key in ("version", "generatedAt", "preparedThrough", "coverageHours", "degraded", "expiring")
+                    if key in entry
+                }
+            channels.append(row)
+        return {"revision": document["revision"], "channels": channels}
     return document
 
 

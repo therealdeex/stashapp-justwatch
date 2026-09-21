@@ -994,6 +994,15 @@
                 : r.members != null ? r.members + (r.members === 1 ? " member" : " members")
                   : ""),
           ),
+          network && r.schedule
+            ? h("div", { className: "jw-field" },
+                h("div", { className: "jw-field-label" }, "Schedule"),
+                h("div", { className: "jw-field-value jw-auto-note" },
+                  r.schedule.degraded ? "Encore — the scheduler fell behind; the last schedule keeps repeating until the next run."
+                    : "Advancing — " + Math.round(r.schedule.coverageHours) + " h of airings scheduled ahead, refreshed hourly.",
+                ),
+              )
+            : null,
         ),
       ),
       r.offAir

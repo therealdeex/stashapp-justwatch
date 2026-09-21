@@ -32,18 +32,19 @@ _PLUGIN_ROOT = str(Path(__file__).resolve().parent.parent)
 if _PLUGIN_ROOT not in sys.path:
     sys.path.insert(0, _PLUGIN_ROOT)
 
-from justwatch import catalog, contract, lineup, networks, snapshots, programming  # noqa: E402
+from justwatch import catalog, contract, continuing, lineup, networks, snapshots, programming  # noqa: E402
 from justwatch.stash_client import (  # noqa: E402
     GraphQLAuthError,
     GraphQLClientError,
     StashClient,
 )
 
-PLUGIN_VERSION = "0.6.0"
+PLUGIN_VERSION = "0.7.0"
 
 SYNC_MODES = frozenset({
     "capabilities", "directory", "full_directory", "lineup", "preview_lineup",
     "get_catalog", "validate_catalog", "schedule", "programming_desk", "preview_programming",
+    "programming_status",
 })
 TASK_MODES = frozenset({"save_catalog", "refresh_data", "prepare_programming"})
 ALL_MODES = SYNC_MODES | TASK_MODES
@@ -141,16 +142,20 @@ def _op_directory(ctx: TaskContext) -> dict:
     The ``networks`` block carries the owner's curated tier (channels 100+)
     which replaces the TV's client-generated sections; it is absent entirely
     when this deployment has no networks file, so older clients keep their
-    fallback path.
+    fallback path. Continuing-activated networks overlay their resolved mode
+    and a lightweight schedule status (from the status manifest — reading
+    every schedule JSON per directory request would be unbounded).
     """
     current = catalog.load(ctx.data_dir)
     snapshot = snapshots.read_snapshot(ctx.data_dir, ctx.assets_dir)
     health = snapshot.get("channels", {}) if snapshot.get("revision") == current.get("revision") else {}
+    schedule_status = continuing.read_status(ctx.data_dir).get("channels", {})
     channels = []
-    for channel in current.get("channels", []):
+    for channel in current["channels"]:
         if not channel.get("enabled", True):
             continue
-        channels.append({
+        mode = programming.policy(channel.get("programming"))["mode"]
+        row = {
             "id": channel["id"],
             "number": channel["number"],
             "name": channel["name"],
@@ -159,15 +164,31 @@ def _op_directory(ctx: TaskContext) -> dict:
             "sort": channel["sort"],
             "seed": channel["seed"],
             "sourceType": (channel.get("source") or {}).get("type"),
-            "programmingMode": programming.policy(channel.get("programming"))["mode"],
+            "programmingMode": mode,
             "sceneCount": health.get(channel.get("id") or "", {}).get("sceneCount"),
-        })
+        }
+        entry = schedule_status.get(channel["id"])
+        if entry and entry.get("ready"):
+            row["programming"] = {
+                key: entry[key]
+                for key in ("version", "generatedAt", "preparedThrough", "coverageHours", "degraded", "expiring")
+                if key in entry
+            }
+        channels.append(row)
+    rollout = continuing.try_load_rollout(ctx.data_dir)
+    resolved = {}
+    if rollout["enabled"]:
+        for network in networks.load()["channels"]:
+            resolved[network["id"]] = continuing.resolved_mode(network, rollout)
     result = {
         "pluginId": contract.PLUGIN_ID,
         "contractVersion": contract.CONTRACT_VERSION,
         "revision": current.get("revision", 0),
         "channels": channels,
-        "networks": networks.directory_payload(),
+        "networks": networks.directory_payload(
+            resolved_modes=resolved or None,
+            schedule_status=schedule_status or None,
+        ),
     }
     if result["networks"] is None:
         del result["networks"]
@@ -398,8 +419,13 @@ def _save_catalog_inner(ctx: TaskContext) -> dict:
         _log(f"snapshot regeneration skipped: {exc}")
 
     try:
-        programming.prepare(ctx.client, ctx.data_dir, only_changed=True)
-    except Exception as exc:
+        result = programming.prepare(ctx.client, ctx.data_dir, only_changed=True)
+        continuing.write_status(ctx.data_dir, {
+            "startedAt": int(__import__("time").time() * 1000),
+            "customChannels": result["channels"],
+            "networkChannels": {},
+        })
+    except Exception as exc:  # save already succeeded; programming is best-effort
         _log(f"programming will retry on the next preparation task: {exc}")
     return {"saved": True, "revision": normalized["revision"]}
 
@@ -436,13 +462,22 @@ def _op_full_directory(ctx: TaskContext) -> dict:
     """The complete lineup for the Channel Studio: custom channels PLUS the
     owner's curated networks, which replaced the General/Studios/Performers
     tiering the TV app used to generate client-side. Pure file reads — no
-    Stash queries; network health is the CSV-validated count."""
+    Stash queries; network health is the CSV-validated count. Continuing
+    networks carry their lightweight schedule status so the editor can say
+    "advancing, Xh ahead" instead of loop language."""
     current = catalog.load(ctx.data_dir)
     grouped = networks.sections()
+    schedule_status = continuing.read_status(ctx.data_dir).get("channels", {})
+    rollout = continuing.try_load_rollout(ctx.data_dir)
+    resolved = {}
+    if rollout["enabled"]:
+        for network in networks.load()["channels"]:
+            resolved[network["id"]] = continuing.resolved_mode(network, rollout)
 
     def rows(section: str) -> list[dict]:
-        return [
-            {
+        out = []
+        for ch in grouped[section]:
+            row = {
                 "id": ch["id"],
                 "number": ch["number"],
                 "name": ch["name"],
@@ -454,8 +489,18 @@ def _op_full_directory(ctx: TaskContext) -> dict:
                 "origin": "network",
                 "sourceLabel": ch["sourceLabel"],
             }
-            for ch in grouped[section]
-        ]
+            mode = resolved.get(ch["id"])
+            if mode:
+                row["programmingMode"] = mode
+            entry = schedule_status.get(ch["id"])
+            if entry and entry.get("ready"):
+                row["schedule"] = {
+                    key: entry[key]
+                    for key in ("coverageHours", "degraded", "expiring", "generatedAt")
+                    if key in entry
+                }
+            out.append(row)
+        return out
 
     return {
         "pluginId": contract.PLUGIN_ID,
@@ -471,6 +516,16 @@ def _op_full_directory(ctx: TaskContext) -> dict:
 
 def _op_schedule(ctx):
     channel_id = str(ctx.args.get("channelId") or "")
+    if channel_id.startswith("net_"):
+        network = networks.get(channel_id)
+        if network is None:
+            raise LookupError("channel is unavailable")
+        mode = continuing.resolved_mode(network, continuing.try_load_rollout(ctx.data_dir))
+        if mode != continuing.MODE:
+            return {"status": "fixed", "programs": []}
+        return programming.schedule(ctx.data_dir, channel_id,
+            _as_int(ctx.args.get("at"), int(__import__("time").time() * 1000)),
+            _as_int(ctx.args.get("limit"), 50))
     channel = _find_channel(catalog.load(ctx.data_dir), channel_id)
     if channel is None or not channel["enabled"]:
         raise LookupError("channel is unavailable")
@@ -491,21 +546,54 @@ def _op_preview_programming(ctx):
 
 
 def _op_programming_desk(ctx):
-    return programming.desk(ctx.data_dir, catalog.load(ctx.data_dir)["channels"])
+    result = programming.desk(ctx.data_dir, catalog.load(ctx.data_dir)["channels"])
+    # Network diagnostics are bounded and carry NO pairwise overlap (all-pairs
+    # over the tier is offline work, never a synchronous computation).
+    result["networks"] = continuing.desk(
+        ctx.data_dir,
+        offset=_as_int(ctx.args.get("networkOffset"), 0),
+        limit=_as_int(ctx.args.get("networkLimit"), 50),
+    )
+    result["status"] = {
+        "generatedAt": continuing.read_status(ctx.data_dir).get("generatedAt"),
+        "lastRun": continuing.read_status(ctx.data_dir).get("lastRun"),
+    }
+    return result
+
+
+def _op_programming_status(ctx):
+    """The lightweight scheduling surface: last run + per-channel publication
+    status. This is what distinguishes a queued task from a generation that
+    actually succeeded — ops tooling polls it instead of trusting a job id."""
+    return continuing.read_status(ctx.data_dir) or {"schema": 1, "channels": {}, "lastRun": None}
 
 
 def _op_prepare_programming(ctx):
     result = programming.prepare(ctx.client, ctx.data_dir, ctx.args.get("channelId"))
+    network_result = {"channels": {}}
+    try:
+        network_result = continuing.prepare(ctx.client, ctx.data_dir, ctx.args.get("channelId"))
+    except ValueError as exc:  # rollout file broken: loud, per-run, but customs still report
+        network_result = {"channels": {"rollout": str(exc)}}
+    run = {
+        "startedAt": int(__import__("time").time() * 1000),
+        "customChannels": result["channels"],
+        "networkChannels": network_result["channels"],
+    }
+    continuing.write_status(ctx.data_dir, run)
     errors = {key: value for key, value in result["channels"].items() if value != "ready"}
+    errors.update({key: value for key, value in network_result["channels"].items() if value != "ready"})
     if errors:
         raise GraphQLClientError("Some programming could not be prepared: " + json.dumps(errors))
-    return result
+    return {"channels": {**result["channels"], **network_result["channels"]},
+            "networks": network_result["channels"]}
 
 
 _HANDLERS = {
     "schedule": _op_schedule,
     "preview_programming": _op_preview_programming,
     "programming_desk": _op_programming_desk,
+    "programming_status": _op_programming_status,
     "prepare_programming": _op_prepare_programming,
     "capabilities": _op_capabilities,
     "get_catalog": _op_get_catalog,

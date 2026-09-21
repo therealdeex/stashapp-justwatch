@@ -52,8 +52,11 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:20]
 
 
+_CHANNEL_ID_RE = re.compile(r"(ch|net)_[0-9a-f]{8}")
+
+
 def path(data_dir, channel_id):
-    if not re.fullmatch(r"ch_[0-9a-f]{8}", channel_id):
+    if not _CHANNEL_ID_RE.fullmatch(channel_id):
         raise ValueError("invalid channel id")
     return Path(data_dir) / "programming" / (channel_id + ".json")
 
@@ -63,7 +66,7 @@ def read(data_dir, channel_id):
     if not p.exists():
         return None
     data = json.loads(p.read_text())
-    if data.get("schema") != 1 or not isinstance(data.get("programs"), list):
+    if data.get("schema") not in (1, 2) or not isinstance(data.get("programs"), list):
         raise ValueError("unreadable published schedule")
     return data
 

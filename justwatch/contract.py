@@ -83,6 +83,7 @@ OPERATIONS: dict[str, str] = {
     "schedule": "Schedule",
     "previewProgramming": "PreviewProgramming",
     "programmingDesk": "ProgrammingDesk",
+    "programmingStatus": "ProgrammingStatus",
     "prepareProgramming": "PrepareProgramming",
     "capabilities": "Capabilities",
     "directory": "Directory",
@@ -111,6 +112,20 @@ def capabilities(plugin_version: str) -> dict:
         "operations": dict(OPERATIONS),
         "features": {
             "publishedSchedule": {"version": 1, "pageSize": 50, "horizonHours": 72},
+            # Continuing network programming (rollout-gated server side): full
+            # eligible library instead of the fixed 50-item rotation, rolling
+            # horizon with a 24h whole-airing protected window, ~15% of
+            # flexible slots prioritizing new arrivals. Additive v1: Lineup
+            # keeps serving the fixed rotation for every non-continuing (or
+            # legacy-client) consumer.
+            "programming": {
+                "version": 2,
+                "networks": True,
+                "horizonHours": 168,
+                "protectedHours": 24,
+                "freshnessSharePercent": 15,
+                "statusOperation": "ProgrammingStatus",
+            },
             "customChannels": True,
             # The owner's curated network tier (Directory.networks): replaces
             # the TV app's client-generated General/Studios/Performers.
