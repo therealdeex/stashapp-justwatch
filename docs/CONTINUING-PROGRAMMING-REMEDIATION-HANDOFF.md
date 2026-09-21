@@ -224,9 +224,40 @@ the live guide proved unreliable for these):
 4. Schedule-expiry encore labeling across a real >48 h scheduler outage on
    hardware.
 
-## Production actions NOT performed
+## Production deployment (explicitly authorized 2026-09-21, after dev verification)
 
-- No deploy to 192.168.8.40, no rollout modification there, no production
-  TV contact (192.168.8.169 untouched), no pilot activation, and the
-  513-network proposal remains untouched. Production pilot observation
-  remains a separately authorized step.
+Deployed the remediated plugin and TV build to production **without
+activating anything** — deployment order per AGENTS.md (plugin first, then
+APK), and the pilot rollout remains untouched:
+
+1. Plugin rsynced to `shahram@192.168.8.40:/home/shahram/dev/stash-justwatch/`
+   (`--delete --exclude .git`; checksum-verified `continuing.py`), then
+   `reloadPlugins` over GraphQL using the prod API key read from the prod
+   stick's shared_prefs per the documented deploy procedure (key handled in
+   a 0600 temp file, never in argv/logs, destroyed after).
+2. Post-deploy read-only validation on prod: Capabilities advertises
+   `programming {networks: true, horizonHours: 168, protectedHours: 24}`
+   under contract version 1; Directory serves the 795-row networks block
+   with **zero** channels advertised `continuing` (no rollout file on prod —
+   deploying code alone activates nothing); `Schedule` on a network returns
+   `{"status": "fixed"}`; ProgrammingStatus shows no continuing channels.
+3. Discrete silent install on the production Fire TV stick (192.168.8.169)
+   per the TV device policy — `adb install -r` of the armeabi-v7a APK
+   `0.9.1-125-g61f92187` built from the committed TV HEAD; Success, version
+   confirmed via a passive package query. No launch, no UI interaction, no
+   screenshots, nothing shown on that screen.
+
+Still NOT done on production (separately authorized operator steps):
+`continuing-networks.json` rollout creation/activation (pilot manifest's
+prepare-then-activate flow), any pilot network activation, and the pending
+513-network catalog proposal. Until the rollout file exists, production
+playback is byte-for-byte the fixed behavior it was before this deploy; the
+new APK coexists (old-TV fallback and old-client fixed Lineup both hold).
+
+## Historical note — actions that were withheld UNTIL the explicit
+## authorization above
+
+During the remediation itself (before the separate instruction), no deploy
+to production, no rollout modification, no production TV contact, and no
+pilot activation were performed; the 513-network catalog proposal remains
+untouched.
