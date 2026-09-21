@@ -421,7 +421,9 @@ def _save_catalog_inner(ctx: TaskContext) -> dict:
     try:
         result = programming.prepare(ctx.client, ctx.data_dir, only_changed=True)
         continuing.write_status(ctx.data_dir, {
+            "runId": f"save-{normalized['revision']}",
             "startedAt": int(__import__("time").time() * 1000),
+            "finishedAt": int(__import__("time").time() * 1000),
             "customChannels": result["channels"],
             "networkChannels": {},
         })
@@ -562,31 +564,45 @@ def _op_programming_desk(ctx):
 
 
 def _op_programming_status(ctx):
-    """The lightweight scheduling surface: last run + per-channel publication
-    status. This is what distinguishes a queued task from a generation that
-    actually succeeded — ops tooling polls it instead of trusting a job id."""
-    return continuing.read_status(ctx.data_dir) or {"schema": 1, "channels": {}, "lastRun": None}
+    """The lightweight scheduling surface: last run (correlated by runId) +
+    per-channel publication status with coverage/expiry derived at READ time.
+    This is what distinguishes a queued task from a generation that actually
+    succeeded — ops tooling polls it instead of trusting a job id, and a
+    scheduler that stopped publishing cannot keep claiming fresh coverage."""
+    return continuing.read_status(ctx.data_dir)
 
 
 def _op_prepare_programming(ctx):
+    # The run id correlates the queued task with the durable status entry (R7):
+    # ops tooling matches on THIS id — an unrelated older successful run can
+    # never be mistaken for this one. startedAt precedes the work; finishedAt
+    # and the per-channel outcomes are recorded even when channels fail.
+    run_id = str(ctx.args.get("runId") or "").strip() or f"task-{int(__import__('time').time() * 1000)}"
+    started_at = int(__import__("time").time() * 1000)
     result = programming.prepare(ctx.client, ctx.data_dir, ctx.args.get("channelId"))
-    network_result = {"channels": {}}
     try:
         network_result = continuing.prepare(ctx.client, ctx.data_dir, ctx.args.get("channelId"))
     except ValueError as exc:  # rollout file broken: loud, per-run, but customs still report
         network_result = {"channels": {"rollout": str(exc)}}
     run = {
-        "startedAt": int(__import__("time").time() * 1000),
+        "runId": run_id,
+        "startedAt": started_at,
+        "finishedAt": int(__import__("time").time() * 1000),
         "customChannels": result["channels"],
         "networkChannels": network_result["channels"],
     }
     continuing.write_status(ctx.data_dir, run)
-    errors = {key: value for key, value in result["channels"].items() if value != "ready"}
-    errors.update({key: value for key, value in network_result["channels"].items() if value != "ready"})
-    if errors:
-        raise GraphQLClientError("Some programming could not be prepared: " + json.dumps(errors))
+    failures = {key: value for group in ("customChannels", "networkChannels")
+                for key, value in run[group].items()
+                if (continuing.outcome_class(value) if key.startswith("net_") else value != "ready") == "failure"}
+    deferred = {key: value for key, value in network_result["channels"].items()
+                if continuing.outcome_class(value) == "deferred"}
+    if failures:
+        raise GraphQLClientError("Some programming could not be prepared: " + json.dumps(failures))
     return {"channels": {**result["channels"], **network_result["channels"]},
-            "networks": network_result["channels"]}
+            "networks": network_result["channels"],
+            "runId": run_id,
+            "deferred": deferred}
 
 
 _HANDLERS = {
