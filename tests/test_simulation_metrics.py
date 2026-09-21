@@ -86,6 +86,18 @@ def test_duplicate_airings_tolerates_pass_boundary_order_swings():
     assert sim.duplicate_airings(airings, lambda _t: 100) == []
 
 
+def test_duplicate_airings_ignores_outage_straddling_pairs():
+    """A scheduler outage is a broadcast interruption: a pair straddling it
+    (the encore recovery replay) is sanctioned, not double consumption."""
+    ids = {str(i) for i in range(9)}
+    order = ["0", "1", "0"] + [str(i) for i in range(2, 9)]
+    airings = [(30 * i * 60_000, 30 * (i + 1) * 60_000, sid) for i, sid in enumerate(order)]
+    assert sim.duplicate_airings(airings, lambda _t: len(ids)), \
+        "without interruption context the pair IS suspicious"
+    assert sim.duplicate_airings(airings, lambda _t: len(ids),
+                                 interruptions=[(airings[1][0] + 1, airings[2][0] - 1)]) == []
+
+
 def test_duplicate_airings_ignores_released_reservations():
     """A released reservation (canceled future airing after a deletion)
     legitimately re-airs early — exempt when the release lies between."""
