@@ -147,11 +147,77 @@ interaction target. Entity picker with 3,569 selected stays windowed
 5. **Dev library emptiness** — the 10-scene dev Stash yields mostly empty
    pools after migration; seed counts are historical and clearly labeled.
 
-## 6. Dev end-to-end validation and TV integration
+## 6. Dev end-to-end validation and TV integration (executed 2026-09-23)
 
-*(final numbers below were filled in at completion)*
+**Dev deployment migrated** (`/opt/stash-dev/stash-justwatch-data`):
 
-See §6 in the "as-executed" appendix at the bottom of this file.
+* dry run clean (4 customs + 513 networks, reconciliation 292/221/282, no drift);
+* `--apply` committed `lib_ee2370f095` revision 1 with an automatic backup
+  (`/opt/stash-dev/migration-backup-20260923-122640` containing catalog.json,
+  networks.json, continuing-networks.json, programming/, snapshots/);
+* **restore rehearsed on the live dev data**: restored, verified
+  `channel-library.json` gone + legacy files back, then re-applied;
+* retired rollout id recorded: `retiredRolloutIds: ["net_8091d3ea"]`; the two
+  surviving rollout ids stay active; no activation transferred by number.
+
+**Plugin reloaded on dev** (`reloadPlugins`), then verified over GraphQL:
+
+* `Capabilities` advertises `features.channelLibrary`;
+* `GetChannelLibrary`: revision 1, 517 channels, groups
+  My Channels / General / Studios / Performers;
+* `Directory` keeps the legacy shape: 4 customs + 513 networks with legal
+  legacy `section` names — old TVs are unaffected in shape.
+
+**Browser-path edit → Apply → persisted definition → directory refresh**
+(driven through the exact GraphQL calls the production UI will make):
+
+1. `ApplyChannelChanges` (task, `channel.create` tempId `temp-e2e`) →
+   receipt `committed` rev 2 with `idMap {temp-e2e: net_5e7b27c4}`;
+2. `GetChannelApplyResult` by requestId returns the durable receipt;
+3. `GetChannelDefinition` shows the persisted record + plain-language summary
+   ("1. Scenes tagged with any of: #9320 (sub-tags included).");
+4. `Directory` (old-TV view) lists the new channel at #880;
+5. idempotent retry with the SAME requestId replayed the same receipt (no
+   duplicate channel, revision unchanged);
+6. archive via `channels.patch` → committed rev 3; the channel remains listed
+   in the library (`archived: true`) and disappears from the playback
+   Directory; 513 networks remain.
+   (The archived "Curation E2E Probe" #880 / net_5e7b27c4 is left in the dev
+   library as a visible test artifact.)
+7. A rejected probe (referencing a non-existent channel id) produced a typed
+   `rejected` receipt and changed nothing.
+
+Findings fixed during the e2e: `runPluginTask` needs a manifest task entry
+(added: "Apply Channel Changes"), and archived/paused nets now leave the
+legacy playback surfaces (`f0db590`).
+
+**TV integration** (repo `StashAppAndroidTV`, commit `46c23ad3` on top of
+`61f92187`): dynamic owner groups implemented per the plan (capability-gated
+`GetChannelDirectory` parsing with `grp_other` recovery, dynamic ordering =
+group position + owner number with exactly-once membership, unchanged
+`ChannelKey.Custom/Network` identities so favorites/history survive,
+owner-numbers-only pad ranges, guide group tabs/subtitles/CH-jumps from the
+loaded group list, focus preservation by group id, present-but-empty library
+= empty dial with no generated fallback, legacy enum path byte-for-byte for
+old plugins, revision + structural-fingerprint refresh detection so cosmetic
+changes never retune). The wall-clock-dependent `JustWatchRecoveryTest`
+fixture (review S7) is now deterministic and stable across reruns.
+
+* `:app:testDebugUnitTest`: **859 tests, 0 failures** (justwatch suites:
+  189); `./gradlew :app:assembleDebug` BUILD SUCCESSFUL;
+* APK (dev-install artifact):
+  `~/dev/StashAppAndroidTV/app/build/outputs/apk/debug/StashAppAndroidTV-debug-0.9.1-125-g61f92187-106-armeabi-v7a.apk`
+  (+ arm64 + universal);
+* Device check on the permitted dev stick `.105` (USB serial
+  G072JN0734330EBH): APK installed (`Streamed Install: Success`), app
+  launches and navigates to Just Watch with zero crashes; the landing and
+  tune surfaces serve MIGRATED-library channels (CH 120, 259, 260, 262, 264
+  with live program/`min left` data from the real dev Stash); playback
+  started normally. NOT driven on-device: the guide's group-tab UI (Compose
+  focus could not be driven reliably via adb within this session); the
+  dynamic-group UI ordering is covered by the 20 new JVM tests
+  (`ChannelLibraryTest.kt`) and available for hands-on review on the stick.
+  Production `.169` was not touched.
 
 ## 7. Deliverable map
 
