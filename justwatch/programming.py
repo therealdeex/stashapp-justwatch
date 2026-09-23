@@ -17,6 +17,13 @@ from pathlib import Path
 
 from justwatch import catalog, lineup, snapshots
 
+
+def criteria_text_query(source: dict) -> str | None:
+    """A filter/criteria source's authored text query (membership: it rides
+    the index queries like a saved filter's stored q)."""
+    from justwatch import criteria
+    return criteria.text_query_of(source)
+
 HOUR = 3_600_000
 HORIZON = 72 * HOUR
 RETENTION = 48 * HOUR
@@ -73,10 +80,12 @@ def read(data_dir, channel_id):
 
 def index_source(client, channel):
     source = channel["source"]
-    criteria, q = None, None
+    object_filter, q = None, None
     if source["type"] == "savedFilter":
-        criteria, q = lineup.resolve_saved_criteria(client, source["id"])
-    scene_filter = lineup.build_scene_filter(source, criteria)
+        object_filter, q = lineup.resolve_saved_criteria(client, source["id"])
+    if q is None:
+        q = criteria_text_query(source)
+    scene_filter = lineup.build_scene_filter(source, object_filter)
     result = {}
     for page in range(1, MAX_INDEX // 250 + 1):
         find = lineup.build_find_filter(channel["sort"], channel["seed"], page, 250, q)
@@ -202,13 +211,23 @@ def build(channel, entries, previous=None, now=None):
         public["warnings"].append("This source contains very short programs; the preparation limit was reached. The scheduler will continue on its next run.")
     public["version"] = digest(programs)
     public["generatedAt"] = now
+    # Commit-guard token over the whole durable state (audit C6): a sibling
+    # writer's publication between our read and commit moves it, so a stale
+    # worker can never overwrite newer work with identical-looking programs.
+    public["generation"] = digest([
+        public["version"], signature, pass_number, deck,
+        sorted(counts.items()), sorted(last.items()), sorted(spotlight_slots),
+    ])
     return public
 
 
 def prepare(client, data_dir, channel_id=None, only_changed=False):
     outcomes = {}
-    # Separate lock keeps readers and catalog autosaves responsive during indexing.
-    with catalog.catalog_lock(Path(data_dir) / "programming", timeout=1):
+    # Serialization lock keeps concurrent prepares from duplicating work; the
+    # per-channel COMMIT guard below runs under the store's actual writer
+    # lock (library deployments: .library.lock — the audit's stale-worker
+    # publications rode the wrong lock).
+    with catalog.catalog_lock(Path(data_dir) / "programming", timeout=30):
         # One resolved channel view: pre-migration this is the catalog; after
         # the library migration it is the owner's authoritative library, so a
         # GUI edit and the scheduler can never disagree.
@@ -234,14 +253,22 @@ def prepare(client, data_dir, channel_id=None, only_changed=False):
                 entries = prior["index"] if reusable else index_source(client, channel)
                 publication = build(channel, entries, prior)
                 publication["indexedAt"] = prior["indexedAt"] if reusable else now
-                # A concurrent editor may have changed membership during indexing.
-                with catalog.catalog_lock(data_dir):
+                prior_generation = prior.get("generation") if prior else None
+                # A concurrent editor OR sibling writer may have moved under
+                # us during indexing: revalidate the channel AND the stored
+                # publication's generation under the store's writer lock.
+                with channel_service.writer_lock(data_dir):
                     if channel_service.library_active(data_dir):
                         latest_row = channel_service.get_channel(data_dir, channel["id"])
                         latest = channel_service.as_legacy_catalog_channel(latest_row) if latest_row else None
                     else:
                         latest = next((c for c in catalog.load(data_dir)["channels"] if c["id"] == channel["id"]), None)
                     if latest != channel:
+                        outcomes[channel["id"]] = "changed_during_build"
+                        continue
+                    current_pub = read(data_dir, channel["id"])
+                    if current_pub is not None \
+                            and current_pub.get("generation") != prior_generation:
                         outcomes[channel["id"]] = "changed_during_build"
                         continue
                     snapshots.write_json(path(data_dir, channel["id"]), publication)

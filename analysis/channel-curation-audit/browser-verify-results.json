@@ -1,0 +1,46 @@
+{
+  "c1_production_boot": {
+    "usable": true,
+    "pageErrors": []
+  },
+  "c1_storage_failure_memory_fallback": {
+    "restoredName": "Renamed in memory",
+    "draftBadge": true
+  },
+  "c9_group_rename_stages": {
+    "tasksBeforeApply": 0,
+    "applyEnabled": true,
+    "storedName": "Renamed on blur",
+    "opsInTask": 1
+  },
+  "c9_group_create_move_atomic": {
+    "taskCount": 1,
+    "ops": [
+      "group.put",
+      "channels.move"
+    ],
+    "newGroup": [
+      "My Channels",
+      "Fresh Group"
+    ]
+  },
+  "c8_newer_draft_survives_navigation": {
+    "storedWhileApplying": "NEWER UNSENT DRAFT",
+    "editorAfterReturning": "NEWER UNSENT DRAFT",
+    "committedName": "Submitted snapshot"
+  },
+  "c8_stale_draft_rebase": {
+    "expectedRevision": 2,
+    "storedName": "My local rename",
+    "storedColor": "#abcdef"
+  },
+  "c8_transport_retry_same_request": {
+    "firstError": "Submit failed (network blip). — your draft is intact. Apply again to retry with ",
+    "requestIds": [
+      "req-muenlk3v-0-3mez"
+    ],
+    "committedName": "Resilient rename"
+  },
+  "PASS": true,
+  "failures": []
+}

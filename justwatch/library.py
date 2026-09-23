@@ -27,6 +27,7 @@ library document itself is the recovery authority.
 from __future__ import annotations
 
 import contextlib
+import copy
 import hashlib
 import json
 import os
@@ -399,6 +400,7 @@ def apply_transaction(
     request_id: str,
     ops: list[dict],
     actor: str = "editor",
+    pre_commit: Any = None,
 ) -> dict:
     """Commit a touched-records transaction atomically; return the receipt.
 
@@ -408,9 +410,23 @@ def apply_transaction(
     receipt is part of the document, so the commit and its acknowledgement
     become visible together.
 
-    Identity: existing channels never change id/seed/kind (a draft that
-    carries a different seed is rejected); created channels get server-assigned
-    ids/seeds recorded in the receipt's ``idMap`` keyed by the client's tempId.
+    Atomicity: every operation is staged on an independent deep candidate of
+    the loaded document. A rejected transaction (validation, revision
+    conflict, or a mid-transaction race) commits ONLY its receipt against the
+    UNTOUCHED current document — definitions and revision never move on a
+    rejection, and the rejected receipt carries the same digest discipline as
+    a committed one so an identical retry replays it exactly.
+
+    Identity: existing channels never change id/seed/kind/provenance
+    (enforced on the FINAL candidate, independent of which opcode produced
+    it); created channels get server-assigned ids/seeds recorded in the
+    receipt's ``idMap`` keyed by the client's tempId.
+
+    ``pre_commit(candidate, original)`` runs INSIDE the lock after the
+    candidate fully validates but BEFORE the document is saved — the durable
+    intent-journal hook (refresh work) so a crash between the intent write
+    and the commit leaves recoverable, never-lost work. A ``pre_commit``
+    exception aborts the whole transaction with nothing written.
     """
     if not isinstance(request_id, str) or not request_id.strip():
         raise LibraryError("requestId is required")
@@ -433,33 +449,40 @@ def apply_transaction(
             return _finish(library, data_dir, request_id, digest, {
                 "requestId": request_id, "status": "rejected",
                 "error": "validation_failed", "errors": errors,
+                "digest": digest,
                 "revision": library["revision"],
             })
         if expected_revision != library["revision"]:
             return _finish(library, data_dir, request_id, digest, {
                 "requestId": request_id, "status": "rejected",
                 "error": "revision_conflict",
+                "digest": digest,
                 "message": f"transaction expects revision {expected_revision}, "
                            f"server has {library['revision']}",
                 "currentRevision": library["revision"],
             })
+        candidate = copy.deepcopy(library)
         try:
-            id_map = _apply_ops(library, ops)
+            id_map = _apply_ops(candidate, ops)
+            _enforce_identity(library, candidate)
+            if pre_commit is not None:
+                pre_commit(candidate, library)
         except _OpError as exc:
             return _finish(library, data_dir, request_id, digest, {
                 "requestId": request_id, "status": "rejected",
                 "error": exc.code, "message": str(exc),
+                "digest": digest,
                 "revision": library["revision"],
             })
-        library["revision"] += 1
+        candidate["revision"] += 1
         receipt = {
             "requestId": request_id, "status": "committed",
-            "revision": library["revision"], "digest": digest,
+            "revision": candidate["revision"], "digest": digest,
             "appliedAt": _now_iso(), "actor": actor,
             "touched": len(ops),
             **({"idMap": id_map} if id_map else {}),
         }
-        return _finish(library, data_dir, request_id, digest, receipt)
+        return _finish(candidate, data_dir, request_id, digest, receipt)
 
 
 class _OpError(Exception):
@@ -579,10 +602,17 @@ def _check_ops(library: dict, ops: list[dict]) -> list[dict]:
                     err(i, "moveTo", "destination_required",
                         f"choose a destination for {members} channel(s)")
         elif kind == "channels.move":
-            if op.get("groupId") not in groups:
-                err(i, "groupId", "unknown_group", "target group must exist")
+            target = op.get("groupId")
+            if target not in groups and target not in new_groups:
+                # A group created by a group.put op EARLIER IN THIS TRANSACTION
+                # is a legal destination (create-group + move-channels is one
+                # atomic Apply).
+                err(i, "groupId", "unknown_group",
+                    "target group must exist (or be created earlier in this "
+                    "same transaction)")
             ids_ = op.get("channelIds")
-            if not isinstance(ids_, list) or not ids_:
+            if not isinstance(ids_, list) or not ids_ \
+                    or any(not isinstance(x, str) for x in ids_):
                 err(i, "channelIds", "bad_channel_ids", "needs a non-empty channel id list")
             else:
                 missing = [cid for cid in ids_ if cid not in by_id]
@@ -590,18 +620,18 @@ def _check_ops(library: dict, ops: list[dict]) -> list[dict]:
                     err(i, "channelIds", "unknown_channel",
                         f"no such channel(s): {', '.join(missing[:5])}"
                         + (f" +{len(missing) - 5}" if len(missing) > 5 else ""))
-    for i, op in enumerate(ops):
-        if isinstance(op, dict) and op.get("op") == "channels.patch":
-            missing = [cid for cid in op.get("channelIds", []) if cid not in by_id]
-            if missing:
-                err(i, "channelIds", "unknown_channel",
-                    f"no such channel(s): {', '.join(missing[:5])}"
-                    + (f" +{len(missing) - 5}" if len(missing) > 5 else ""))
         elif kind == "channels.patch":
             ids_ = op.get("channelIds")
-            patch = op.get("patch")
-            if not isinstance(ids_, list) or not ids_:
+            if not isinstance(ids_, list) or not ids_ \
+                    or any(not isinstance(x, str) for x in ids_):
                 err(i, "channelIds", "bad_channel_ids", "needs a non-empty channel id list")
+            else:
+                missing = [cid for cid in ids_ if cid not in by_id]
+                if missing:
+                    err(i, "channelIds", "unknown_channel",
+                        f"no such channel(s): {', '.join(missing[:5])}"
+                        + (f" +{len(missing) - 5}" if len(missing) > 5 else ""))
+            patch = op.get("patch")
             if not isinstance(patch, dict) or not patch \
                     or any(k not in PATCHABLE_FLAGS for k in patch):
                 err(i, "patch", "bad_patch",
@@ -609,6 +639,16 @@ def _check_ops(library: dict, ops: list[dict]) -> list[dict]:
             elif any(not isinstance(v, bool) for v in patch.values()):
                 err(i, "patch", "bad_patch", "patch values must be booleans")
     return errors
+
+
+#: Modes each namespace can actually serve end-to-end. A stored mode is
+#: honored wherever an engine prepares+serves it; the GUI offers exactly
+#: these, and validation rejects CHANGES outside them (a legacy stored
+#: out-of-namespace mode is grandfathered until deliberately edited — reads
+#: resolve it honestly to what airs).
+NAMESPACE_MODES = {"ch": ("fixed", "explore", "discovery"),
+                   "net": ("fixed", "continuing")}
+_ALL_MODES = ("fixed", "explore", "discovery", "continuing")
 
 
 def _check_channel_draft(i, channel, by_id, groups, new_groups, err, *,
@@ -632,7 +672,6 @@ def _check_channel_draft(i, channel, by_id, groups, new_groups, err, *,
         err(i, "channel.number", "bad_number", f"number must be {lo}-{hi}")
     else:
         holder = next((c for c in by_id.values() if c["number"] == number), None)
-        swapped = op_swap_targets(i, by_id) if False else None
         if holder is not None and holder["id"] != channel.get("id") \
                 and frozenset((channel.get("id"), holder["id"])) not in swap_pairs:
             err(i, "channel.number", "duplicate_number",
@@ -659,16 +698,26 @@ def _check_channel_draft(i, channel, by_id, groups, new_groups, err, *,
         if not isinstance(programming, dict):
             err(i, "channel.programming", "bad_programming", "programming must be a JSON object")
         else:
-            from justwatch.programming import policy as policy_shape
             mode = programming.get("mode")
-            if mode is not None and mode not in ("fixed", "explore", "discovery", "continuing"):
-                err(i, "channel.programming.mode", "bad_mode",
-                    "mode must be fixed/explore/discovery/continuing")
-            policy_shape(programming)  # tolerant clamp; shape errors surface via mode check
+            if mode is not None:
+                legal = NAMESPACE_MODES.get(kind or "net", _ALL_MODES)
+                stored_mode = (by_id.get(channel.get("id")) or {}).get("programming", {}).get("mode") \
+                    if not creating else None
+                if mode not in _ALL_MODES:
+                    err(i, "channel.programming.mode", "bad_mode",
+                        "mode must be fixed/explore/discovery/continuing")
+                elif mode not in legal and mode != stored_mode:
+                    # Only a CHANGE into an unservable mode is rejected; a
+                    # legacy stored mode rides along until deliberately edited.
+                    served = "/".join(legal)
+                    err(i, "channel.programming.mode", "bad_mode_for_kind",
+                        f"a {kind} channel can serve {served} — that mode is "
+                        "prepared and aired end-to-end for this namespace")
 
 
 def _apply_ops(library: dict, ops: list[dict]) -> dict:
-    """Mutate ``library`` in place. Assumes _check_ops passed. Raises _OpError
+    """Mutate the CANDIDATE document in place (never the live store — the
+    caller passes a deep copy). Assumes _check_ops passed. Raises _OpError
     on races impossible to see statically (number taken mid-transaction)."""
     by_id = {c["id"]: c for c in library["channels"]}
     groups = {g["id"]: g for g in library["groups"]}
@@ -764,6 +813,59 @@ def _apply_ops(library: dict, ops: list[dict]) -> dict:
     return id_map
 
 
+def _enforce_identity(original: dict, candidate: dict) -> None:
+    """Final-candidate identity check, independent of which opcode produced
+    the channel: an existing channel's id/seed/kind/provenance are
+    server-owned and byte-stable across EVERY transaction path. This is the
+    belt-and-braces behind per-opcode validation — a bug in any single op's
+    checks cannot smuggle an identity change through."""
+    original_by_id = {c["id"]: c for c in original["channels"]}
+    for channel in candidate["channels"]:
+        stored = original_by_id.get(channel["id"])
+        if stored is None:
+            continue  # created this transaction: identity assigned server-side
+        for field in ("seed", "kind"):
+            if channel.get(field) != stored.get(field):
+                raise _OpError("identity_change",
+                               f"{channel['id']} {field} is server-owned and immutable")
+        if (channel.get("provenance") or {}) != (stored.get("provenance") or {}):
+            raise _OpError("identity_change",
+                           f"{channel['id']} provenance is server-owned and immutable")
+
+
+#: Programming keys preserved verbatim (validated for type only) so a network
+#: channel's continuing policy (newShare, spacing, repeatHours) survives
+#: cosmetic edits — the custom engine's clamped shape never normalizes it.
+_PROGRAMMING_PASS_KEYS = ("spacing", "repeatHours", "spotlight", "spotlightDay",
+                          "spotlightHour", "newShare")
+
+
+def normalize_programming(raw: Any) -> dict | None:
+    """Engine-aware canonical stored form of a channel's programming object.
+
+    ``mode`` is validated against the namespace-legal sets by the draft
+    checks; every other known key passes through with a type check (unknown
+    keys drop, non-int/illegal values drop) so BOTH engines keep their own
+    knobs — a rename through the custom editor must not strip a continuing
+    network's ``newShare``."""
+    if not isinstance(raw, dict):
+        return None
+    out: dict = {"mode": raw.get("mode") if isinstance(raw.get("mode"), str) else "fixed"}
+    for key in _PROGRAMMING_PASS_KEYS:
+        value = raw.get(key)
+        if value is None:
+            continue
+        if key == "newShare":
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                out[key] = value
+        elif key == "spotlight":
+            if value in ("studio", "performer", "none"):
+                out[key] = value
+        elif isinstance(value, int) and not isinstance(value, bool):
+            out[key] = value
+    return out
+
+
 def _finalize_channel(channel: dict, stored: dict | None) -> None:
     """Fill the canonical stored form of a channel (source canonicalization,
     defaults), preserving anything the transaction did not touch."""
@@ -776,12 +878,7 @@ def _finalize_channel(channel: dict, stored: dict | None) -> None:
     channel.setdefault("archived", False)
     channel.setdefault("paused", False)
     channel.setdefault("groupId", "")  # _require_channel would have failed earlier
-    programming = channel.get("programming")
-    if isinstance(programming, dict):
-        from justwatch.programming import policy as policy_shape
-        channel["programming"] = policy_shape(programming)
-    else:
-        channel["programming"] = None
+    channel["programming"] = normalize_programming(channel.get("programming"))
 
 
 def next_free_number(library: dict, kind: str) -> int | None:

@@ -1,0 +1,321 @@
+{
+  "plugin_commit": "25366131d627b8d24fd92a125234508caa78bdbd",
+  "cases": {
+    "rules_playback": {
+      "result": {
+        "preview": {
+          "result": {
+            "signature": "e9ecc3024c1a",
+            "status": "ok",
+            "poolCount": 100,
+            "rotationSize": 50,
+            "rotationComplete": true,
+            "sample": [
+              {
+                "id": "scene-old",
+                "title": "Synthetic",
+                "duration": 600.0,
+                "studio": "S",
+                "date": ""
+              }
+            ],
+            "epoch": "",
+            "resolvedAt": 1790197785410,
+            "note": "poolCount is the source behind the channel; rotationSize is the bounded on-air loop (max 50). The first sample item is not \u201cnow\u201d."
+          }
+        },
+        "lineup": {
+          "exception": "ValueError",
+          "message": "unknown source type: 'criteria'"
+        },
+        "custom_index": {
+          "exception": "ValueError",
+          "message": "unknown source type: 'criteria'"
+        },
+        "continuing_index": {
+          "exception": "ValueError",
+          "message": "unknown source type: 'criteria'"
+        },
+        "distinct_sources_same_legacy_key": true
+      }
+    },
+    "legacy_filter_rule_divergence": {
+      "result": {
+        "accepted_errors": [],
+        "editor_projection": {
+          "tags": {
+            "value": [
+              "5"
+            ],
+            "modifier": "INCLUDES_ALL",
+            "depth": -1
+          },
+          "studios": {
+            "value": [],
+            "modifier": "INCLUDES",
+            "depth": -1,
+            "excludes": [
+              "9"
+            ]
+          },
+          "duration": {
+            "value": 0,
+            "value2": 900,
+            "modifier": "BETWEEN"
+          },
+          "studios_filter": {
+            "scene_count": {
+              "value": 2,
+              "value2": null,
+              "modifier": "LESS_THAN"
+            }
+          }
+        },
+        "playback_projection": {
+          "tags": {
+            "value": [
+              "5"
+            ],
+            "modifier": "INCLUDES_ALL",
+            "depth": -1
+          },
+          "duration": {
+            "value": 0,
+            "value2": 2147483647,
+            "modifier": "BETWEEN"
+          }
+        }
+      }
+    },
+    "patch_identity": {
+      "result": {
+        "receipt": {
+          "requestId": "patch-id",
+          "status": "committed",
+          "revision": 2,
+          "digest": "71a140a7262d1b18",
+          "appliedAt": "2026-09-23T21:09:45Z",
+          "actor": "editor",
+          "touched": 1
+        },
+        "stored_seed": 9876
+      }
+    },
+    "rejected_partial": {
+      "result": {
+        "receipt": {
+          "requestId": "partial",
+          "status": "rejected",
+          "error": "duplicate_number",
+          "message": "channel 500 now held by both net_d56ae5c8 and net_78b78197",
+          "revision": 1
+        },
+        "stored_revision": 1,
+        "stored_paused": true,
+        "retry": {
+          "requestId": "partial",
+          "status": "rejected",
+          "error": "request_replayed_with_different_content",
+          "message": "this requestId was already used with a different payload",
+          "revision": 1
+        }
+      }
+    },
+    "crash_window": {
+      "result": {
+        "first": {
+          "exception": "RuntimeError",
+          "message": "simulated process loss before journal write"
+        },
+        "committed_source": {
+          "type": "tag",
+          "id": "6",
+          "ids": [
+            "6"
+          ]
+        },
+        "receipt": {
+          "requestId": "crash",
+          "status": "committed",
+          "revision": 2,
+          "digest": "31a36e32b4f924e6",
+          "appliedAt": "2026-09-23T21:09:45Z",
+          "actor": "channel-studio",
+          "touched": 1
+        },
+        "retry": {
+          "requestId": "crash",
+          "status": "committed",
+          "revision": 2,
+          "digest": "31a36e32b4f924e6",
+          "appliedAt": "2026-09-23T21:09:45Z",
+          "actor": "channel-studio",
+          "touched": 1,
+          "refresh": {},
+          "note": "Committed. Metadata-only change: no reindex, no playback reset."
+        },
+        "pending_after_retry": []
+      }
+    },
+    "lost_enqueued_work": {
+      "result": {
+        "processed": {
+          "processed": {
+            "ch_00000001": "refreshed"
+          },
+          "remaining": 0
+        },
+        "pending_after_concurrent_enqueue": []
+      }
+    },
+    "lost_health": {
+      "result": {
+        "processed": {
+          "processed": {
+            "ch_00000001": "refreshed",
+            "ch_00000002": "refreshed"
+          },
+          "remaining": 0
+        },
+        "snapshot_channel_ids": [
+          "ch_00000002"
+        ]
+      }
+    },
+    "stale_schedule": {
+      "result": {
+        "current_source": {
+          "type": "tag",
+          "id": "999",
+          "ids": [
+            "999"
+          ]
+        },
+        "schedule": {
+          "status": "ready",
+          "channelId": "ch_00000001",
+          "version": "old-publication",
+          "programs": [
+            {
+              "airingId": "air-old",
+              "startEpochMs": 999000,
+              "endEpochMs": 1599000,
+              "item": {
+                "id": "scene-from-removed-pool",
+                "duration": 600
+              },
+              "block": ""
+            }
+          ],
+          "preparedThrough": 1600000,
+          "sourceTotal": 1,
+          "warnings": [],
+          "generatedAt": 999000,
+          "serverNow": 1790197785426
+        }
+      }
+    },
+    "mode_disagreement": {
+      "result": {
+        "authored_mode": "fixed",
+        "enhanced_mode": "fixed",
+        "legacy_mode": "continuing",
+        "schedule": {
+          "status": "preparing",
+          "programs": []
+        },
+        "stored_policy_after_rename": {
+          "mode": "fixed",
+          "spacing": 0,
+          "repeatHours": 0,
+          "spotlight": "none",
+          "spotlightDay": 5,
+          "spotlightHour": 20
+        }
+      }
+    },
+    "stale_worker_policy": {
+      "result": {
+        "outcome": "ready",
+        "latest_sort": "newest",
+        "published_sort": "shuffle"
+      }
+    },
+    "preview_truth": {
+      "result": {
+        "preview": {
+          "signature": "d8825a336e30",
+          "status": "ok",
+          "poolCount": 100,
+          "rotationSize": 50,
+          "rotationComplete": true,
+          "sample": [],
+          "epoch": "",
+          "resolvedAt": 1790197785431,
+          "note": "poolCount is the source behind the channel; rotationSize is the bounded on-air loop (max 50). The first sample item is not \u201cnow\u201d."
+        },
+        "query_filter": {
+          "page": 1,
+          "per_page": 50,
+          "sort": "random_0",
+          "direction": "DESC"
+        }
+      }
+    },
+    "migration_drift": {
+      "result": {
+        "dry_exit": 0,
+        "apply_exit": 0,
+        "reported_drift": true,
+        "library_created_despite_drift": true
+      }
+    },
+    "rollback_overlay": {
+      "result": {
+        "exit": 0,
+        "newer_publication_survives": true,
+        "previously_absent_rollout_survives": true,
+        "pending_journal_survives": true
+      }
+    },
+    "validation": {
+      "result": {
+        "missing_entity_validation": {
+          "valid": true,
+          "errors": [],
+          "effects": [
+            {
+              "op": "channel.put",
+              "channelId": "ch_00000001",
+              "kind": "membership",
+              "reindex": true
+            }
+          ],
+          "revision": 1
+        },
+        "validation_stash_queries": 0,
+        "mixed_id_list_errors": [],
+        "invalid_date_errors": [],
+        "dynamic_max_only": {
+          "studios_filter": {
+            "scene_count": {
+              "value": 2,
+              "value2": null,
+              "modifier": "LESS_THAN"
+            }
+          }
+        },
+        "dynamic_min_and_max": {
+          "studios_filter": {
+            "scene_count": {
+              "value": 1,
+              "value2": 2,
+              "modifier": "BETWEEN"
+            }
+          }
+        },
+        "dynamic_epoch": "2026-09-23"
+      }
+    }
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "pluginCommit": "25366131d627b8d24fd92a125234508caa78bdbd",
+  "tvCommit": "46c23ad3427fc3f000445716c07f23c7701951fc",
+  "python": {
+    "command": "python3 -m pytest tests/ -q",
+    "passed": 329,
+    "seconds": 41.73
+  },
+  "tv": {
+    "command": "./gradlew :app:testDebugUnitTest --tests '*ChannelLibraryTest' --tests '*JustWatchPluginClientTest' --tests '*JustWatchRecoveryTest' --tests '*PublishedScheduleTest' --console=plain",
+    "suites": [
+      {
+        "name": "com.github.damontecres.stashapp.features.justwatch.ChannelLibraryTest",
+        "tests": "20",
+        "failures": "0",
+        "errors": "0"
+      },
+      {
+        "name": "com.github.damontecres.stashapp.features.justwatch.JustWatchPluginClientTest",
+        "tests": "9",
+        "failures": "0",
+        "errors": "0"
+      },
+      {
+        "name": "com.github.damontecres.stashapp.features.justwatch.PublishedScheduleTest",
+        "tests": "9",
+        "failures": "0",
+        "errors": "0"
+      },
+      {
+        "name": "com.github.damontecres.stashapp.ui.pages.justwatch.JustWatchRecoveryTest",
+        "tests": "6",
+        "failures": "0",
+        "errors": "0"
+      }
+    ],
+    "build": "successful"
+  },
+  "independentPythonProbes": 14,
+  "independentBrowserProbes": 5,
+  "productFilesChanged": false,
+  "liveDataChanged": false,
+  "deviceVerification": false
+}

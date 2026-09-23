@@ -50,7 +50,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from justwatch import continuing, library, networks  # noqa: E402
+from justwatch import catalog, continuing, library, networks  # noqa: E402
 from tools.import_channels import import_csv, revision as networks_revision  # noqa: E402
 
 PROPOSAL_CSV = ROOT / "data/proposed_channels_final.csv"
@@ -59,6 +59,17 @@ MIGRATION_MAP = ROOT / "analysis/just-watch-final/migration_map.csv"
 SEED_NAME = "just-watch-v4-final"
 
 EXPECTED = {"keep": 292, "renumber_or_new": 221, "vacate": 282}
+
+#: The managed restore scope: everything the migration/upgrade owns. A
+#: restore recreates EXACTLY this state (recorded absences included) and
+#: leaves unrelated operator data alone.
+MANAGED_FILES = ("catalog.json", "networks.json", "continuing-networks.json",
+                 "channel-library.json", "channel-library-pending.json")
+MANAGED_DIRS = ("programming", "snapshots", "channel-library-history")
+#: The compiled artifact may live OUTSIDE the data dir (the plugin install);
+#: its ORIGINAL path is recorded per backup and restored there.
+COMPILED_ARTIFACT = networks.PATH
+RESTORE_JOURNAL = ".restore-journal.json"
 
 
 def log(message: str) -> None:
@@ -69,6 +80,144 @@ def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     h.update(path.read_bytes())
     return h.hexdigest()
+
+
+def _tree_manifest(base: Path, rel: str) -> dict:
+    entries = []
+    for p in sorted((base / rel).rglob("*")):
+        if p.is_file():
+            entries.append({"path": str(p.relative_to(base / rel)),
+                            "sha256": sha256_file(p)})
+    return {"kind": "tree", "name": rel, "files": entries}
+
+
+def make_backup(data_dir: Path, backup_root: Path) -> Path:
+    """A complete, hash-verified snapshot of the managed scope — including
+    recorded ABSENCES and the compiled artifact when it lives outside the
+    data dir — in a collision-safe directory."""
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    target = backup_root / f"migration-backup-{stamp}"
+    suffix = 0
+    while target.exists():
+        suffix += 1
+        target = backup_root / f"migration-backup-{stamp}-{suffix}"
+    target.mkdir(parents=True)
+    manifest = {"createdAt": library._now_iso(), "dataDir": str(data_dir), "files": []}
+    for name in MANAGED_FILES:
+        src = data_dir / name
+        if src.is_file():
+            shutil.copy2(src, target / name)
+            manifest["files"].append({"name": name, "kind": "file",
+                                      "sha256": sha256_file(src)})
+        else:
+            manifest["files"].append({"name": name, "kind": "file", "absent": True})
+    for rel in MANAGED_DIRS:
+        src = data_dir / rel
+        if src.is_dir():
+            shutil.copytree(src, target / rel)
+            manifest["files"].append(_tree_manifest(target, rel))
+        else:
+            manifest["files"].append({"name": rel, "kind": "tree", "absent": True})
+    external = COMPILED_ARTIFACT.resolve()
+    in_data = (data_dir / "networks.json").resolve()
+    if external.is_file() and external != in_data:
+        shutil.copy2(external, target / "compiled-networks.json")
+        manifest["files"].append({"name": "compiled-networks.json", "kind": "external",
+                                  "originalPath": str(external),
+                                  "sha256": sha256_file(external)})
+    (target / "manifest.json").write_text(
+        json.dumps(manifest, indent=2), encoding="utf-8")
+    log(f"backup at {target} ({len(manifest['files'])} managed entries)")
+    return target
+
+
+def _verify_backup(backup: Path) -> dict:
+    """Fail closed on a tampered/incomplete backup: every recorded hash must
+    match before restore touches anything."""
+    manifest = json.loads((backup / "manifest.json").read_text(encoding="utf-8"))
+    for entry in manifest.get("files", []):
+        if entry.get("absent"):
+            continue
+        if entry["kind"] == "tree":
+            base = backup / entry["name"]
+            listed = {f["path"] for f in entry.get("files", [])}
+            for f in entry.get("files", []):
+                p = base / f["path"]
+                if not p.is_file() or sha256_file(p) != f["sha256"]:
+                    raise SystemExit(f"backup tampered: {entry['name']}/{f['path']}")
+            actual = {str(p.relative_to(base)) for p in base.rglob("*") if p.is_file()}
+            if actual != listed:
+                raise SystemExit(f"backup tampered: {entry['name']} file set drift")
+        else:
+            p = backup / entry["name"]
+            if not p.is_file() or sha256_file(p) != entry["sha256"]:
+                raise SystemExit(f"backup tampered: {entry['name']}")
+    return manifest
+
+
+def restore(data_dir: Path, backup: Path) -> int:
+    """EXACT restore of the managed scope: recorded files return (hash-
+    verified), recorded ABSENCES are recreated (post-backup artifacts are
+    removed), managed trees are REPLACED (not merged), and unrelated operator
+    data is untouched. Staged + journaled: an interrupted restore is
+    resumable by re-running the same command."""
+    manifest = _verify_backup(backup)
+    steps: list[dict] = []
+    for entry in manifest["files"]:
+        name = entry["name"]
+        if entry.get("kind") == "external":
+            steps.append({"op": "external", "name": name,
+                          "dest": entry["originalPath"], "absent": False})
+            continue
+        steps.append({"op": entry["kind"], "name": name, "absent": bool(entry.get("absent"))})
+    journal_path = data_dir / RESTORE_JOURNAL
+    done: set[str] = set()
+    if journal_path.exists():
+        try:
+            done = set(json.loads(journal_path.read_text(encoding="utf-8")).get("done", []))
+        except (OSError, json.JSONDecodeError):
+            done = set()
+    with library.library_lock(data_dir):
+        with catalog.catalog_lock(data_dir):
+            staged = data_dir / ".restore-staging"
+            if staged.exists():
+                shutil.rmtree(staged)
+            staged.mkdir()
+            try:
+                for step in steps:
+                    if step["name"] in done:
+                        continue
+                    name = step["name"]
+                    if step["op"] == "external":
+                        dest = Path(step["dest"])
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(backup / name, dest)
+                    elif step.get("absent"):
+                        victim = data_dir / name
+                        if victim.is_dir():
+                            shutil.rmtree(victim)
+                        elif victim.exists():
+                            victim.unlink()
+                    elif step["op"] == "tree":
+                        # replace the WHOLE managed tree: never merge newer
+                        # publications/snapshots over the restored state
+                        stage = staged / name
+                        shutil.copytree(backup / name, stage)
+                        victim = data_dir / name
+                        if victim.is_dir():
+                            shutil.rmtree(victim)
+                        shutil.move(str(stage), str(victim))
+                    else:
+                        shutil.copy2(backup / name, data_dir / name)
+                    done.add(name)
+                    journal_path.write_text(
+                        json.dumps({"done": sorted(done),
+                                    "backup": str(backup)}), encoding="utf-8")
+            finally:
+                shutil.rmtree(staged, ignore_errors=True)
+                journal_path.unlink(missing_ok=True)
+    log(f"restored {len(done)} managed entries exactly from {backup}")
+    return 0
 
 
 def compile_seed(staging: Path) -> dict:
@@ -115,8 +264,9 @@ def read_migration_map() -> dict[str, dict]:
 
 def build_target(data_dir: Path, seed: dict) -> tuple[dict, dict]:
     """The target library document + a reconciliation report."""
-    catalog_doc = json.loads((data_dir / "catalog.json").read_text(encoding="utf-8")) \
-        if (data_dir / "catalog.json").exists() else {"channels": []}
+    # Strict loader: a corrupt/future-schema catalog is a hard stop, never a
+    # silently-empty migration input (audit C10).
+    catalog_doc = catalog.load(data_dir)
     rollout = continuing.try_load_rollout(data_dir)
     rollout_ids = {str(x) for x in (rollout.get("networkIds") or [])}
 
@@ -192,16 +342,18 @@ def build_target(data_dir: Path, seed: dict) -> tuple[dict, dict]:
         else:
             report["drift"].append(f"unknown migration-map disposition {disposition!r}")
     # Any current deployment network NOT in the seed and NOT in the map is
-    # drift worth preserving loudly.
+    # drift worth preserving loudly. Read through the strict loaders.
     known_map_numbers = {int(r["current_number"]) for r in map_rows}
     deployment_networks = data_dir / "networks.json"
     if deployment_networks.exists():
-        live = json.loads(deployment_networks.read_text(encoding="utf-8"))
+        live = networks.load(deployment_networks)
     elif networks.PATH.exists():
         live = networks.load()
     else:
         live = {"channels": []}
     map_by_number = {int(r["current_number"]): r for r in map_rows}
+    live_by_number = {row["number"]: row for row in live["channels"]}
+    seed_by_number = {row["number"]: row for row in seed["channels"]}
     for row in live["channels"]:
         entry = map_by_number.get(row["number"])
         if entry is None:
@@ -212,6 +364,17 @@ def build_target(data_dir: Path, seed: dict) -> tuple[dict, dict]:
             report["drift"].append(
                 f"map expects #{row['number']} to be kept as {entry['current_name']!r} "
                 f"but the deployment has {row['name']!r}")
+        elif entry["disposition"] == "keep":
+            # Identity reconciliation for retained rows: the deployment's
+            # channel at a kept number must BE the seed identity (same id and
+            # seed), not merely share its display name (audit C10).
+            final = seed_by_number.get(row["number"])
+            if final is not None and (final["id"] != row["id"]
+                                      or final["seed"] != row.get("seed")):
+                report["drift"].append(
+                    f"#{row['number']} is marked kept but its identity changed: "
+                    f"deployment {row['id']}/{row.get('seed')} != seed "
+                    f"{final['id']}/{final['seed']}")
     for entry in sorted(rollout_ids):
         seed_ids = {c["id"] for c in seed["channels"]}
         if entry and entry not in seed_ids:
@@ -243,26 +406,10 @@ def build_target(data_dir: Path, seed: dict) -> tuple[dict, dict]:
     return doc, report
 
 
-def make_backup(data_dir: Path, backup_root: Path) -> Path:
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    target = backup_root / f"migration-backup-{stamp}"
-    target.mkdir(parents=True, exist_ok=True)
-    manifest = {"createdAt": library._now_iso(), "files": []}
-    for name in ("catalog.json", "networks.json", "continuing-networks.json",
-                 "channel-library.json"):
-        src = data_dir / name
-        if src.exists():
-            shutil.copy2(src, target / name)
-            manifest["files"].append({"name": name, "sha256": sha256_file(src)})
-    for sub in ("programming", "snapshots"):
-        src = data_dir / sub
-        if src.is_dir():
-            shutil.copytree(src, target / sub, dirs_exist_ok=True)
-            manifest["files"].append({"name": f"{sub}/ (tree)"})
-    (target / "manifest.json").write_text(
-        json.dumps(manifest, indent=2), encoding="utf-8")
-    log(f"backup at {target} ({len(manifest['files'])} entries)")
-    return target
+def _read_legacy_catalog(data_dir: Path) -> dict:
+    """The legacy catalog through its STRICT loader — a corrupt/future-schema
+    file is a hard stop, never a silent empty migration input."""
+    return catalog.load(data_dir)
 
 
 def main() -> int:
@@ -283,21 +430,24 @@ def main() -> int:
 
     if args.restore:
         backup = args.restore.resolve()
-        manifest = json.loads((backup / "manifest.json").read_text(encoding="utf-8"))
-        for entry in manifest["files"]:
-            name = entry["name"]
-            src = backup / name
-            if src.is_file() and not name.endswith("(tree)"):
-                shutil.copy2(src, data_dir / Path(name).name)
-        for sub in ("programming", "snapshots"):
-            if (backup / sub).is_dir():
-                shutil.copytree(backup / sub, data_dir / sub, dirs_exist_ok=True)
-        library_file = data_dir / "channel-library.json"
-        if library_file.exists() and not any(
-                f["name"] == "channel-library.json" for f in manifest["files"]):
-            library_file.unlink()
-        log(f"restored {len(manifest['files'])} entries from {backup}")
-        return 0
+        if not (backup / "manifest.json").is_file():
+            raise SystemExit(f"{backup} is not a migration backup (no manifest)")
+        return restore(data_dir, backup)
+
+    # An already-migrated deployment is a NO-OP before anything else: a
+    # repeated seed migration can never recompile away owner edits, and
+    # post-migration drift in the legacy inputs is irrelevant by design.
+    if library.exists(data_dir):
+        current = library.load(data_dir)
+        marker = current.get("migration") or {}
+        if marker.get("seedCatalog") == SEED_NAME:
+            log(f"migration marker present (libraryId {current['libraryId']}, "
+                f"revision {current['revision']}): NO-OP. Owner edits are "
+                "preserved; use --restore to roll back deliberately.")
+            return 0
+        if args.apply:
+            raise SystemExit("a channel library exists without a v4-final marker; "
+                             "refusing to overwrite an unrecognized library")
 
     seed = compile_seed(args.staging_dir)
     doc, report = build_target(data_dir, seed)
@@ -315,29 +465,42 @@ def main() -> int:
         retired = doc["migration"]["retiredRolloutIds"]
         if retired:
             log(f"retired rollout ids skipped explicitly: {retired}")
+        # FAIL CLOSED: drift means nonzero exit for dry-run AND apply, with
+        # no authoritative state written (audit C10 — the old tool reported
+        # drift and committed anyway).
+        log("drift detected: refusing to migrate. Reconcile the deployment "
+            "(or re-run against the data it was recorded from); nothing was written.")
+        return 2
 
     if args.dry_run or not args.apply:
         log("dry run: nothing written" if args.dry_run
             else "no action requested (pass --apply or --dry-run)")
-        return 0 if not report["drift"] or args.dry_run else 2
+        return 0
 
     if library.exists(data_dir):
-        current = library.load(data_dir)
-        marker = current.get("migration") or {}
-        if marker.get("seedCatalog") == SEED_NAME:
-            log(f"migration marker present (libraryId {current['libraryId']}, "
-                f"revision {current['revision']}): NO-OP. Owner edits are preserved; "
-                "use --restore to roll back deliberately.")
-            return 0
         raise SystemExit("a channel library exists without a v4-final marker; "
                          "refusing to overwrite an unrecognized library")
 
     backup_root = args.backup_root or data_dir.parent
     make_backup(data_dir, backup_root)
+    # Legacy inputs are digested before the commit and re-checked under the
+    # lock so a concurrent SaveCatalog/scheduler write between snapshot and
+    # commit cannot be silently lost (audit C10).
+    legacy_digests = {
+        name: (sha256_file(data_dir / name) if (data_dir / name).is_file() else None)
+        for name in ("catalog.json", "networks.json", "continuing-networks.json")
+    }
     with library.library_lock(data_dir):
         if library.exists(data_dir):  # re-check under the lock
             log("library appeared concurrently; aborting")
             return 1
+        for name, digest in legacy_digests.items():
+            src = data_dir / name
+            current_digest = sha256_file(src) if src.is_file() else None
+            if current_digest != digest:
+                log(f"legacy input {name} changed during migration; aborting "
+                    "with nothing written")
+                return 1
         library.save(data_dir, doc)
     log(f"committed library {doc['libraryId']} revision 1 "
         f"({len(doc['channels'])} channels). Legacy files remain as backed-up "

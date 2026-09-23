@@ -1,0 +1,34 @@
+{
+  "production_boot": {
+    "shim": false,
+    "body": "Channel Studio\nThe channel library is not available on this deployment: draftsRef.current.count is not a function",
+    "pageErrors": []
+  },
+  "interaction_probe_notice": "Remaining probes add only count() to the in-memory draft-store copy; product files unchanged.",
+  "group_rename_without_apply": {
+    "clickedApply": false,
+    "taskCount": 1,
+    "storedGroupName": "Renamed on blur",
+    "pageErrors": []
+  },
+  "stale_draft_overwrites_external_edit": {
+    "externallySavedColor": "#abcdef",
+    "finalStoredColor": "#112233",
+    "expectedRevision": 2,
+    "taskCount": 1,
+    "finalName": "My local rename",
+    "pageErrors": []
+  },
+  "newer_inflight_edit_lost_after_navigation": {
+    "typedNewerDraft": "NEWER UNSENT DRAFT",
+    "sessionDraftWhileApplying": "Submitted snapshot",
+    "editorAfterReturning": "Submitted snapshot",
+    "storedName": "Submitted snapshot",
+    "pageErrors": []
+  },
+  "newer_inflight_edit_lost_even_without_leaving_until_receipt": {
+    "editorAfterReceipt": "NEWER UNSENT DRAFT",
+    "editorAfterNavigation": "Submitted snapshot",
+    "pageErrors": []
+  }
+}

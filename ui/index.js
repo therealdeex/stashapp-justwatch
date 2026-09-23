@@ -388,15 +388,56 @@
     return JSON.stringify(canonicalSource(a)) === JSON.stringify(canonicalSource(b));
   }
 
+  // Three-way rebase of a local draft against fresh server state (audit C8):
+  //   base  = the acknowledged definition the draft was created from
+  //   fresh = the server's current record
+  //   draft = the local working draft
+  // Field-level: untouched locally -> take the server's value (an external
+  // edit to another field merges in silently); touched locally AND unchanged
+  // on the server -> keep the local edit; changed on BOTH sides -> keep the
+  // local value and name the field as a conflict the owner must review.
+  // source and programming compare canonically (absent == empty).
+  function rebaseDraft(base, fresh, draft) {
+    if (!base || !fresh || !draft) return { draft, conflicts: [] };
+    if (deepEqual(base, fresh)) return { draft, conflicts: [] };
+    const conflicts = [];
+    const keys = new Set([...Object.keys(base), ...Object.keys(fresh), ...Object.keys(draft)]);
+    const out = clone(draft);
+    const fieldEqual = (a, b, k) => {
+      if (k === "source") return sourcesEquivalent(a && a[k], b && b[k]);
+      if (k === "programming") {
+        return JSON.stringify(canonicalProgramming(a && a[k])) === JSON.stringify(canonicalProgramming(b && b[k]));
+      }
+      return deepEqual(a ? a[k] : undefined, b ? b[k] : undefined);
+    };
+    for (const k of keys) {
+      if (["id", "kind", "seed", "provenance"].includes(k)) {
+        // server-owned identity: always the fresh value
+        out[k] = fresh[k];
+        continue;
+      }
+      const localTouched = !fieldEqual(draft, base, k);
+      const serverChanged = !fieldEqual(fresh, base, k);
+      if (localTouched && serverChanged) {
+        conflicts.push(k);
+        out[k] = draft[k]; // keep the local choice; surface it for review
+      } else if (!localTouched) {
+        out[k] = clone(fresh[k]);
+      }
+    }
+    return { draft: out, conflicts };
+  }
+
   // Mirrors the server's programming policy clamp so a field the user touched
-  // and reverted compares clean against a shorter stored policy.
+  // and reverted compares clean against a shorter stored policy. newShare
+  // (continuing networks) passes through — the server preserves it losslessly.
   function canonicalProgramming(raw) {
     const p = raw && typeof raw === "object" ? raw : {};
     const int = (key, def, lo, hi) => {
       const v = p[key] != null ? p[key] : def;
       return typeof v === "number" ? Math.max(lo, Math.min(hi, v)) : def;
     };
-    return {
+    const out = {
       mode: ["fixed", "explore", "discovery", "continuing"].includes(p.mode) ? p.mode : "fixed",
       spacing: int("spacing", 0, 0, 10),
       repeatHours: int("repeatHours", 0, 0, 168),
@@ -404,6 +445,8 @@
       spotlightDay: int("spotlightDay", 5, 0, 6),
       spotlightHour: int("spotlightHour", 20, 0, 23),
     };
+    if (typeof p.newShare === "number") out.newShare = p.newShare;
+    return out;
   }
 
   function fullProgramming(p) {
@@ -576,42 +619,92 @@
   }
 
   // ------------------------------------------------------------------
-  // Drafts: in-memory + sessionStorage, versioned, never applied
+  // Drafts: a genuine in-memory map (the source of truth) mirrored to
+  // sessionStorage when it is available. Versioned, never applied
   // automatically. Keyed jw-studio-drafts-v1:<libraryId>.
+  //
+  // Entry shape (v1): { v: 1, draft, base, pending, savedAt }
+  //   draft   — the current editable draft (typed even while a previous
+  //             snapshot is applying; audit C8)
+  //   base    — the LAST ACKNOWLEDGED server definition this draft was
+  //             created from (null for temp channels). The three-way rebase
+  //             (base vs fresh server vs draft) decides what a reload or an
+  //             unrelated commit may merge — never a borrowed global revision.
+  //   pending — an immutable submitted-but-unresolved Apply
+  //             { requestId, expected, snapshot } that survives
+  //             navigation/remount/reload (audit C8/C9).
   // ------------------------------------------------------------------
 
   function makeDraftStore(libraryId) {
     const key = "jw-studio-drafts-v1:" + libraryId;
     let listeners = [];
+    let memory = null; // Map id -> entry; storage failures never lose drafts
     const emit = () => listeners.slice().forEach((fn) => { try { fn(); } catch (e) { /* noop */ } });
     function readAll() {
+      if (memory) return Object.fromEntries(memory);
+      let seeded = {};
       try {
         const parsed = JSON.parse(sessionStorage.getItem(key) || "{}");
-        return parsed && typeof parsed === "object" ? parsed : {};
-      } catch (e) { return {}; }
+        if (parsed && typeof parsed === "object") seeded = parsed;
+      } catch (e) { seeded = {}; }
+      memory = new Map(Object.entries(seeded));
+      return Object.fromEntries(memory);
     }
     function writeAll(all) {
-      try { sessionStorage.setItem(key, JSON.stringify(all)); } catch (e) { /* full storage: drafts stay in memory */ }
+      memory = new Map(Object.entries(all));
+      try { sessionStorage.setItem(key, JSON.stringify(all)); } catch (e) { /* full/private storage: the memory map IS the fallback */ }
     }
     return {
       get(id) {
         const entry = readAll()[id];
         return entry && entry.v === 1 && entry.draft ? entry : null;
       },
-      put(id, draft) {
+      put(id, draft, extra) {
         const all = readAll();
-        all[id] = { v: 1, draft, savedAt: Date.now() };
+        const prev = all[id] || {};
+        all[id] = Object.assign({ v: 1, savedAt: Date.now() }, prev,
+                                { draft }, extra || {});
         writeAll(all);
         emit();
+      },
+      setExtras(id, extra) {
+        const all = readAll();
+        if (all[id] != null) {
+          all[id] = Object.assign({}, all[id], extra);
+          writeAll(all);
+          emit();
+        }
       },
       drop(id) {
         const all = readAll();
         if (all[id] != null) { delete all[id]; writeAll(all); emit(); }
       },
       ids() { return Object.keys(readAll()); },
-      clear() { try { sessionStorage.removeItem(key); } catch (e) { /* noop */ } emit(); },
+      count() { return Object.keys(readAll()).length; },
+      clear() {
+        memory = new Map();
+        try { sessionStorage.removeItem(key); } catch (e) { /* noop */ }
+        emit();
+      },
       subscribe(fn) { listeners.push(fn); return () => { listeners = listeners.filter((f) => f !== fn); }; },
     };
+  }
+
+  // Pending NON-editor submits (bulk/groups/patches): the request identity
+  // must survive a reload so an unknown outcome resolves to exactly one
+  // commit — never a duplicated resubmission under a fresh id (audit C9).
+  function opsPendingKey(libraryId) { return "jw-studio-ops-pending-v1:" + libraryId; }
+  function readOpsPending(libraryId) {
+    try {
+      const parsed = JSON.parse(sessionStorage.getItem(opsPendingKey(libraryId)) || "null");
+      return parsed && typeof parsed === "object" ? parsed : null;
+    } catch (e) { return null; }
+  }
+  function writeOpsPending(libraryId, entry) {
+    try { sessionStorage.setItem(opsPendingKey(libraryId), JSON.stringify(entry)); } catch (e) { /* memory-only session */ }
+  }
+  function clearOpsPending(libraryId) {
+    try { sessionStorage.removeItem(opsPendingKey(libraryId)); } catch (e) { /* noop */ }
   }
 
   // ------------------------------------------------------------------
@@ -877,122 +970,180 @@
   }
 
   // ------------------------------------------------------------------
-  // Groups manager (each change is its own Apply)
+  // Groups manager — a true staged draft: renames/reorders/creates/deletes
+  // stage locally; ONE Apply commits them as a single transaction (audit C9:
+  // the old dialog wrote on blur, violating explicit Apply).
   // ------------------------------------------------------------------
 
-  function GroupsManagerDialog({ lib, drafts, onClose, submitOps }) {
-    const [busy, setBusy] = useState(false);
+  function GroupsManagerDialog({ lib, channels, drafts, onClose, submitOps, toast, refreshLibrary }) {
+    const server = useMemo(
+      () => (lib.groups || []).slice().sort((a, b) => a.position - b.position),
+      [lib]);
+    const [rows, setRows] = useState(() => server.map((g) => ({ ...g })));
+    const [deletes, setDeletes] = useState({}); // gid -> destination group id
     const [newName, setNewName] = useState("");
-    const [confirmDelete, setConfirmDelete] = useState(null); // {group, moveTo}
-    const groups = (lib.groups || []).slice().sort((a, b) => a.position - b.position);
-    const memberCount = (gid) => (lib.channels || []).filter((c) => c.groupId === gid).length;
+    const [busy, setBusy] = useState(false);
+    const memberCount = useCallback((gid) =>
+      (channels || []).filter((c) => c.groupId === gid).length, [channels]);
 
-    const run = async (ops, label) => {
-      if (busy) return;
+    const dirty = useMemo(() => {
+      const strip = (list) => list.map((g) => [g.id, g.name.trim(), g.position]);
+      return JSON.stringify(strip(rows)) !== JSON.stringify(strip(server))
+        || Object.keys(deletes).length > 0;
+    }, [rows, server, deletes]);
+
+    const rename = (gid, name) => {
+      const trimmed = String(name || "").trim();
+      setRows((cur) => cur.map((g) => (g.id === gid ? { ...g, name: trimmed } : g)));
+    };
+    const move = (gid, dir) => {
+      setRows((cur) => {
+        const i = cur.findIndex((x) => x.id === gid);
+        const j = i + dir;
+        if (i < 0 || j < 0 || j >= cur.length) return cur;
+        const next = cur.slice();
+        const tmp = next[i];
+        next[i] = next[j];
+        next[j] = tmp;
+        return next.map((g, idx) => ({ ...g, position: idx + 1 }));
+      });
+    };
+    const create = () => {
+      const trimmed = newName.trim();
+      if (!trimmed) return;
+      setRows((cur) => cur.concat({
+        id: newGroupId(), name: trimmed, position: cur.length + 1,
+        legacySection: null, staged: true,
+      }));
+      setNewName("");
+    };
+    const stageDelete = (gid) => {
+      const others = rows.filter((x) => x.id !== gid && !deletes[x.id]);
+      setDeletes((cur) => ({ ...cur, [gid]: others[0] ? others[0].id : null }));
+    };
+    const undoDelete = (gid) => {
+      setDeletes((cur) => {
+        const next = { ...cur };
+        delete next[gid];
+        return next;
+      });
+    };
+
+    const apply = async () => {
+      if (!dirty || busy) return;
+      const clash = new Map();
+      for (const g of rows) {
+        const key = g.name.trim().toLowerCase();
+        if (clash.has(key)) {
+          toast("Two groups cannot share the name “" + g.name.trim() + "”.", "err");
+          return;
+        }
+        clash.set(key, g.id);
+      }
+      const ops = [];
+      const byId = new Map(server.map((g) => [g.id, g]));
+      rows.forEach((g, idx) => {
+        const prior = byId.get(g.id);
+        const position = idx + 1;
+        if (!prior || prior.name !== g.name.trim() || prior.position !== position) {
+          ops.push({ op: "group.put", group: { id: g.id, name: g.name.trim(), position } });
+        }
+      });
+      for (const [gid, moveTo] of Object.entries(deletes)) {
+        const op = { op: "group.delete", id: gid };
+        if (memberCount(gid) && moveTo) op.moveTo = moveTo;
+        ops.push(op);
+      }
+      if (!ops.length) { onClose(); return; }
       setBusy(true);
       try {
-        await submitOps(ops, { label });
+        const receipt = await submitOps(ops, { label: "Groups" });
+        if (receipt.status === "committed") {
+          // keep stored channel drafts consistent: their group moved/deleted
+          if (drafts && Object.keys(deletes).length) {
+            for (const [gid, moveTo] of Object.entries(deletes)) {
+              for (const c of channels || []) {
+                if (c.groupId !== gid) continue;
+                const entry = drafts.get(c.id);
+                if (entry && moveTo) drafts.put(c.id, Object.assign({}, entry.draft, { groupId: moveTo }));
+              }
+            }
+          }
+          await refreshLibrary();
+          onClose();
+        }
       } finally {
         setBusy(false);
       }
     };
 
-    const rename = (g, name) => {
-      const trimmed = String(name || "").trim();
-      if (!trimmed || trimmed === g.name) return;
-      void run([{ op: "group.put", group: { id: g.id, name: trimmed, position: g.position } }], "Group renamed");
-    };
-
-    const move = (g, dir) => {
-      const i = groups.findIndex((x) => x.id === g.id);
-      const j = i + dir;
-      if (i < 0 || j < 0 || j >= groups.length) return;
-      const ops = groups.map((x, idx) => {
-        const pos = idx === i ? j + 1 : idx === j ? i + 1 : idx + 1;
-        return { op: "group.put", group: { id: x.id, name: x.name, position: pos } };
-      });
-      void run(ops, "Groups reordered");
-    };
-
-    const create = () => {
-      const trimmed = newName.trim();
-      if (!trimmed) return;
-      const maxPos = Math.max(0, ...groups.map((g) => g.position));
+    const discard = () => {
+      setRows(server.map((g) => ({ ...g })));
+      setDeletes({});
       setNewName("");
-      void run([{ op: "group.put", group: { id: newGroupId(), name: trimmed, position: maxPos + 1 } }], "Group created");
     };
-
-    if (confirmDelete) {
-      const g = confirmDelete.group;
-      const members = memberCount(g.id);
-      const others = groups.filter((x) => x.id !== g.id);
-      return h(Dialog, {
-        title: "Delete “" + g.name + "”", onClose: () => setConfirmDelete(null),
-        footer: [
-          h("button", { key: "c", className: "jw-btn", onClick: () => setConfirmDelete(null) }, "Cancel"),
-          h("button", {
-            key: "d", className: "jw-btn jw-btn-danger", disabled: busy,
-            onClick: () => {
-              const ops = [{ op: "group.delete", id: g.id }];
-              if (members) ops[0].moveTo = confirmDelete.moveTo;
-              setConfirmDelete(null);
-              // keep stored drafts consistent: their group moved too
-              if (drafts && members) {
-                for (const c of lib.channels || []) {
-                  if (c.groupId !== g.id) continue;
-                  const entry = drafts.get(c.id);
-                  if (entry) drafts.put(c.id, Object.assign({}, entry.draft, { groupId: confirmDelete.moveTo }));
-                }
-              }
-              void run(ops, "Group deleted");
-            },
-          }, "Delete group"),
-        ],
-      },
-        h("p", { className: "jw-confirm-message" },
-          members
-            ? members + (members === 1 ? " channel moves" : " channels move") + " to another group. One Apply."
-            : "The group is empty. One Apply."),
-        h("div", { className: "jw-field" },
-          h("label", { className: "jw-field-label", htmlFor: "jw-group-dest" }, "Destination group"),
-          h("select", {
-            id: "jw-group-dest", className: "jw-input", disabled: !members,
-            value: confirmDelete.moveTo, onChange: (e) => setConfirmDelete({ group: g, moveTo: e.target.value }),
-          }, others.map((x) => h("option", { key: x.id, value: x.id }, x.name))),
-        ),
-      );
-    }
 
     return h(Dialog, {
       title: "Groups", onClose,
-      footer: [h("button", { key: "done", className: "jw-btn jw-btn-primary", onClick: onClose }, "Done")],
+      footer: [
+        h("button", { key: "d", className: "jw-btn", onClick: discard, disabled: busy || !dirty }, "Discard"),
+        h("button", {
+          key: "a", className: "jw-btn jw-btn-primary", onClick: () => void apply(),
+          disabled: busy || !dirty,
+        }, busy ? "Applying…" : "Apply"),
+      ],
     },
       h("p", { className: "jw-hint" },
-        "Every channel belongs to exactly one group. Renames, reorders, creates and deletes each apply immediately as their own revision."),
+        "Every channel belongs to exactly one group. Changes stage here — one Apply commits the whole set as a single transaction."),
       h("div", { className: "jw-groups-list", role: "list" },
-        groups.map((g, i) => h("div", { key: g.id, className: "jw-groups-row", role: "listitem" },
-          h("span", { className: "jw-groups-pos" }, "#" + g.position),
+        rows.filter((g) => !deletes[g.id]).map((g, i) => h("div", { key: g.id, className: "jw-groups-row", role: "listitem" },
+          h("span", { className: "jw-groups-pos" }, "#" + (i + 1)),
           h("input", {
             className: "jw-input jw-groups-name", defaultValue: g.name,
+            key: "name-" + g.id + "-" + (g.staged ? "new" : "0"),
             "aria-label": "Group name " + g.name,
-            onBlur: (e) => rename(g, e.target.value),
+            onBlur: (e) => rename(g.id, e.target.value),
             onKeyDown: (e) => { if (e.key === "Enter") e.target.blur(); },
           }),
           h("span", { className: "jw-groups-count" }, memberCount(g.id) + " ch"),
+          g.staged ? h(StatusChip, { kind: "accent" }, "new") : null,
           h("button", {
             className: "jw-btn jw-btn-ghost jw-btn-small", "aria-label": "Move " + g.name + " up",
-            disabled: busy || i === 0, onClick: () => move(g, -1),
+            disabled: busy || i === 0, onClick: () => move(g.id, -1),
           }, "↑"),
           h("button", {
             className: "jw-btn jw-btn-ghost jw-btn-small", "aria-label": "Move " + g.name + " down",
-            disabled: busy || i === groups.length - 1, onClick: () => move(g, +1),
+            disabled: busy || i === rows.length - 1 - Object.keys(deletes).length, onClick: () => move(g.id, +1),
           }, "↓"),
           h("button", {
             className: "jw-btn jw-btn-ghost jw-btn-small", "aria-label": "Delete group " + g.name,
-            disabled: busy || groups.length <= 1, title: groups.length <= 1 ? "Cannot remove the last group." : null,
-            onClick: () => setConfirmDelete({ group: g, moveTo: (groups.filter((x) => x.id !== g.id)[0] || {}).id }),
+            disabled: busy || rows.length - Object.keys(deletes).length <= 1,
+            title: rows.length - Object.keys(deletes).length <= 1 ? "Cannot remove the last group." : null,
+            onClick: () => stageDelete(g.id),
           }, "🗑"),
         )),
+        Object.entries(deletes).map(([gid, moveTo]) => {
+          const g = rows.find((x) => x.id === gid);
+          if (!g) return null;
+          const members = memberCount(gid);
+          const others = rows.filter((x) => x.id !== gid && !deletes[x.id]);
+          return h("div", { key: "del-" + gid, className: "jw-groups-row jw-groups-row-deleting", role: "listitem" },
+            h("span", { className: "jw-groups-pos" }, "🗑"),
+            h("span", { className: "jw-groups-name" }, g.name),
+            members
+              ? h("select", {
+                  className: "jw-input", "aria-label": "Destination for members of " + g.name,
+                  value: moveTo || "", disabled: !others.length,
+                  onChange: (e) => setDeletes((cur) => ({ ...cur, [gid]: e.target.value })),
+                }, others.map((x) => h("option", { key: x.id, value: x.id }, x.name)))
+              : h("span", { className: "jw-groups-count" }, "empty"),
+            members ? h("span", { className: "jw-groups-count" }, members + " ch move") : null,
+            h("button", {
+              className: "jw-btn jw-btn-ghost jw-btn-small", "aria-label": "Keep group " + g.name,
+              disabled: busy, onClick: () => undoDelete(gid),
+            }, "Undo"),
+          );
+        }),
       ),
       h("div", { className: "jw-groups-create" },
         h("input", {
@@ -1001,7 +1152,9 @@
           onChange: (e) => setNewName(e.target.value),
           onKeyDown: (e) => { if (e.key === "Enter") create(); },
         }),
-        h("button", { className: "jw-btn jw-btn-primary", disabled: busy || !newName.trim(), onClick: create }, "Create"),
+        h("button", {
+          className: "jw-btn jw-btn-primary", disabled: busy || !newName.trim(), onClick: create,
+        }, "Add (staged)"),
       ),
     );
   }
@@ -1195,7 +1348,7 @@
 
   function EditorPane({
     channelId, lib, getRevision, drafts, confirm, toast,
-    submitOps, onApplied, onCreated, reportPhase,
+    submitOps, onApplied, onCreated, reportPhase, libraryVersion,
   }) {
     const isTemp = String(channelId).startsWith("temp-");
 
@@ -1206,6 +1359,7 @@
     const [applyError, setApplyError] = useState(null); // {kind, message, errors, currentRevision}
     const [lastAppliedRev, setLastAppliedRev] = useState(null);
     const [refreshNote, setRefreshNote] = useState(null);
+    const [rebaseNotice, setRebaseNotice] = useState(null);
     const [preview, setPreview] = useState(null);
     const [previewState, setPreviewState] = useState("idle"); // idle|loading|ok|error
     const [menuOpen, setMenuOpen] = useState(false);
@@ -1260,6 +1414,7 @@
       setApplyError(null);
       setLastAppliedRev(null);
       setRefreshNote(null);
+      setRebaseNotice(null);
       pendingRef.current = null;
       (async () => {
         let storedChannel = null;
@@ -1283,16 +1438,42 @@
           }
         }
         const saved = drafts.get(channelId);
-        const base = saved ? saved.draft : clone(storedChannel);
+        let base = saved && saved.base ? clone(saved.base) : clone(storedChannel);
+        let working = saved ? clone(saved.draft) : clone(storedChannel);
+        let notice = null;
+        if (saved && !isTemp && storedChannel) {
+          // The draft was authored against `base`; the server record may have
+          // moved (another tab/editor/reload). Merge non-overlapping server
+          // changes in, keep local edits, and NAME same-field conflicts —
+          // never borrow the global revision to authorize a full-record
+          // overwrite (audit C8).
+          const rebased = rebaseDraft(base, storedChannel, working);
+          if (!deepEqual(rebased.draft, working)) working = rebased.draft;
+          if (rebased.conflicts.length) {
+            notice = "The server also changed " + rebased.conflicts.join(", ")
+              + ". Your draft keeps your values — review them before Apply.";
+          }
+          base = clone(storedChannel);
+        }
         if (!alive) return;
         setStored(storedChannel);
         setSummary(serverSummary);
-        setDraft(base);
-        draftRef.current = base;
+        setDraft(working);
+        draftRef.current = working;
         setPhase(saved ? "dirty" : "clean");
         phaseRef.current = saved ? "dirty" : "clean";
+        setRebaseNotice(notice);
+        if (saved && (saved.base !== undefined || notice)) {
+          drafts.setExtras(channelId, { base });
+        }
         // resume an apply that outlived the previous editor instance
-        const infl = inflightApplies.get(channelId);
+        const infl = inflightApplies.get(channelId)
+          || (saved && saved.pending ? {
+            requestId: saved.pending.requestId,
+            snapshot: saved.pending.snapshot,
+            expected: saved.pending.expected,
+            promise: pollApplyReceipt(saved.pending.requestId),
+          } : null);
         if (infl) {
           inFlightRef.current = true;
           pendingRef.current = { requestId: infl.requestId, snapshot: infl.snapshot, expected: infl.expected };
@@ -1300,11 +1481,62 @@
           infl.promise.then((receipt) => { finalize(receipt, infl.snapshot, true); }).catch(() => {});
         }
         void loadPreview();
-        resolveNamesFor(base && base.source);
+        resolveNamesFor(working && working.source);
       })();
       return () => { alive = false; };
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [channelId]);
+
+    // A library reload or an unrelated commit bumped the server state: rebase
+    // the draft against the FRESH definition (same three-way rule as init).
+    useEffect(() => {
+      if (!libraryVersion || libraryVersion === 0 || isTemp) return undefined;
+      let alive = true;
+      (async () => {
+        const saved = drafts.get(channelId);
+        if (!saved) {
+          // clean editor: adopt the fresh record wholesale
+          try {
+            const def = await runOp("GetChannelDefinition", { channelId });
+            if (!alive || !deepEqual(def.channel, storedRef.current)) {
+              if (!alive) return;
+              setStored(def.channel);
+              setSummary(def.summary || []);
+              if (!drafts.get(channelId) && phaseRef.current !== "applying") {
+                const fresh = clone(def.channel);
+                draftRef.current = fresh;
+                setDraft(fresh);
+              }
+            }
+          } catch (e) { /* offline: keep local state */ }
+          return;
+        }
+        try {
+          const def = await runOp("GetChannelDefinition", { channelId });
+          if (!alive) return;
+          // base falls back to the record this editor loaded (the acknowledged
+          // state for entries authored before base-pinning existed)
+          const base = saved.base !== undefined ? saved.base
+            : (storedRef.current ? clone(storedRef.current) : null);
+          const rebased = rebaseDraft(base, def.channel, saved.draft);
+          if (!deepEqual(rebased.draft, saved.draft) || rebased.conflicts.length) {
+            drafts.put(channelId, rebased.draft, { base: clone(def.channel) });
+            if (phaseRef.current !== "applying") {
+              draftRef.current = clone(rebased.draft);
+              setDraft(clone(rebased.draft));
+            }
+            if (rebased.conflicts.length) {
+              setRebaseNotice("The server also changed " + rebased.conflicts.join(", ")
+                + ". Your draft keeps your values — review them before Apply.");
+            }
+            setStored(def.channel);
+            setSummary(def.summary || []);
+          }
+        } catch (e) { /* offline: the draft stays as-is */ }
+      })();
+      return () => { alive = false; };
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [libraryVersion]);
 
     // Re-resolve summary names whenever the stored summary changes
     useEffect(() => {
@@ -1358,10 +1590,19 @@
       if (next == null || deepEqual(next, cur)) return; // a no-op edit never dirties
       draftRef.current = next;
       setDraft(next);
-      if (phaseRef.current !== "applying") {
+      // ALWAYS persist — including while an earlier snapshot is applying.
+      // The submitted snapshot is immutable; this newer draft must survive
+      // navigation, remounts and the receipt (audit C8). The FIRST edit pins
+      // the acknowledged base (the server record this draft was authored
+      // against) so later rebases know which fields are locally touched.
+      const entry = drafts.get(channelId);
+      const extras = entry && entry.base !== undefined
+        ? {}
+        : { base: storedRef.current ? clone(storedRef.current) : null };
+      drafts.put(channelId, clone(next), extras);
+      if (phaseRef.current === "clean") {
         setPhase("dirty");
         phaseRef.current = "dirty";
-        drafts.put(channelId, clone(next));
       }
       if (applyError) setApplyError(null);
       schedulePreview();
@@ -1514,6 +1755,9 @@
       const reuse = pending && pending.expected === expected && deepEqual(snapshot, pending.snapshot);
       const requestId = reuse ? pending.requestId : newRequestId();
       pendingRef.current = { requestId, snapshot, expected };
+      // The immutable submitted request survives navigation/remount/reload;
+      // a fresh mount resumes by polling this exact receipt (audit C8/C9).
+      drafts.setExtras(channelId, { pending: { requestId, expected, snapshot: clone(snapshot) } });
       setPhase("applying");
       inFlightRef.current = true;
 
@@ -1544,27 +1788,37 @@
 
       if (receipt.status === "committed") {
         pendingRef.current = null;
+        drafts.setExtras(channelId, { pending: null });
         // Did the draft move on while the request was in flight? Compare the
         // LIVE draft (an editor that died mid-apply falls back to its stored
-        // session draft, which by definition matches the snapshot).
+        // session draft — which now includes edits typed DURING the apply).
         const currentDraft = aliveRef.current && draftRef.current
           ? draftRef.current
           : (drafts.get(channelId) ? drafts.get(channelId).draft : snapshot);
         const untouched = deepEqual(currentDraft, snapshot);
-        if (untouched) drafts.drop(channelId);
-        onApplied(receipt, { channelId, isTemp, untouched, idMap: receipt.idMap });
-        if (!aliveRef.current) return; // registry side effects already done
-        // refresh the definition from the server
+        const finalId = (receipt.idMap && receipt.idMap[channelId]) || channelId;
+        // The fresh server record becomes the newer draft's acknowledged base.
         let freshStored = null;
         let freshSummary = [];
         if (!isTemp || receipt.idMap) {
-          const finalId = (receipt.idMap && receipt.idMap[channelId]) || channelId;
           try {
             const def = await runOp("GetChannelDefinition", { channelId: finalId });
             freshStored = def.channel;
             freshSummary = def.summary || [];
           } catch (e) { /* channel vanished? keep local draft state */ }
         }
+        if (untouched) {
+          drafts.drop(channelId);
+        } else if (!(isTemp && receipt.idMap && finalId === channelId)) {
+          // newer edits survive the commit, based on the fresh record; for a
+          // committed CREATION the newer draft remaps to the final channel id
+          // (stored under the final id BEFORE the temp entry is dropped).
+          const persistId = isTemp && receipt.idMap ? finalId : channelId;
+          drafts.put(persistId, clone(currentDraft),
+                     { base: freshStored ? clone(freshStored) : null, pending: null });
+        }
+        onApplied(receipt, { channelId, isTemp, untouched, idMap: receipt.idMap });
+        if (!aliveRef.current) return; // registry side effects already done
         setStored(freshStored);
         setSummary(freshSummary);
         setLastAppliedRev(receipt.revision);
@@ -1591,17 +1845,19 @@
           setPhase("applied");
           phaseRef.current = "applied";
         } else {
+          draftRef.current = currentDraft;
+          setDraft(currentDraft);
           setPhase("dirty");
           phaseRef.current = "dirty";
           toast("Applied your earlier snapshot — newer edits are still draft.", "");
         }
         if (resumed) toast("Applied at r" + receipt.revision + " (recovered receipt).", "ok");
       } else if (receipt.error === "revision_conflict") {
-        if (!transportLike) pendingRef.current = null;
+        if (!transportLike) { pendingRef.current = null; drafts.setExtras(channelId, { pending: null }); }
         setPhase("dirty");
         setApplyError({ kind: "conflict", currentRevision: receipt.currentRevision, message: receipt.message });
       } else if (receipt.error === "validation_failed") {
-        if (!transportLike) pendingRef.current = null;
+        if (!transportLike) { pendingRef.current = null; drafts.setExtras(channelId, { pending: null }); }
         setPhase("dirty");
         setApplyError({ kind: "validation", errors: receipt.errors || [], message: receipt.message });
       } else if (transportLike) {
@@ -1612,6 +1868,7 @@
         toast("No receipt yet — draft kept. Apply again to reuse the same requestId.", "err");
       } else {
         pendingRef.current = null;
+        drafts.setExtras(channelId, { pending: null });
         setPhase("dirty");
         setApplyError({ kind: "rejected", message: receipt.message || receipt.error || "rejected" });
       }
@@ -1626,6 +1883,7 @@
         if (!ok) return;
         drafts.drop(channelId);
         pendingRef.current = null;
+        setRebaseNotice(null);
         if (isTemp) { onCreated(null, channelId); return; }
         const fresh = storedRef.current;
         draftRef.current = clone(fresh);
@@ -2127,6 +2385,13 @@
 
     const prog = draft.programming && typeof draft.programming === "object" ? draft.programming : null;
     const progMode = prog ? prog.mode || "fixed" : "fixed";
+    // Only modes an engine actually prepares AND serves for this namespace
+    // (audit C7): customs run fixed/explore/discovery; networks run fixed or
+    // continuing (operator rollout-gated). A stored legacy mode outside the
+    // namespace stays selectable until deliberately changed.
+    const isNet = (draft.kind || "net") === "net";
+    const offeredModes = isNet ? ["fixed", "continuing"] : ["fixed", "explore", "discovery"];
+    const modeOffered = offeredModes.includes(progMode) || progMode === "continuing";
     const setProgramming = (values) => edit((d) => {
       d.programming = fullProgramming(Object.assign({}, canonicalProgramming(d.programming), values));
       return d;
@@ -2141,13 +2406,16 @@
             onChange: (e) => setProgramming({ mode: e.target.value }),
           },
             h("option", { value: "fixed" }, "Fixed loop — the rotation repeats"),
-            h("option", { value: "explore" }, "Explore — shuffled, no recent repeats"),
-            h("option", { value: "discovery" }, "Discovery — pushes unheard content"),
-            h("option", { value: "continuing", disabled: progMode !== "continuing" },
-              progMode === "continuing" ? "Continuing — full library like a broadcast" : "Continuing — operator rollout gate"),
+            !isNet ? h("option", { value: "explore" }, "Explore — shuffled, no recent repeats") : null,
+            !isNet ? h("option", { value: "discovery" }, "Discovery — pushes unheard content") : null,
+            isNet ? h("option", { value: "continuing" },
+              "Continuing — full library like a broadcast") : null,
+            !modeOffered ? h("option", { value: progMode },
+              progMode + " (stored — not servable for this channel; pick another)") : null,
           ),
-          progMode !== "continuing"
-            ? h("p", { className: "jw-hint" }, "Continuing is activation-gated by the operator rollout; the GUI cannot switch it on.")
+          isNet
+            ? h("p", { className: "jw-hint" },
+                "Continuing airs only where the operator rollout activates it; an authored fixed pin always wins.")
             : null,
         ),
         h("div", { className: "jw-field" },
@@ -2258,6 +2526,8 @@
     const conflicting = applyError && applyError.kind === "conflict";
 
     const actionBar = h("div", { className: "jw-editor-actions" },
+      rebaseNotice ? h("div", { className: "jw-apply-row", role: "status", style: { color: "#f0ad4e" } },
+        rebaseNotice) : null,
       h("div", { className: "jw-apply-row" },
         barState,
         h("span", { style: { flex: 1 } }),
@@ -2421,6 +2691,7 @@
     const [draftCount, setDraftCount] = useState(0);
     const [editorKeyBump, setEditorKeyBump] = useState(0);
     const [reloadTick, setReloadTick] = useState(0);
+    const [libraryVersion, setLibraryVersion] = useState(0);
 
     const draftsRef = useRef(null);
     const libRef = useRef(null);
@@ -2500,6 +2771,7 @@
       try {
         const data = await fetchLibrary();
         setLib(data);
+        setLibraryVersion((x) => x + 1); // editors rebase their drafts on fresh state
         return data;
       } catch (e) {
         toast("Could not reload the library: " + String((e && e.message) || e), "err");
@@ -2508,23 +2780,38 @@
     }, [fetchLibrary, toast]);
 
     // ---- shared submit for NON-editor applies (bulk, groups, patches) ----
+    // ONE coordinator for every mutation path (audit C9): the request
+    // identity is persisted through reload, an identical retry reuses it
+    // (exactly one commit), and a transport failure is UNKNOWN — never
+    // announced as "nothing changed".
     const submitOps = useCallback(async (ops, opts) => {
       const options = opts || {};
-      const requestId = newRequestId();
+      const libraryId = libRef.current ? (libRef.current.libraryId || "default") : "default";
       const expected = libRef.current ? libRef.current.revision : 0;
+      const opsDigest = JSON.stringify(ops);
+      const pending = readOpsPending(libraryId);
+      const requestId = pending && pending.opsDigest === opsDigest
+        && pending.expected === expected
+        ? pending.requestId : newRequestId();
+      if (!pending || pending.requestId !== requestId) {
+        writeOpsPending(libraryId, { requestId, expected, opsDigest, label: options.label || "" });
+      }
       let receipt;
       try {
         receipt = await applyChannelChanges(requestId, expected, ops);
       } catch (e) {
-        toast("Apply failed to reach the server (" + String((e && e.message) || e) + "). Nothing changed.", "err");
+        toast("The Apply may or may not have committed — its outcome is unknown. "
+              + "Apply again to reuse the same request (it cannot commit twice).", "err");
         return { status: "transport", error: "transport" };
       }
+      clearOpsPending(libraryId);
       if (receipt.status === "committed") {
         const affected = countAffected(ops);
         toast((options.label || "Applied") + (affected ? " (" + affected + " channel" + (affected === 1 ? "" : "s") + ")" : "")
           + " — committed at r" + receipt.revision + ".", "ok");
         await refreshLibrary();
       } else if (receipt.error === "revision_conflict") {
+        await refreshLibrary();
         toast("Revision conflict — the library moved to r" + receipt.currentRevision + ". Nothing changed; try again.", "err");
       } else if (receipt.error === "validation_failed" && receipt.errors && receipt.errors.length) {
         toast("Rejected: " + receipt.errors[0].message, "err");
@@ -2689,21 +2976,31 @@
         });
       });
       if (!ok) return;
+      // ONE Apply: the server validates channels.move against a group created
+      // EARLIER IN THE SAME TRANSACTION, so create+move commits atomically —
+      // a failure leaves no half-moved group behind (audit C9).
+      let ops;
       if (createName) {
-        // The server validates channels.move against EXISTING groups only, so
-        // a new destination takes two applies: create the group, then move.
         const gid = newGroupId();
         const maxPos = Math.max(0, ...groupsSorted.map((g) => g.position));
-        const first = await submitOps(
-          [{ op: "group.put", group: { id: gid, name: createName, position: maxPos + 1 } }],
-          { label: "Group created", silent: true },
-        );
-        if (first.status !== "committed") return;
+        ops = [
+          { op: "group.put", group: { id: gid, name: createName, position: maxPos + 1 } },
+          { op: "channels.move", channelIds: bulkIds.slice(), groupId: gid },
+        ];
         target = gid;
-        await refreshLibrary();
+      } else {
+        ops = [{ op: "channels.move", channelIds: bulkIds.slice(), groupId: target }];
       }
-      await bulkAction((ids) => [{ op: "channels.move", channelIds: ids, groupId: target }],
-        "Move to group", "will move", true);
+      const receipt = await submitOps(ops, { label: "Move to group" });
+      if (receipt.status === "committed") {
+        if (draftsRef.current) {
+          for (const id of ops[0].op === "channels.move" ? ops[0].channelIds : ops[1].channelIds) {
+            const entry = draftsRef.current.get(id);
+            if (entry) draftsRef.current.put(id, Object.assign({}, entry.draft, { groupId: target }));
+          }
+        }
+        setBulkSelected(new Set());
+      }
     };
 
     // ---- export CSV ----
@@ -2827,6 +3124,7 @@
           onApplied: handleApplied,
           onCreated: handleCreated,
           reportPhase,
+          libraryVersion,
         })
       : null;
 
@@ -2899,7 +3197,11 @@
         ),
       ),
       dialog === "groups"
-        ? h(GroupsManagerDialog, { lib, drafts: draftsRef.current, onClose: () => setDialog(null), submitOps })
+        ? h(GroupsManagerDialog, {
+            lib, channels: lib.channels || [], drafts: draftsRef.current,
+            onClose: () => setDialog(null), submitOps, toast,
+            refreshLibrary: () => void refreshLibrary(),
+          })
         : null,
       dialog === "new"
         ? h(NewChannelDialog, {

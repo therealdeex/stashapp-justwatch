@@ -108,7 +108,18 @@ class TestLibraryDeploymentLegacyShapes:
         result = dispatch(envelope, {"mode": "Lineup", "channelId": "net_00000064"}, fake_client)
         assert result["channelId"] == "net_00000064"
         assert result["total"] == 2  # the fake client's canned rotation
-        assert result["rotationVersion"].startswith("r3-")
+        # The rotation identity is the CHANNEL's own ordering hash (membership
+        # + order + epoch) — deliberately NOT the global library revision, so
+        # a cosmetic Apply elsewhere must not churn healthy cached lineups
+        # (audit C12).
+        assert not result["rotationVersion"].startswith("r")
+        before = result["rotationVersion"]
+        doc = library_mod.load(data_dir)
+        doc["channels"][0]["name"] = "Cosmetic rename bumps only the revision"
+        doc["revision"] += 1
+        library_mod.save(data_dir, doc)
+        after = dispatch(envelope, {"mode": "Lineup", "channelId": "net_00000064"}, fake_client)
+        assert after["rotationVersion"] == before
 
     def test_get_catalog_reports_library_backed(self, envelope, data_dir, fake_client):
         seed_library(data_dir)

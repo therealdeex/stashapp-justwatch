@@ -33,7 +33,7 @@ operation or a new optional field, negotiated through `Capabilities`.
 | GetChannelDirectory | `GetChannelDirectory` | sync | ordered groups + playback rows + signatures + `emptyLibrary` |
 | GetChannelDefinition | `GetChannelDefinition` | sync | one full editable record + plain-language summary |
 | ValidateChannelChanges | `ValidateChannelChanges` | sync | typed errors + per-op effect summary, no writes |
-| PreviewChannelPool | `PreviewChannelPool` | sync | draft-correlated pool count + bounded sample (one query) |
+| PreviewChannelPool | `PreviewChannelPool` | sync | draft-correlated pool count + the ACTUAL bounded playable rotation |
 | ApplyChannelChanges | `ApplyChannelChanges` | task | the ONLY write path: touched-record transaction |
 | GetChannelApplyResult | `GetChannelApplyResult` | sync | durable receipt lookup by `requestId` |
 | GetChannelHistory | `GetChannelHistory` | sync | bounded revision archive (restore = a NEW Apply) |
@@ -127,17 +127,53 @@ ApplyChannelChanges {
   revision|error, errors?, idMap?}`. A retry of the same `requestId` with the
   same payload replays the stored receipt (idempotent even after a lost
   response); the same id with a DIFFERENT payload is rejected
-  (`request_replayed_with_different_content`).
-* Identity is server-owned: an existing channel's `id`/`seed`/`kind` never
-  change (attempts rejected as `identity_change`); created channels get
+  (`request_replayed_with_different_content`). REJECTED receipts carry the
+  same payload digest, so an identical retry of a REJECTED request replays
+  its rejection exactly.
+* Transactions are staged atomically: every op is applied to an independent
+  candidate document and the final candidate is validated (identity,
+  numbering, groups, sources, mode-per-namespace) before anything is
+  committed. A REJECTED transaction leaves definitions and revision
+  byte-identical — only its receipt is recorded.
+* Identity is server-owned and enforced on the FINAL candidate through every
+  opcode: an existing channel's `id`/`seed`/`kind`/`provenance` never change
+  (attempts rejected as `identity_change`, including through
+  `channels.patch`, whose keys are allow-listed to
+  `enabled|paused|archived` as real booleans); created channels get
   server-assigned identity, mapped back to the caller's `tempId` in
   `receipt.idMap`.
-* Effects: membership changes (source/sort/seed/policy/playing-state) enqueue
-  durable per-channel refresh work (signatures recorded); cosmetic changes
-  (name/number/color/glyph/group) never reindex. The Apply task performs the
-  incremental refresh inline; a crash is recovered by the next
-  PrepareProgramming run draining the same journal. A stale worker (signature
-  superseded) re-queues against the current signature under the lock.
+* Effects: membership changes (source/sort/seed/policy/playing-state) write
+  durable per-channel refresh intent BEFORE the definitions commit (a
+  `pre_commit` hook inside the writer lock — there is no crash window between
+  "committed" and "enqueued"); cosmetic changes (name/number/color/glyph/
+  group) never reindex. The Apply task performs the incremental refresh
+  inline; the scheduler drains the same journal. Workers acknowledge only the
+  journal generation they processed (concurrent enqueues survive) and merge
+  health into the CURRENT snapshot per channel. A stale worker (identity
+  superseded mid-build: source, sort, seed, policy, or playable state)
+  re-queues and publishes nothing.
+* `programmingMode` in GetChannelDirectory (and both legacy directories and
+  Schedule) is the RESOLVED effective mode from one shared resolver: customs
+  serve fixed/explore/discovery; networks serve fixed/continuing under the
+  operator rollout with the authored fixed pin always winning. Validation
+  rejects CHANGES into a mode the namespace cannot serve
+  (`bad_mode_for_kind`); a stored legacy out-of-namespace mode is
+  grandfathered until deliberately edited and reads honestly as fixed.
+* PreviewChannelPool reports the channel's ACTUAL bounded playable rotation
+  via the shared `fetch_rotation` (up to 50 playable rows, at most 1000
+  scanned): `rotationSize`/`rotationComplete` are measured, never estimated
+  from `count`. Authored `q` (and saved-filter `q`) reach every query path —
+  preview, Lineup, health, and both schedulers' indexers. Dynamic rules probe
+  the live Stash for nested-filter support; an older server gets the typed
+  "dynamic performer/studio rules are not supported by this Stash version"
+  error at validation/preview, never a playback surprise. Validation also
+  checks newly authored entity references against Stash (bounded at 60
+  lookups per request; metadata-only edits of a broken stored source stay
+  valid so they remain recoverable).
+* Lineup `rotationVersion` on a library deployment is the channel's OWN
+  ordering identity (membership + order + epoch) — NOT prefixed with the
+  global library revision, so a cosmetic Apply elsewhere does not churn
+  cached lineups. `Lineup.revision` still reports the library revision.
 * A queued task id is NOT success: clients poll `GetChannelApplyResult` for
   the correlated receipt. `status: "unknown"` means expired-or-never-reached;
   resubmitting the SAME requestId is safe.

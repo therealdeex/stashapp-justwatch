@@ -38,39 +38,80 @@ beyond stdlib (+ optional PyYAML for the API-key fallback). Data flow:
   one membership per channel; number bands 1–99 / 100–899). Strict loading
   like the catalog; one write path: touched-record transactions with
   expectedRevision + requestId, receipts committed atomically WITH the
-  document (idempotent replay; digest mismatch rejected), bounded history
-  snapshots, process-safe `.library.lock`.
-- `justwatch/criteria.py` — the canonical rule model: legacy shapes pass
-  through verbatim; the composite `filter` shape; the new `criteria` shape
-  (per-facet ANY/ALL + explicit exclusions + date/duration/recency/text +
-  DYNAMIC entity selection: `studioSceneCount`/`performerSceneCount`
-  thresholds — "studios with fewer than 2 scenes" — projected to Stash's
-  nested `studios_filter`/`performers_filter` so membership resolves
-  server-side per query and never goes stale; needs a Stash with the nested
-  `*_filter` fields).
-  A facet set to both ANY and ALL is a validation error; exclude-only pools
-  are the historical "everything except" shape and stay valid. Projection
-  reuses the tested Stash criterion shapes (exclusions ride their facet
-  criterion's `excludes`, never a NOT wrapper; tags/studios keep depth -1).
+  document (idempotent replay; digest mismatch rejected — REJECTED receipts
+  carry their digest too, so identical retries replay exactly), bounded
+  history snapshots, process-safe `.library.lock`. Transactions are staged
+  on a deep candidate: a rejection leaves definitions and revision
+  byte-identical. Identity (id/seed/kind/provenance) is enforced on the
+  FINAL candidate through every opcode; `channels.patch` is allow-listed to
+  real-boolean enabled/paused/archived. Programming modes are
+  namespace-validated on change (`ch`: fixed/explore/discovery; `net`:
+  fixed/continuing — `bad_mode_for_kind`), stored losslessly
+  (`normalize_programming` keeps continuing newShare through cosmetic
+  edits), and a `pre_commit` hook runs inside the lock before the document
+  saves (the refresh intent-journal write is ordered BEFORE the commit).
+- `justwatch/criteria.py` — the canonical rule model AND the ONE projector:
+  legacy shapes pass through verbatim; the composite `filter` shape; the
+  `criteria` shape (per-facet ANY/ALL + explicit exclusions +
+  date/duration/recency/text + DYNAMIC entity selection:
+  `studioSceneCount`/`performerSceneCount` thresholds — "studios with fewer
+  than 2 scenes" — projected to Stash's nested `studios_filter`/
+  `performers_filter` so membership resolves server-side per query; needs a
+  Stash with the nested `*_filter` fields, probed live at
+  validation/preview with a typed unsupported-rule error).
+  `lineup.build_scene_filter` DELEGATES here — preview, Lineup, health, and
+  both indexers share one implementation (audit C2). Authored `q` rides
+  every query path (`criteria.text_query_of`). Dynamic thresholds: min
+  inclusive, max EXCLUSIVE ("fewer than"); a combined range converts max to
+  max-1 inside Stash's inclusive BETWEEN. A facet set to both ANY and ALL
+  is a validation error; non-numeric ids and impossible calendar dates are
+  typed errors (never silently dropped); exclude-only pools are the
+  historical "everything except" shape and stay valid for `criteria`
+  (legacy `filter` needs one positive criterion, as always).
 - `justwatch/channel_service.py` — the ONE resolved channel view (library if
   present, else legacy stores); Directory/FullDirectory/Lineup/Schedule/
   programming/continuing read through it so what the GUI edits is what airs.
+  `effective_programming` is the ONE effective-mode resolver (authored /
+  effective / scheduled) used by both directories, Schedule, the editor,
+  and both schedulers; `writer_lock` gives library deployments `.library.lock`
+  for every publication commit guard. The network adapter passes
+  `programming` through losslessly (the continuing fixed pin + newShare
+  survive every hop).
 - `justwatch/channel_ops.py` — the editing surface (GetChannelLibrary,
   GetChannelDirectory, GetChannelDefinition, ValidateChannelChanges,
   PreviewChannelPool, ApplyChannelChanges task, GetChannelApplyResult,
   GetChannelHistory). Additive v1; playback shapes untouched.
-- `justwatch/refresh.py` — the durable pending-refresh journal: membership
-  changes enqueue per-channel work with membership signatures; stale workers
-  re-queue against the current signature under the lock; cosmetic edits never
-  reindex. Drained inline by Apply and by every PrepareProgramming run.
+  ValidateChannelChanges checks CHANGED entity references against Stash
+  (bounded 60 lookups; metadata-only edits of a broken source stay
+  recoverable); PreviewChannelPool reports the actual bounded playable
+  rotation via the shared `fetch_rotation` (measured rotationSize/
+  rotationComplete, never estimated from count).
+- `justwatch/refresh.py` — the durable pending-refresh INTENT journal:
+  membership changes journal per-channel work (signature + generation)
+  INSIDE the Apply transaction (pre-commit, under the lock) — there is no
+  crash window between "definitions committed" and "work enqueued".
+  Workers compute outside the lock, then commit under it: revalidate the
+  channel, merge health into the CURRENT snapshot per channel (two-channel
+  batches never clobber siblings), acknowledge ONLY the journal generation
+  processed (concurrent enqueues survive), and drop entries whose stored
+  health already matches the current membership signature. Stale workers
+  (source/sort/seed/policy/state changed mid-build) publish nothing and
+  requeue. Cosmetic edits never reindex. Drained inline by Apply and by
+  every PrepareProgramming run.
 - `justwatch/lineup.py` — source → `SceneFilterType` projection (saved filters
   used verbatim INCLUDING their text search `q`; tags/studios hierarchical
   INCLUDES depth -1; performers flat; the networks' composite `filter` type:
-  INCLUDES_ALL per criterion, `excludes` riding the tags criterion). `fetch_rotation`
-  assembles the channel's
+  INCLUDES_ALL per criterion, `excludes` riding the tags criterion).
+  `build_scene_filter` delegates to `criteria` (one projector everywhere).
+  `fetch_rotation` assembles the channel's
   ACTIVE ROTATION: up to 50 playable scenes in the channel's own order, paging
   past unplayable rows, bounded at 1000 raw rows; returns `rotationVersion`
-  (ordering hash + catalog revision), `sourceTotal`, `rotationComplete`.
+  (the channel's OWN ordering hash — membership + order + epoch, NOT the
+  global revision, so cosmetic applies never churn cached lineups),
+  `sourceTotal`, `rotationComplete`. `source_key` distinguishes criteria
+  sources by full canonical rules; `_canonical_filter` covers
+  excludePerformers/Studios, duration max, scene-count rows and q when
+  present (legacy sources canonicalize to their exact historical tuples).
 - `justwatch/networks.py` — the LEGACY compiled network tier (100–899,
   currently 795 networks) compiled from
   `data/proposed_channels_new_taxonomy_scene_validated.csv` by

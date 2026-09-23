@@ -190,7 +190,10 @@ def as_legacy_network_channel(channel: dict) -> dict:
     ``legacySection`` fallback — always one of the three legal legacy names
     (groups without a legacy mapping land in "general"); ``count`` is the
     HISTORICAL seed count when known (legacy payloads keep their documented
-    numeric semantics; freshness is the pool-status surface's job)."""
+    numeric semantics; freshness is the pool-status surface's job). The
+    authored ``programming`` object passes through LOSSLESSLY so the
+    continuing engine's fixed pin and newShare policy survive every adapter
+    hop (audit C7: the lossy adapter made a pinned network look continuing)."""
     legacy = channel.get("provenance", {}).get("legacySection") or "general"
     if legacy not in networks.SECTIONS:
         legacy = "general"
@@ -207,6 +210,7 @@ def as_legacy_network_channel(channel: dict) -> dict:
         "sort": channel.get("sort", "shuffle"),
         "seed": channel["seed"],
         "programmingMode": (channel.get("programming") or {}).get("mode", "fixed"),
+        "programming": channel.get("programming"),
         "sourceLabel": channel.get("sourceLabel", ""),
         "source": channel.get("source") or {},
     }
@@ -214,6 +218,47 @@ def as_legacy_network_channel(channel: dict) -> dict:
     if isinstance(provenance.get("rationale"), str):
         row["rationale"] = provenance["rationale"]
     return row
+
+
+def effective_programming(channel: dict, rollout: dict) -> dict:
+    """THE one effective-programming resolver (audit C7). Every consumer —
+    both directories, the editor, Schedule, custom preparation, continuing
+    preparation, and status — asks this, never a local variant.
+
+    Returns ``{"authored", "effective", "scheduled"}``:
+
+    * ``authored`` — the stored preference token ("" when none).
+    * ``effective`` — what actually airs for this channel NOW. Networks
+      resolve through the continuing rollout (an authored ``fixed`` pin
+      wins; an authored/staged rollout respects the operator gate — stage
+      ``prepare`` builds without advertising). Customs resolve through the
+      custom engine, which serves fixed/explore/discovery. A stored mode no
+      engine serves for the namespace degrades honestly to fixed.
+    * ``scheduled`` — whether a scheduler periodically prepares it.
+    """
+    authored = (channel.get("programming") or {}).get("mode") or ""
+    kind = channel.get("kind", "net")
+    if kind == "net":
+        from justwatch import continuing
+        scheduled = continuing.scheduled_mode(
+            as_legacy_network_channel(channel), rollout) == continuing.MODE
+        effective = continuing.resolved_mode(
+            as_legacy_network_channel(channel), rollout)
+        return {"authored": authored, "effective": effective, "scheduled": scheduled}
+    from justwatch import programming
+    mode = programming.policy(channel.get("programming"))["mode"]
+    return {"authored": authored, "effective": mode, "scheduled": mode != "fixed"}
+
+
+def writer_lock(data_dir: str | Path, timeout: float = 30.0):
+    """The lock that actually guards the authoritative store's writers.
+    Library deployments serialize on ``.library.lock`` (Apply, the refresh
+    journal, and every publication commit); pre-migration deployments keep
+    the catalog lock. Schedulers and Apply MUST commit under this — the
+    audit's stale-worker publications rode the wrong lock (C6)."""
+    if library_active(data_dir):
+        return library.library_lock(data_dir, timeout=timeout)
+    return catalog.catalog_lock(Path(data_dir), timeout=timeout)
 
 
 def groups_ordered(data_dir: str | Path) -> list[dict]:

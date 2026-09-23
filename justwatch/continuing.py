@@ -64,7 +64,8 @@ import time
 import zoneinfo
 from pathlib import Path
 
-from justwatch import catalog, lineup, networks, programming
+from justwatch import catalog, criteria, lineup, networks, programming
+from justwatch.library import LibraryError
 from justwatch.programming import digest
 
 HOUR = 3_600_000
@@ -302,10 +303,12 @@ def index_source(client, channel: dict, source_cache: dict | None = None) -> lis
     MAX_INDEX. ``source_cache`` dedupes identical (source, epoch) fingerprints
     within one prepare run so overlapping networks share query work."""
     source = channel["source"]
-    criteria = q = None
+    object_filter, q = None, None
     if source["type"] == "savedFilter":
-        criteria, q = lineup.resolve_saved_criteria(client, source["id"])
-    scene_filter = lineup.build_scene_filter(source, criteria)
+        object_filter, q = lineup.resolve_saved_criteria(client, source["id"])
+    if q is None:
+        q = criteria.text_query_of(source)
+    scene_filter = lineup.build_scene_filter(source, object_filter)
     epoch = lineup.effective_epoch(source)
     cache_key = None
     if source_cache is not None:
@@ -1008,17 +1011,29 @@ def prepare(client, data_dir, channel_id: str | None = None, now: int | None = N
             publication["indexedAt"] = indexed_at
             outcomes[cid] = "indexed_empty" if not publication["programs"] else (
                 "recovered_from_outage" if publication["degraded"] else "ready")
-            # Commit guard: membership, activation, or a sibling writer may
-            # have moved under us during indexing; never overwrite a newer
-            # generation. The guard token covers the WHOLE durable state
-            # (programs + ledger + cursors), not just the program digest.
+            # Commit guard: membership, policy, playable state, activation, or
+            # a sibling writer may have moved under us during indexing; never
+            # overwrite a newer generation. The guard token covers the WHOLE
+            # durable state (programs + ledger + cursors), not just the
+            # program digest, and runs under the store's ACTUAL writer lock
+            # (library deployments: .library.lock — audit C6).
             prior_generation = prior.get("generation") if isinstance(prior, dict) else None
-            with catalog_lock_for(data_dir):
+            with writer_lock_for(data_dir):
+                from justwatch import channel_service
                 rollout = try_load_rollout(data_dir)
                 latest = next(
                     (row for row in network_rows(data_dir) if row["id"] == cid), None)
-                if latest is None or scheduled_mode(latest, rollout) != MODE \
-                        or source_signature_of(latest) != signature:
+                state_ok = True
+                if channel_service.library_active(data_dir):
+                    lib_channel = channel_service.get_channel(data_dir, cid)
+                    state_ok = lib_channel is not None \
+                        and bool(lib_channel.get("enabled", True)) \
+                        and not bool(lib_channel.get("archived")) \
+                        and not bool(lib_channel.get("paused"))
+                if latest is None or not state_ok \
+                        or scheduled_mode(latest, rollout) != MODE \
+                        or source_signature_of(latest) != signature \
+                        or policy_signature_of(latest) != policy_signature_of(channel):
                     outcomes[cid] = "deactivated_during_build"
                     continue
                 current = read(data_dir, cid)
@@ -1043,6 +1058,14 @@ def prepare(client, data_dir, channel_id: str | None = None, now: int | None = N
 
 def catalog_lock_for(data_dir):
     return catalog.catalog_lock(data_dir, timeout=30.0)
+
+
+def writer_lock_for(data_dir):
+    """The lock that actually guards the authoritative store: library
+    deployments serialize on .library.lock (Apply, the refresh journal, and
+    every publication commit); pre-migration keeps the catalog lock."""
+    from justwatch import channel_service
+    return channel_service.writer_lock(data_dir, timeout=30.0)
 
 
 # ---------------------------------------------------------------------------
@@ -1129,7 +1152,12 @@ def write_status(data_dir: str | Path, run: dict, now: int | None = None) -> dic
     now = now_ms() if now is None else now
     channels: dict[str, dict] = {}
     try:
-        for channel in catalog.load(data_dir).get("channels", []):
+        from justwatch import channel_service
+        if channel_service.library_active(data_dir):
+            customs = channel_service.custom_channels_legacy(data_dir)
+        else:
+            customs = catalog.load(data_dir).get("channels", [])
+        for channel in customs:
             mode = programming.policy(channel.get("programming"))["mode"]
             if mode == "fixed":
                 continue
@@ -1139,8 +1167,8 @@ def write_status(data_dir: str | Path, run: dict, now: int | None = None) -> dic
                 channels[channel["id"]] = {"mode": mode, "published": False, "error": str(exc)[:200]}
                 continue
             channels[channel["id"]] = channel_status(prior, mode)
-    except catalog.CatalogError:
-        pass  # a corrupt catalog must not take the status manifest down
+    except (catalog.CatalogError, LibraryError):
+        pass  # a corrupt store must not take the status manifest down
     for channel in scheduled_channels_safe(data_dir):
         cid = channel["id"]
         try:

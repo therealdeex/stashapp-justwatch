@@ -107,12 +107,17 @@ def op_get_channel_directory(ctx) -> dict:
     groups, exactly-once membership, signatures, and honest pool status.
     Includes ALL namespaces; archived/paused/disabled channels carry their
     state explicitly instead of disappearing ( TVs decide omission, but the
-    default playback filter excludes them)."""
+    default playback filter excludes them). ``programmingMode`` is the
+    RESOLVED effective mode (one resolver, shared with both legacy
+    directories and Schedule — audit C7)."""
     doc = _library(ctx)
     schedule_status = _continuing_status(ctx)
+    from justwatch import continuing
+    rollout = continuing.try_load_rollout(ctx.data_dir)
     channels = []
     for channel in doc["channels"]:
         playable = channel["enabled"] and not channel["archived"] and not channel["paused"]
+        resolved = channel_service.effective_programming(channel, rollout)
         row = {
             "id": channel["id"],
             "kind": channel["kind"],
@@ -124,7 +129,7 @@ def op_get_channel_directory(ctx) -> dict:
             "sort": channel.get("sort", "shuffle"),
             "seed": channel["seed"],
             "sourceType": (channel.get("source") or {}).get("type"),
-            "programmingMode": (channel.get("programming") or {}).get("mode", "fixed"),
+            "programmingMode": resolved["effective"],
             "membershipSignature": criteria.source_signature(channel.get("source") or {}),
             "presentationSignature": channel_service.presentation_signature(channel),
             "playable": playable,
@@ -180,6 +185,7 @@ def op_validate_channel_changes(ctx) -> dict:
     if not isinstance(ops, list):
         raise ValueError("ops must be a list")
     errors = library._check_ops(doc, ops)
+    errors.extend(_reference_errors(ctx, doc, ops))
     effects = _effect_summary(doc, ops)
     return {
         "valid": not errors,
@@ -187,6 +193,98 @@ def op_validate_channel_changes(ctx) -> dict:
         "effects": effects,
         "revision": doc["revision"],
     }
+
+
+#: Bounded per-request entity lookups: a 794-id pasted list must not turn a
+#: sync validation into a thousand queries. Ids beyond the cap stay unchecked
+#: (reported in `referenceChecks.capped`) — never silently "validated".
+REFERENCE_CHECK_CAP = 60
+
+
+def _reference_errors(ctx, doc: dict, ops: list[dict]) -> list[dict]:
+    """Stash-side checks for CHANGED sources only: newly authored entity ids
+    must exist, saved filters must resolve, and dynamic rules need a Stash
+    with the nested filters. A metadata-only edit of a channel whose stored
+    source is broken stays valid (recoverable), per the remediation plan."""
+    errors: list[dict] = []
+    by_id = {c["id"]: c for c in doc["channels"]}
+    lookups = 0
+    capped = False
+    for i, op in enumerate(ops):
+        if not isinstance(op, dict) or op.get("op") not in ("channel.put", "channel.create"):
+            continue
+        channel = op.get("channel") or {}
+        draft_source = channel.get("source") or {}
+        stored_source = (by_id.get(channel.get("id")) or {}).get("source") or {}
+        if criteria.source_signature(draft_source) == criteria.source_signature(stored_source):
+            continue  # unchanged source: no new references to validate
+        if criteria.uses_dynamic_rules(draft_source):
+            try:
+                criteria.ensure_dynamic_support(ctx.client)
+            except ValueError as exc:
+                errors.append({"path": f"ops[{i}].channel.source",
+                               "code": "unsupported_dynamic_rules",
+                               "message": str(exc)})
+        if draft_source.get("type") == "savedFilter":
+            try:
+                lineup.resolve_saved_criteria(ctx.client, str(draft_source.get("id", "")))
+            except LookupError as exc:
+                errors.append({"path": f"ops[{i}].channel.source.id",
+                               "code": "missing_source",
+                               "message": str(exc)})
+            continue
+        if draft_source.get("type") in ("performer", "studio", "tag"):
+            kind = draft_source.get("type")
+            stored_ids = set(criteria.ids(stored_source.get("ids"))) | {
+                str(stored_source.get("id", ""))} if stored_source.get("type") == "tag" \
+                else {str(stored_source.get("id", ""))}
+            draft_ids = set(criteria.ids(draft_source.get("ids"))) | {
+                str(draft_source.get("id", ""))} if kind == "tag" \
+                else {str(draft_source.get("id", ""))}
+            for entity_id in sorted(draft_ids - stored_ids - {""}, key=str):
+                if lookups >= REFERENCE_CHECK_CAP:
+                    capped = True
+                    break
+                lookups += 1
+                label, exists = lineup.resolve_source(ctx.client, {"type": kind, "id": entity_id})
+                if not exists:
+                    errors.append({
+                        "path": f"ops[{i}].channel.source.id",
+                        "code": "missing_entity",
+                        "message": f"{kind} {entity_id} does not exist in Stash"
+                                   + (f" (looking for {label})" if label else ""),
+                    })
+        added: dict[str, list[str]] = {}
+        for facet in ("tags", "tagsAny", "performers", "performersAny",
+                      "studios", "studiosAny"):
+            draft_ids = set(criteria.ids(draft_source.get(facet)))
+            stored_ids = set(criteria.ids(stored_source.get(facet)))
+            delta = sorted(draft_ids - stored_ids, key=int)
+            if delta:
+                added[facet] = delta
+        for facet, id_list in added.items():
+            kind = "tag" if facet.startswith("tags") else (
+                "performer" if facet.startswith("performers") else "studio")
+            for entity_id in id_list:
+                if lookups >= REFERENCE_CHECK_CAP:
+                    capped = True
+                    break
+                lookups += 1
+                label, exists = lineup.resolve_source(ctx.client, {"type": kind, "id": entity_id})
+                if not exists:
+                    errors.append({
+                        "path": f"ops[{i}].channel.source.{facet}",
+                        "code": "missing_entity",
+                        "message": f"{kind} {entity_id} does not exist in Stash"
+                                   + (f" (looking for {label})" if label else ""),
+                    })
+    if capped:
+        errors.append({
+            "path": "ops", "code": "reference_checks_capped",
+            "message": f"only the first {REFERENCE_CHECK_CAP} added entity ids "
+                       "were checked against Stash",
+        })
+    return errors
 
 
 def _effect_summary(doc: dict, ops: list[dict]) -> list[dict]:
@@ -238,9 +336,14 @@ def _effect_summary(doc: dict, ops: list[dict]) -> list[dict]:
 
 
 def op_preview_channel_pool(ctx) -> dict:
-    """Count + bounded sample for a DRAFT source. Read-only: no publication,
-    no mutation, at most a count and one page of scenes. The response echoes
-    the draft's membership signature so the caller can discard stale replies."""
+    """The channel's ACTUAL bounded rotation for a DRAFT source — the same
+    ``fetch_rotation`` machinery Lineup, health and the schedulers use, so
+    the editor's numbers are the truth (audit C11: the old page computed
+    ``min(50, count)`` and claimed completion without scanning playability).
+
+    Read-only, bounded by the shared rotation policy (up to 50 playable rows,
+    at most 1000 scanned). The response echoes the draft's membership
+    signature so the caller can discard stale replies."""
     source = _parse_json_arg(ctx.args.get("source"), "source")
     if not isinstance(source, dict):
         raise ValueError("source must be a JSON object")
@@ -248,6 +351,8 @@ def op_preview_channel_pool(ctx) -> dict:
         if e["code"] in ("empty_rules", "conflicting_rows", "orphan_exclusion",
                          "unknown_fields", "unknown_source_type"):
             raise ValueError(e["message"])
+    if criteria.uses_dynamic_rules(source):
+        criteria.ensure_dynamic_support(ctx.client)
     signature = criteria.source_signature(source)
     sort = str(ctx.args.get("sort") or "shuffle")
     seed = _as_int(ctx.args.get("seed"), 0)
@@ -262,34 +367,29 @@ def op_preview_channel_pool(ctx) -> dict:
             return {"signature": signature, "status": "missing_source",
                     "message": str(exc), "poolCount": None,
                     "rotationSize": 0, "sample": []}
-    scene_filter = criteria.build_scene_filter(source, object_filter)
-    find_filter = lineup.build_find_filter(sort, seed, 1, 50, text_query)
     include_paths = bool(ctx.args.get("includePaths"))
-    data = ctx.client.submit(lineup.FIND_SCENES, {
-        "filter": find_filter, "scene_filter": scene_filter,
-        "include_paths": include_paths,
-    })
-    node = (data or {}).get("findScenes") or {}
-    pool_count = int(node.get("count") or 0)
-    sample = []
-    for scene in node.get("scenes") or []:
-        item = lineup._scene_item(scene, include_paths=include_paths)
-        if item is not None:
-            sample.append(item)
-        if len(sample) >= sample_limit:
-            break
-    epoch = lineup.effective_epoch(source)
+    rotation = lineup.fetch_rotation(
+        ctx.client,
+        source=source,
+        sort=sort,
+        seed=seed,
+        include_paths=include_paths,
+        object_filter=object_filter,
+        text_query=text_query,
+    )
     return {
         "signature": signature,
         "status": "ok",
-        "poolCount": pool_count,
-        "rotationSize": min(contract.ROTATION_SIZE, pool_count),
-        "rotationComplete": pool_count <= contract.ROTATION_SCAN_LIMIT,
-        "sample": sample,
-        "epoch": epoch,
+        "poolCount": rotation["sourceTotal"],
+        "rotationSize": len(rotation["items"]),
+        "rotationComplete": rotation["rotationComplete"],
+        "loopSeconds": rotation["loopSeconds"],
+        "sample": rotation["items"][:sample_limit],
+        "epoch": lineup.effective_epoch(source),
         "resolvedAt": int(time.time() * 1000),
-        "note": "poolCount is the source behind the channel; rotationSize is the "
-                "bounded on-air loop (max 50). The first sample item is not “now”.",
+        "note": "poolCount is the source behind the channel; rotationSize is "
+                "the bounded on-air loop actually scanned playable (max 50). "
+                "The first sample item is not “now”.",
     }
 
 
@@ -313,19 +413,18 @@ def op_apply_channel_changes(ctx) -> dict:
         raise ValueError("ops must be a list")
 
     before = _channel_map(ctx.data_dir)
+    # Refresh intent is journaled INSIDE the transaction (pre-commit, under
+    # the writer lock): the crash window between "definitions committed" and
+    # "work enqueued" no longer exists (audit C5).
     receipt = library.apply_transaction(
         ctx.data_dir, expected_revision=expected, request_id=request_id, ops=ops,
         actor=str(ctx.args.get("actor") or "channel-studio"),
+        pre_commit=refresh.commit_hook(ctx.data_dir, before),
     )
     if receipt.get("status") != "committed":
         return receipt
 
-    # Membership changes -> durable pending refresh entries (survives a crash
-    # between this commit and the refresh; the scheduler also drains it).
-    after = _channel_map(ctx.data_dir)
-    affected, signatures = refresh.affected_channels(before, after)
-    if affected:
-        refresh.enqueue(ctx.data_dir, affected, receipt["revision"], signatures)
+    affected = bool(refresh.read_pending(ctx.data_dir))
 
     # Inline incremental refresh for THIS apply (bounded: affected only).
     processed = {}

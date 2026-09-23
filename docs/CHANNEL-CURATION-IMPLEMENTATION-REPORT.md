@@ -1,5 +1,16 @@
 # Channel curation — implementation report
 
+> **SUPERSEDED (2026-09-23 remediation):** this report predates the Option A
+> decision and the 2026-09-23 independent audit. The owner chose **Option A —
+> Channel Studio** (`docs/CHANNEL-CURATION-DESIGN-DECISION.md`), the audit
+> (`docs/CHANNEL-CURATION-AUDIT.md`) then reproduced twelve defects (C1–C12)
+> against the shipped code, and the corrective implementation + verification
+> live in **`docs/CHANNEL-CURATION-REMEDIATION-REPORT.md`**. Sections below
+> that describe guarantees the audit disproved (transaction atomicity,
+> journal durability, preview truth, migration fail-closed behavior, frontend
+> selection status) are retained as provenance only — trust the remediation
+> report for current behavior.
+
 Date: 2026-09-23. Repos: `stash-justwatch` @ master, `StashAppAndroidTV`
 (dev worktree). Owner decisions and scope per
 `docs/CHANNEL-CURATION-HANDOFF.md`; technical spec per
@@ -7,11 +18,11 @@ Date: 2026-09-23. Repos: `stash-justwatch` @ master, `StashAppAndroidTV`
 
 ## 0. TL;DR
 
-* The **five prototypes are live** at `http://localhost:8462/` (tailscale:
-  `https://dev-lab2.manx-teeth.ts.net:8462/`) — start with
-  `python3 tools/serve_prototypes.py`. **The production frontend is not
-  chosen yet**: that is the single owner review gate
-  (`docs/CHANNEL-CURATION-DESIGN-DECISION.md` is created and PENDING).
+* **Historical status at writing time** (superseded above): the five
+  prototypes were live for review and the production frontend selection was
+  the open owner gate. The selection has since been made (Option A) and the
+  production UI shipped; the audit and remediation reports cover what
+  followed.
 * The independent foundations are implemented and tested end to end:
   authoritative editable library, transactions with durable idempotent
   receipts, dynamic single-membership groups, the visual-rule criteria model,

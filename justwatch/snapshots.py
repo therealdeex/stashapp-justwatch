@@ -167,10 +167,14 @@ def _channel_health(client: Any, channel: dict, previous: dict) -> dict:
     Distinguishes a missing source (relink flow), a genuinely empty rotation
     (off air), and a temporarily unavailable check (stale numbers +
     ``healthStatus: unavailable``) — a transport blip or one broken channel
-    must never fail the snapshot or its siblings.
+    must never fail the snapshot or its siblings. Every entry records the
+    membership ``sourceSignature`` it was computed for, so the refresh
+    journal can tell "current" from "retryable" without a recompute.
     """
     channel_id = channel.get("id") or ""
     source = channel.get("source") or {}
+    from justwatch import criteria
+    signature = criteria.source_signature(source)
     try:
         object_filter = None
         text_query = None
@@ -190,6 +194,7 @@ def _channel_health(client: Any, channel: dict, previous: dict) -> dict:
     except LookupError:
         return {
             "healthStatus": "missingSource",
+            "sourceSignature": signature,
             "sourceMissing": True,
             "sceneCount": None,
             "loopSeconds": None,
@@ -203,6 +208,7 @@ def _channel_health(client: Any, channel: dict, previous: dict) -> dict:
     items = rotation["items"]
     entry: dict[str, Any] = {
         "healthStatus": "ok",
+        "sourceSignature": signature,
         "sceneCount": len(items),
         "loopSeconds": rotation["loopSeconds"],
         "loopCapped": not rotation["rotationComplete"],

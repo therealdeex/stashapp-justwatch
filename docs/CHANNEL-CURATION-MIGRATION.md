@@ -51,15 +51,24 @@ python3 tools/migrate_channel_library.py \
 ```
 
 The tool: verifies the seed (513 networks; sections 209/115/189), reconciles
-against the recorded migration map (292 kept / 221 replaced / 282 retired),
-reports **drift** (any deployment record the map/seed do not explain —
-e.g. a network renamed on a "keep" slot) and EXITS NON-ZERO on drift so an
-unrecognized deployment is never silently overwritten. `--apply` writes an
-immutable backup first (catalog, compiled networks, rollout file, publications
-under `migration-backup-<stamp>/` next to the data dir) and commits the
-library atomically under the lock.
+against the recorded migration map (292 kept / 221 replaced / 282 retired —
+kept slots are reconciled by NAME and IDENTITY, not display name alone),
+reports **drift** (any deployment record the map/seed do not explain — e.g. a
+network renamed on a "keep" slot, or a kept slot whose id/seed changed) and
+FAILS CLOSED on drift: **non-zero exit and NO authoritative write, for
+`--dry-run` and `--apply` alike**, before any backup or commit. Legacy inputs
+are read through their strict loaders (a corrupt/future-schema catalog or
+networks file is a hard stop) and their digests are re-checked under the lock
+at commit so a concurrent save cannot be lost. `--apply` writes an immutable,
+hash-manifested backup first (catalog, networks — including the compiled
+artifact when it lives outside the data dir — rollout, pending journal,
+programming/snapshots/history trees with recorded ABSENCES, in a
+collision-safe `migration-backup-<stamp>/` directory) and commits the library
+atomically. An already-migrated deployment (v4-final marker) is a NO-OP
+before anything else — owner edits can never be recompiled away.
 
-Exit codes: `0` clean; `2` drift detected (dry run report on stderr).
+Exit codes: `0` clean; `2` drift detected (report on stderr, nothing
+written); `1` hard errors (corrupt inputs, unrecognized existing library).
 
 ## After migration
 
@@ -78,12 +87,16 @@ python3 tools/migrate_channel_library.py \
     --data-dir <data-dir> --restore <data-dir-parent>/migration-backup-<stamp>
 ```
 
-Restore is an **operator recovery tool, not an edit-undo**: it reinstates the
-complete pre-migration snapshot (definitions, rollout file, publications,
-snapshots) and removes the library document. Never mix restored definitions
-with newer publications: restore the snapshot as a whole. Restore of a
-single bad edit is what definition history (GetChannelHistory → restore as a
-new Apply) or Discard is for.
+Restore is an **operator recovery tool, not an edit-undo**. It recreates the
+backed-up state EXACTLY within the managed scope: every recorded file returns
+(hash-verified against the backup manifest — a tampered backup aborts),
+every recorded ABSENCE is recreated (post-backup publications, rollout files,
+and the pending journal are removed, not overlaid), managed trees are
+REPLACED whole, and unrelated operator data is untouched. The restore runs
+under the library and catalog locks with a step journal, so an interruption
+is resumable by re-running the same command. Restore of a single bad edit is
+what definition history (GetChannelHistory → restore as a new Apply) or
+Discard is for.
 
 ## Known migration-time facts (dev, 2026-09 rehearsal)
 

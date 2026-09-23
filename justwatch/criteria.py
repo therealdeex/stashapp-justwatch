@@ -30,10 +30,14 @@ import re
 from typing import Any
 
 from justwatch import contract
-from justwatch.lineup import INT_MAX, created_cutoff
 
 DIGITS_RE = re.compile(r"^[0-9]+$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+#: Stash's IntCriterionInput has no GREATER_THAN_EQUALS modifier, so an
+#: inclusive lower bound alone is expressed as a BETWEEN with a max-int
+#: upper bound. (Kept importable from lineup for legacy callers.)
+INT_MAX = 2_147_483_647
 
 #: id-list facets of the ``criteria``/``filter`` source and their storage keys.
 _ID_FACETS = ("tags", "tagsAny", "excludeTags", "performers", "performersAny",
@@ -129,6 +133,81 @@ def _kept_count_range(spec: dict) -> dict:
     return kept
 
 
+def created_cutoff(within_days: int, today: _dt.date | None = None) -> str:
+    """The inclusive cutoff date for a created-at recency criterion:
+    ``within_days`` calendar days back from today (UTC).
+
+    A bare ``YYYY-MM-DD`` value parses as midnight, so GREATER_THAN includes
+    the whole boundary day — matching the extraction's ``created_at[:10] >=``
+    reference semantics. (Canonical home: criteria; lineup re-exports it.)
+    """
+    if today is None:
+        today = _dt.datetime.now(_dt.timezone.utc).date()
+    return (today - _dt.timedelta(days=int(within_days))).isoformat()
+
+
+def text_query_of(source: dict, saved_filter_q: str | None = None) -> str | None:
+    """The text search that rides EVERY query for this source.
+
+    Saved filters use their stored ``q`` verbatim (their shape is membership);
+    ``filter``/``criteria`` sources carry an authored ``q``. Both halves are
+    the channel's membership, so Lineup, health, preview and both indexers
+    must pass this into FindFilterType — dropping it changes the pool.
+    """
+    kind = source.get("type")
+    if kind == "savedFilter":
+        return saved_filter_q
+    if kind in ("filter", "criteria"):
+        q = source.get("q")
+        if isinstance(q, str) and q.strip():
+            return q.strip()
+    return None
+
+
+#: Probes the ACTUAL Stash for the nested relational filters the dynamic
+#: scene-count rules project into. One count query, no results fetched.
+NESTED_FILTER_PROBE = """
+query JustWatchNestedFilterSupport {
+  findScenes(filter: {per_page: 0}, scene_filter: {
+    studios_filter: {scene_count: {value: 1, modifier: LESS_THAN}}
+    performers_filter: {scene_count: {value: 1, modifier: LESS_THAN}}
+  }) { count }
+}
+"""
+
+
+def uses_dynamic_rules(source: dict) -> bool:
+    """True when the source projects into nested ``*_filter`` fields (needs a
+    newer Stash; validated up front instead of failing at playback)."""
+    if not isinstance(source, dict):
+        return False
+    for facet in ("studioSceneCount", "performerSceneCount"):
+        spec = source.get(facet)
+        if isinstance(spec, dict) and (spec.get("min") or spec.get("max")):
+            return True
+    return False
+
+
+def ensure_dynamic_support(client: Any) -> None:
+    """Raise a typed error when this Stash lacks the nested filters the
+    dynamic rules need; a no-op probe is cached by the caller's process."""
+    try:
+        client.submit(NESTED_FILTER_PROBE)
+    except Exception as exc:  # GraphQLError (validation) or transport
+        raise ValueError(
+            "dynamic performer/studio rules are not supported by this Stash "
+            f"version (nested studios_filter/performers_filter unavailable: {exc})"
+        ) from exc
+
+
+def _is_real_date(value: str) -> bool:
+    try:
+        _dt.date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
 def validate(source: Any) -> list[dict]:
     """Structural validation of a source. Returns ``[{path, code, message}]``.
 
@@ -172,7 +251,21 @@ def validate(source: Any) -> list[dict]:
         err("source", "unknown_fields",
             f"unknown source fields: {', '.join(unknown)}")
     for facet in _ID_FACETS:
-        if facet in source and not ids(source.get(facet)):
+        if facet not in source:
+            continue
+        raw_list = source.get(facet)
+        if not isinstance(raw_list, list):
+            err(f"source.{facet}", "bad_source_ids",
+                f"{facet} must be a list of numeric ids")
+            continue
+        bad = [x for x in raw_list
+               if isinstance(x, bool) or not isinstance(x, (str, int))
+               or not DIGITS_RE.match(str(x))]
+        if bad:
+            err(f"source.{facet}", "bad_source_ids",
+                f"{facet} has non-numeric entries ({str(bad[0])!r}); ids are "
+                "Stash database ids — remove them instead of relying on silent drops")
+        elif not ids(raw_list):
             err(f"source.{facet}", "bad_source_ids",
                 f"{facet} must be a list of numeric ids")
     for a, b in _EXCLUSIVE_FACETS:
@@ -187,8 +280,10 @@ def validate(source: Any) -> list[dict]:
         else:
             for half in ("from", "to"):
                 v = date.get(half)
-                if v and (not isinstance(v, str) or not DATE_RE.match(v)):
-                    err(f"source.date.{half}", "bad_date", "dates are YYYY-MM-DD")
+                if v and (not isinstance(v, str) or not DATE_RE.match(v)
+                          or not _is_real_date(v)):
+                    err(f"source.date.{half}", "bad_date",
+                        f"date.{half} must be a real calendar date YYYY-MM-DD (got {v!r})")
             frm, to = date.get("from"), date.get("to")
             if isinstance(frm, str) and isinstance(to, str) and frm and to and frm > to:
                 err("source.date", "bad_date", "date.from is after date.to")
@@ -259,16 +354,38 @@ def has_membership(source: dict) -> bool:
 
 
 def build_scene_filter(source: dict, object_filter: dict | None = None) -> dict:
-    """Project any supported source into a ``SceneFilterType`` variable.
+    """THE canonical projection of any supported source into a
+    ``SceneFilterType`` variable — used by preview, Lineup, health, and BOTH
+    schedulers' indexers so the pool being edited is always the pool that
+    airs. There is exactly one implementation of filter semantics; legacy
+    public wrappers (``lineup.build_scene_filter``) delegate here.
 
-    Legacy shapes delegate to the proven ``lineup.build_scene_filter``. The
-    ``criteria`` shape projects per facet exactly like ``filter`` does, plus
-    the new explicit performer/studio exclusions (each exclusion rides its own
-    criterion's ``excludes`` — a direct Stash criterion, never a NOT wrapper).
-    A criteria source's ANY/ALL per facet maps to INCLUDES vs INCLUDES_ALL.
+    Legacy shapes (``savedFilter``/``tag``/``performer``/``studio``) project
+    exactly as they always have, byte-for-byte. The ``filter`` composite and
+    the ``criteria`` shape share one generalised projector: per facet
+    ANY/ALL with explicit exclusions (each exclusion rides its own
+    criterion's ``excludes`` — a direct Stash criterion, never a NOT
+    wrapper), plus date/duration/created-at/text and the dynamic
+    studio/performer scene-count rows.
+
+    Dynamic scene-count semantics (defined ONCE): ``min`` inclusive, ``max``
+    EXCLUSIVE — "at least min, fewer than max". Stash's BETWEEN is inclusive,
+    so a combined range converts max to ``max - 1``.
     """
     kind = source.get("type")
-    if kind == "criteria":
+    if kind == "savedFilter":
+        if not isinstance(object_filter, dict):
+            raise LookupError("saved filter has no stored object filter")
+        return object_filter
+    if kind == "tag":
+        # INCLUDES with several values is a union: a scene tagged with ANY of
+        # them airs (depth -1 keeps sub-tags of every pill in the set).
+        return {"tags": {"value": _tag_ids(source), "modifier": "INCLUDES", "depth": -1}}
+    if kind == "performer":
+        return {"performers": {"value": [str(source.get("id", ""))], "modifier": "INCLUDES"}}
+    if kind == "studio":
+        return {"studios": {"value": [str(source.get("id", ""))], "modifier": "INCLUDES", "depth": -1}}
+    if kind in ("filter", "criteria"):
         out: dict[str, Any] = {}
         tags_all, tags_any = ids(source.get("tags")), ids(source.get("tagsAny"))
         exclude_tags = ids(source.get("excludeTags"))
@@ -276,10 +393,13 @@ def build_scene_filter(source: dict, object_filter: dict | None = None) -> dict:
             tags_any = []  # historical ALL-precedence for tolerant reads
         if tags_all or tags_any or exclude_tags:
             # An exclude-only tags criterion (empty value + excludes) is the
-            # compiled tier's historical "everything except" shape.
+            # compiled tier's historical "everything except" shape: filter
+            # sources keep their byte-stable INCLUDES_ALL projection, criteria
+            # sources reflect the authored ANY/ALL row.
             criterion: dict[str, Any] = {
                 "value": tags_all or tags_any,
-                "modifier": "INCLUDES_ALL" if tags_all else "INCLUDES",
+                "modifier": "INCLUDES_ALL"
+                if (tags_all or kind == "filter") else "INCLUDES",
                 "depth": -1,
             }
             if exclude_tags:
@@ -330,7 +450,9 @@ def build_scene_filter(source: dict, object_filter: dict | None = None) -> dict:
             if isinstance(spec, dict) and (spec.get("min") or spec.get("max")):
                 lo, hi = spec.get("min"), spec.get("max")
                 if lo and hi:
-                    count = {"value": lo, "value2": hi, "modifier": "BETWEEN"}
+                    # max is EXCLUSIVE ("fewer than max"); BETWEEN includes
+                    # both ends, so the inclusive upper bound is max-1.
+                    count = {"value": lo, "value2": hi - 1, "modifier": "BETWEEN"}
                 elif hi:
                     # "fewer than N scenes" — the owner's dynamic ask
                     count = {"value": hi, "value2": None, "modifier": "LESS_THAN"}
@@ -339,19 +461,33 @@ def build_scene_filter(source: dict, object_filter: dict | None = None) -> dict:
                     # unambiguous where GREATER_THAN's inclusivity is not
                     count = {"value": lo, "value2": INT_MAX, "modifier": "BETWEEN"}
                 out[filter_key] = {"scene_count": count}
-        q = source.get("q")
+        if not out or (kind == "filter" and not (
+                tags_all or tags_any
+                or ids(source.get("performers")) or ids(source.get("performersAny"))
+                or ids(source.get("studios")) or ids(source.get("studiosAny"))
+                or isinstance(source.get("date"), dict)
+                or isinstance(source.get("duration"), dict)
+                or isinstance(source.get("createdAt"), dict))):
+            # No criteria would project to an unconstrained filter and
+            # silently match the WHOLE library. A legacy ``filter`` source
+            # additionally needs at least one POSITIVE criterion (include ids
+            # or metadata — exclusions alone never aired); a ``criteria``
+            # source may be exclude-only ("everything without X") by design.
+            raise ValueError("filter source has no include criteria")
         return out
-    if kind == "filter":
-        # The compiled tier's shape, including the generalised exclusions when
-        # a migrated/authored row carries them.
-        projected = build_scene_filter({**source, "type": "criteria"}, object_filter)
-        return projected
-    return _lineup_scene_filter(source, object_filter)
+    raise ValueError(f"unknown source type: {kind!r}")
 
 
-def _lineup_scene_filter(source: dict, object_filter: dict | None) -> dict:
-    from justwatch import lineup
-    return lineup.build_scene_filter(source, object_filter)
+def _tag_ids(source: dict) -> list[str]:
+    """A tag source's canonical id set (sorted numerically; mirrors
+    ``lineup.tag_ids`` exactly — one semantics, two import paths)."""
+    raw = source.get("ids")
+    if isinstance(raw, list):
+        out = {str(x) for x in raw if str(x).isdigit()}
+        if out:
+            return sorted(out, key=int)
+    only = str(source.get("id", ""))
+    return [only] if only.isdigit() else []
 
 
 def source_signature(source: dict) -> str:

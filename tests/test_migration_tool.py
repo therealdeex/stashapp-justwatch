@@ -128,45 +128,66 @@ def test_no_op_rerun_after_owner_edit(deployment, migrated):
     assert doc_after == doc_before, "a rerun must never reset owner edits"
 
 
-def test_drift_detection_reports_unrecognized_records(deployment, migrated):
-    tmp, data = deployment
-    # a network squatting on a KEEP slot under the WRONG name: identity drift
+def test_drift_fails_closed_for_dry_run_and_apply(tmp_path):
+    """Audit C10: drift means nonzero exit and NO authoritative write — for
+    dry-run and apply alike — with the drift named precisely."""
+    data = tmp_path / "data"
+    data.mkdir()
+    shutil.copy2(ROOT / "justwatch/networks.json", data / "networks.json")
+    (data / "catalog.json").write_text(json.dumps(
+        {"schemaVersion": 1, "revision": 3, "settings": {}, "channels": []}))
+    # identity drift on a KEEP slot + an unexplained ghost on a vacant number
     import csv as _csv
     with (ROOT / "analysis/just-watch-final/migration_map.csv").open(newline="") as fh:
         keep_row = next(r for r in _csv.DictReader(fh) if r["disposition"] == "keep")
     live = json.loads((data / "networks.json").read_text())
+    taken = {row["number"] for row in live["channels"]}
+    vacant = next(n for n in range(100, 900) if n not in taken)
     for row in live["channels"]:
         if row["number"] == int(keep_row["current_number"]):
             row["name"] = "Renamed Beyond Recognition"
             break
     live["channels"].append({
-        "id": "net_deadbeef", "number": 899, "name": "Ghost Network",
+        "id": "net_deadbeef", "number": vacant, "name": "Ghost Network",
         "glyph": "\uf111", "color": "#000000", "section": "general",
         "family": "test", "count": 1, "sort": "shuffle", "seed": 1,
         "programmingMode": "fixed", "sourceLabel": "",
         "source": {"type": "filter", "tags": ["5"]}})
     (data / "networks.json").write_text(json.dumps(live))
-    result = run_tool(data, "--staging-dir", str(tmp / "staging"), "--dry-run")
-    assert result.returncode == 0
+    dry = run_tool(data, "--staging-dir", str(tmp_path / "staging"), "--dry-run")
+    assert dry.returncode == 2, dry.stderr
     # identity drift is reported precisely...
-    assert "Renamed Beyond Recognition" in result.stderr
-    assert keep_row["current_name"] in result.stderr
-    # ...while a retired slot the map explains is NOT drift by design
-    assert "net_deadbeef" not in result.stderr
-    # the dry run did not touch the library
-    assert (data / "channel-library.json").exists()
+    assert "Renamed Beyond Recognition" in dry.stderr
+    assert keep_row["current_name"] in dry.stderr
+    # ...and the ghost is drift (no map entry), while nothing was written
+    assert "Ghost Network" in dry.stderr
+    assert not (data / "channel-library.json").exists()
+    apply_result = run_tool(data, "--staging-dir", str(tmp_path / "staging"), "--apply")
+    assert apply_result.returncode == 2
+    assert not (data / "channel-library.json").exists()
+    assert not list(tmp_path.glob("migration-backup-*")), \
+        "drift must abort before any backup or commit"
 
 
-def test_restore_brings_back_the_legacy_deployment(deployment):
+def test_restore_brings_back_the_legacy_deployment_exactly(deployment, migrated):
     tmp, data = deployment
     backups = sorted(tmp.glob("migration-backup-*"))
     assert backups, "the apply run must leave a backup"
-    # (deployment fixture is pre-apply: the migrated fixture did the apply)
+    # post-backup artifacts within the managed scope must NOT survive restore
+    (data / "programming").mkdir(exist_ok=True)
+    (data / "programming" / "newer.json").write_text('{"new": true}')
+    (data / "continuing-networks.json").write_text(
+        json.dumps({"enabled": True, "networkIds": ["net_00000001"]}))
     result = run_tool(data, "--restore", str(backups[-1]))
-    assert result.returncode == 0
+    assert result.returncode == 0, result.stderr
     assert (data / "catalog.json").exists()
     catalog = json.loads((data / "catalog.json").read_text())
     assert catalog["revision"] == 21
+    # the library (absent at backup time) is removed, and the post-backup
+    # rollout/publication do not overlay the restored state
+    assert not (data / "channel-library.json").exists()
+    assert not (data / "continuing-networks.json").exists()
+    assert not (data / "programming" / "newer.json").exists()
 
 def test_rollout_preserved_for_survivors_and_recorded_for_retired(tmp_path):
     """The rollout file's networkIds (NOT 'channels') drive activation

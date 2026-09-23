@@ -192,6 +192,7 @@ def _op_directory(ctx: TaskContext) -> dict:
     """
     schedule_status = continuing.read_status(ctx.data_dir).get("channels", {})
     if channel_service.library_active(ctx.data_dir):
+        rollout = continuing.try_load_rollout(ctx.data_dir)
         view = channel_service.load_view(ctx.data_dir)
         snapshot = snapshots.read_snapshot(ctx.data_dir, ctx.assets_dir)
         health = snapshot.get("channels", {}) if snapshot.get("revision") == view["revision"] else {}
@@ -209,7 +210,7 @@ def _op_directory(ctx: TaskContext) -> dict:
                 "sort": channel.get("sort", "shuffle"),
                 "seed": channel["seed"],
                 "sourceType": (channel.get("source") or {}).get("type"),
-                "programmingMode": (channel.get("programming") or {}).get("mode", "fixed"),
+                "programmingMode": channel_service.effective_programming(channel, rollout)["effective"],
                 "sceneCount": health.get(channel["id"], {}).get("sceneCount"),
             }
             entry = schedule_status.get(channel["id"])
@@ -339,9 +340,11 @@ def _op_lineup(ctx: TaskContext) -> dict:
             "channelId": channel_id,
             "revision": revision,
             "sort": channel.get("sort"),
-            # Rotation identity: ordering hash + the revision that published
-            # it. Clients compare this to drop stale cached lineups.
-            "rotationVersion": f"r{revision}-{result['rotationVersion']}",
+            # Rotation identity: this CHANNEL's ordering hash (membership +
+            # order + epoch). Deliberately NOT prefixed with the global
+            # library revision — a rename/group/color Apply must not churn
+            # every lineup version and evict healthy caches (audit C12).
+            "rotationVersion": result["rotationVersion"],
         })
         return result
     network = networks.get(channel_id)
@@ -570,6 +573,8 @@ def _save_catalog_via_library(ctx: TaskContext) -> dict:
     receipt = library.apply_transaction(
         ctx.data_dir, expected_revision=expected, request_id=rid,
         ops=ops, actor="legacy-save-catalog",
+        pre_commit=refresh.commit_hook(
+            ctx.data_dir, {c["id"]: c for c in doc["channels"]}),
     )
     if receipt.get("status") != "committed":
         payload = {"saved": False, "error": receipt.get("error"), "message": receipt.get("message", "")}
@@ -578,12 +583,7 @@ def _save_catalog_via_library(ctx: TaskContext) -> dict:
         if receipt.get("currentRevision") is not None:
             payload["currentRevision"] = receipt["currentRevision"]
         return payload
-    affected, signatures = [], {}
-    before = {c["id"]: c for c in doc["channels"]}
-    after = {c["id"]: c for c in library.load(ctx.data_dir)["channels"]}
-    affected, signatures = refresh.affected_channels(before, after)
-    if affected:
-        refresh.enqueue(ctx.data_dir, affected, receipt["revision"], signatures)
+    if refresh.read_pending(ctx.data_dir):
         try:
             refresh.process_pending(ctx.client, ctx.data_dir, ctx.assets_dir)
         except Exception as exc:
@@ -771,10 +771,8 @@ def _op_full_directory(ctx: TaskContext) -> dict:
                     row["poolFreshness"] = "current"
             if not channel.get("enabled", True) or channel.get("archived") or channel.get("paused"):
                 continue
-            if (channel.get("programming") or {}).get("mode") == "continuing":
-                row["programmingMode"] = continuing.resolved_mode(
-                    channel_service.as_legacy_network_channel(channel),
-                    continuing.try_load_rollout(ctx.data_dir))
+            row["programmingMode"] = channel_service.effective_programming(
+                channel, continuing.try_load_rollout(ctx.data_dir))["effective"]
             entry = schedule_status.get(channel["id"])
             if entry and entry.get("ready"):
                 row["schedule"] = {
@@ -846,6 +844,28 @@ def _op_full_directory(ctx: TaskContext) -> dict:
     }
 
 
+def _publication_compatible(data_dir, channel: dict, publication: dict) -> bool:
+    """Whether a stored publication may still supply scenes for the CURRENT
+    applied channel (audit C6). Custom publications carry ``configuration``
+    (source+sort+seed+policy digest); continuing publications carry
+``sourceSignature``.
+    A mismatched publication is stale content from a removed/edited pool and
+    must not air — Schedule reports preparing and the TV falls back to the
+    current bounded Lineup."""
+    try:
+        if publication.get("schema") == 3:
+            return publication.get("sourceSignature") == continuing.source_signature_of(
+                channel_service.as_legacy_network_channel(channel))
+        expected = programming.digest([
+            channel.get("source"), channel.get("sort", "shuffle"),
+            int(channel.get("seed") or 0),
+            programming.policy(channel.get("programming")),
+        ])
+        return publication.get("configuration") == expected
+    except Exception:
+        return False
+
+
 def _op_schedule(ctx):
     channel_id = str(ctx.args.get("channelId") or "")
     rollout = continuing.try_load_rollout(ctx.data_dir)
@@ -854,17 +874,27 @@ def _op_schedule(ctx):
         if channel is None or not channel.get("enabled", True) \
                 or channel.get("archived") or channel.get("paused"):
             raise LookupError("channel is unavailable")
-        if channel["kind"] == "net":
-            # The rollout gate + authored pin decide; the GUI never bypasses.
-            mode = continuing.resolved_mode(
-                channel_service.as_legacy_network_channel(channel), rollout)
-        else:
-            mode = programming.policy(channel.get("programming"))["mode"]
-        if mode == "fixed":
+        resolved = channel_service.effective_programming(channel, rollout)
+        if resolved["effective"] == "fixed":
             return {"status": "fixed", "programs": []}
-        return programming.schedule(ctx.data_dir, channel_id,
-            _as_int(ctx.args.get("at"), int(__import__("time").time() * 1000)),
-            _as_int(ctx.args.get("limit"), 50))
+        at = _as_int(ctx.args.get("at"), int(__import__("time").time() * 1000))
+        limit = _as_int(ctx.args.get("limit"), 50)
+        try:
+            publication = programming.read(ctx.data_dir, channel_id)
+        except (OSError, ValueError):
+            return {"status": "preparing", "programs": []}
+        if publication is None:
+            return {"status": "preparing", "programs": []}
+        if not _publication_compatible(ctx.data_dir, channel, publication):
+            # Stale pool: keep ONLY the airing already running (whole-airing
+            # boundary policy) and mark preparing so clients re-tune through
+            # the current Lineup instead of airing excluded scenes.
+            running = [p for p in publication.get("programs", [])
+                       if p.get("startEpochMs", 0) <= at < p.get("endEpochMs", 0)]
+            return {"status": "preparing", "channelId": channel_id,
+                    "programs": running[:max(1, min(50, limit))],
+                    "stalePublication": True}
+        return programming.schedule(ctx.data_dir, channel_id, at, limit)
     if channel_id.startswith("net_"):
         network = networks.get(channel_id)
         if network is None:
@@ -895,7 +925,11 @@ def _op_preview_programming(ctx):
 
 
 def _op_programming_desk(ctx):
-    result = programming.desk(ctx.data_dir, catalog.load(ctx.data_dir)["channels"])
+    if channel_service.library_active(ctx.data_dir):
+        customs = channel_service.custom_channels_legacy(ctx.data_dir)
+    else:
+        customs = catalog.load(ctx.data_dir)["channels"]
+    result = programming.desk(ctx.data_dir, customs)
     # Network diagnostics are bounded and carry NO pairwise overlap (all-pairs
     # over the tier is offline work, never a synchronous computation).
     result["networks"] = continuing.desk(

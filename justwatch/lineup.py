@@ -12,12 +12,12 @@ import hashlib
 import json
 from typing import Any
 
-from justwatch import contract
+from justwatch import contract, criteria
 
 #: Stash's IntCriterionInput has no GREATER_THAN_EQUALS modifier, so an
 #: inclusive "min" duration is expressed as a BETWEEN with a max-int upper
-#: bound.
-INT_MAX = 2_147_483_647
+#: bound. Canonical home is ``criteria`` (the single projector).
+INT_MAX = criteria.INT_MAX
 
 FIND_SCENES = """
 query JustWatchLineup($filter: FindFilterType!, $scene_filter: SceneFilterType!, $include_paths: Boolean!) {
@@ -85,13 +85,22 @@ def source_key(source: dict) -> tuple:
     """Equality identity of a source, tolerant of legacy single-id tag shapes.
 
     Publications stored before multi-tag support embed ``{type, id}``; every
-    source comparison must go through this so those still match.
+    source comparison must go through this so those still match. A
+    ``criteria`` source keys on its full canonical rule set (two different
+    criteria sources are NEVER the same key — the historical
+    ``('criteria', '')`` collision collapsed distinct pools onto one cache
+    entry); a ``filter`` source keeps its historical tuple, extended with
+    the newer criteria fields only when present so legacy publications'
+    identities never churn.
     """
-    if source.get("type") == "tag":
+    kind = source.get("type")
+    if kind == "tag":
         return ("tag", tuple(tag_ids(source)))
-    if source.get("type") == "filter":
+    if kind == "criteria":
+        return ("criteria", criteria.source_signature(source))
+    if kind == "filter":
         return ("filter", _canonical_filter(source))
-    return (str(source.get("type")), str(source.get("id", "")))
+    return (str(kind), str(source.get("id", "")))
 
 
 def _filter_ids(value: Any) -> list[str]:
@@ -113,7 +122,8 @@ def _canonical_filter(source: dict) -> tuple:
         (criterion, tuple(_filter_ids(source.get(criterion))))
         for criterion in ("tags", "excludeTags", "performers", "studios")
     ]
-    for criterion in ("performersAny", "studiosAny"):
+    for criterion in ("performersAny", "studiosAny",
+                      "excludePerformers", "excludeStudios"):
         ids = _filter_ids(source.get(criterion))
         if ids:
             parts.append((criterion, tuple(ids)))
@@ -122,24 +132,30 @@ def _canonical_filter(source: dict) -> tuple:
         parts.append(("date", (str(date.get("from", "")), str(date.get("to", "")))))
     duration = source.get("duration")
     if isinstance(duration, dict):
-        parts.append(("duration", (int(duration.get("min", 0)),)))
+        # (min,) keeps the exact historical tuple for legacy min-only rows;
+        # max joins only when authored so their identity is honest.
+        if duration.get("max"):
+            parts.append(("duration", (int(duration.get("min", 0)),
+                                       int(duration.get("max")))))
+        else:
+            parts.append(("duration", (int(duration.get("min", 0)),)))
     created = source.get("createdAt")
     if isinstance(created, dict):
         parts.append(("createdAt", (int(created.get("withinDays", 0)),)))
+    for facet in ("studioSceneCount", "performerSceneCount"):
+        spec = source.get(facet)
+        if isinstance(spec, dict) and (spec.get("min") or spec.get("max")):
+            parts.append((facet, (int(spec.get("min") or 0), int(spec.get("max") or 0))))
+    q = source.get("q")
+    if isinstance(q, str) and q.strip():
+        parts.append(("q", q.strip()))
     return tuple(parts)
 
 
 def created_cutoff(within_days: int, today: _dt.date | None = None) -> str:
-    """The inclusive cutoff date for a created-at recency criterion:
-    ``within_days`` calendar days back from today (UTC).
-
-    A bare ``YYYY-MM-DD`` value parses as midnight, so GREATER_THAN includes
-    the whole boundary day — matching the extraction's ``created_at[:10] >=``
-    reference semantics.
-    """
-    if today is None:
-        today = _dt.datetime.now(_dt.timezone.utc).date()
-    return (today - _dt.timedelta(days=int(within_days))).isoformat()
+    """The inclusive cutoff date for a created-at recency criterion
+    (canonical implementation: ``criteria.created_cutoff``)."""
+    return criteria.created_cutoff(within_days, today)
 
 
 def effective_epoch(source: dict, today: _dt.date | None = None) -> str:
@@ -167,77 +183,15 @@ def effective_epoch(source: dict, today: _dt.date | None = None) -> str:
 def build_scene_filter(source: dict, object_filter: dict | None = None) -> dict:
     """Project a channel source into a ``SceneFilterType`` variable.
 
-    ``object_filter`` carries a saved filter's stored ``object_filter`` (used
-    verbatim); entity sources project directly. A ``filter`` source is the
-    network tier's composite: per-criterion include semantics (``tags`` and
-    ``performers``/``studios`` ALL-of — the curation intersections the CSV
-    validated; ``performersAny``/``studiosAny`` ANY-of — the aggregate
-    discovery unions), ``excludeTags`` riding the tags criterion's ``excludes``
-    (any-of exclusion, hierarchical like the include), plus metadata criteria:
-    a scene-date ``BETWEEN`` range, a minimum-duration ``BETWEEN`` (inclusive;
-    Stash has no >= modifier), and created-at recency resolved to a cutoff
-    date at query time (dynamic by design).
+    ONE canonical implementation exists (``criteria.build_scene_filter``) and
+    EVERY consumer uses it — preview, Lineup, health, and both schedulers'
+    indexers. This wrapper preserves the legacy import path (byte-stable
+    public signature) while delegating, so the editor's pool preview and
+    actual playback can never diverge again (audit C2): a ``criteria``
+    source, an edited ``filter`` source's exclusions/duration-max/dynamic
+    rows, and authored text ``q`` all reach playback identically.
     """
-    source_type = source.get("type")
-    source_id = str(source.get("id", ""))
-    if source_type == "savedFilter":
-        if not isinstance(object_filter, dict):
-            raise LookupError("saved filter has no stored object filter")
-        return object_filter
-    if source_type == "tag":
-        # INCLUDES with several values is a union: a scene tagged with ANY of
-        # them airs (depth -1 keeps sub-tags of every pill in the set).
-        return {"tags": {"value": tag_ids(source), "modifier": "INCLUDES", "depth": -1}}
-    if source_type == "performer":
-        return {"performers": {"value": [source_id], "modifier": "INCLUDES"}}
-    if source_type == "studio":
-        return {"studios": {"value": [source_id], "modifier": "INCLUDES", "depth": -1}}
-    if source_type == "filter":
-        out: dict[str, Any] = {}
-        tags = _filter_ids(source.get("tags"))
-        exclude_tags = _filter_ids(source.get("excludeTags"))
-        performers = _filter_ids(source.get("performers"))
-        performers_any = _filter_ids(source.get("performersAny"))
-        studios = _filter_ids(source.get("studios"))
-        studios_any = _filter_ids(source.get("studiosAny"))
-        date = source.get("date") if isinstance(source.get("date"), dict) else None
-        duration = source.get("duration") if isinstance(source.get("duration"), dict) else None
-        created = source.get("createdAt") if isinstance(source.get("createdAt"), dict) else None
-        if not (tags or performers or performers_any or studios or studios_any
-                or date or duration or created):
-            raise ValueError("filter source has no include criteria")
-        if tags or exclude_tags:
-            criterion: dict[str, Any] = {
-                "value": tags, "modifier": "INCLUDES_ALL", "depth": -1,
-            }
-            if exclude_tags:
-                criterion["excludes"] = exclude_tags
-            out["tags"] = criterion
-        if performers or performers_any:
-            # ALL intersects the listed performers; ANY unions them (the
-            # aggregate discovery channels). ALL keeps historical precedence
-            # when a source somehow carries both.
-            if performers:
-                out["performers"] = {"value": performers, "modifier": "INCLUDES_ALL"}
-            else:
-                out["performers"] = {"value": performers_any, "modifier": "INCLUDES"}
-        if studios or studios_any:
-            if studios:
-                out["studios"] = {"value": studios, "modifier": "INCLUDES_ALL", "depth": -1}
-            else:
-                out["studios"] = {"value": studios_any, "modifier": "INCLUDES", "depth": -1}
-        if date:
-            out["date"] = {"value": str(date.get("from", "")),
-                           "value2": str(date.get("to", "")),
-                           "modifier": "BETWEEN"}
-        if duration:
-            out["duration"] = {"value": int(duration.get("min", 0)),
-                               "value2": INT_MAX, "modifier": "BETWEEN"}
-        if created:
-            out["created_at"] = {"value": created_cutoff(int(created.get("withinDays", 0))),
-                                 "modifier": "GREATER_THAN"}
-        return out
-    raise ValueError(f"unknown source type: {source_type!r}")
+    return criteria.build_scene_filter(source, object_filter)
 
 
 def build_find_filter(
@@ -344,6 +298,10 @@ def fetch_rotation(
     size = max(1, int(size))
     scan_limit = max(size, int(scan_limit))
     scene_filter = build_scene_filter(source, object_filter)
+    # An authored text query (filter/criteria ``q``) is membership: it rides
+    # every page exactly like a saved filter's stored q.
+    if text_query is None:
+        text_query = criteria.text_query_of(source)
     items: list[dict] = []
     seen = 0
     source_total = 0

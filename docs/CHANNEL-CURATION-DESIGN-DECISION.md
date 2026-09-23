@@ -70,8 +70,17 @@ replace its 794-id list with the dynamic "studios with fewer than 2 scenes"
 row, and Apply — that is a normal, reviewed, one-Apply edit with history.
 New dynamic channels are equally one creation away.
 
-**Known limits (honest):** `scene_count` counts ALL scenes of the
-performer/studio in Stash — the proposal's extraction counted the same way,
-so semantics match. The nested filters need the newer Stash runtime; on an
-older server, validation reports "dynamic performer/studio rules are not
-supported by this Stash version" instead of failing mysteriously.
+**Known limits (honest, corrected 2026-09-23 remediation):** `scene_count`
+counts ALL scenes of the performer/studio in the WHOLE Stash library — this
+is **total-library entity activity**, NOT the proposal extraction's
+**network-eligible post-JAV scene count** (which also applied hierarchical
+studio treatment and the per-channel exclusion rules when materializing
+"Fringe Studios"/"Rare Performers"). A dynamic `scene_count` row is therefore
+a related-but-different membership predicate, not a maintenance-free
+conversion of those materialized lists. The seeded proposal channels keep
+their materialized id lists byte-for-byte until an explicit content edit
+chooses the dynamic semantics; converting a list to a count rule is a
+reviewed, one-Apply content decision, never an automatic rewrite. The nested
+filters need the newer Stash runtime; on an older server, validation and
+preview report "dynamic performer/studio rules are not supported by this
+Stash version" instead of failing mysteriously.
