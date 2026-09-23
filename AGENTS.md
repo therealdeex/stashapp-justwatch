@@ -1,7 +1,16 @@
 # stash-justwatch — project knowledge
 
-**Status:** v0.7.0, contract version 1. Companion plugin for the TV app's
-Just Watch feature (repo `~/dev/StashAppAndroidTV`).
+**Status:** v0.8.0-dev, contract version 1 (additive channel-library
+surface). Companion plugin for the TV app's Just Watch feature (repo
+`~/dev/StashAppAndroidTV`). Since v0.8.0 the plugin carries the
+CHANNEL-LIBRARY feature: an owner-editable library
+(`<data>/channel-library.json`) seeded from the v4-final 513-network proposal
+plus customs, dynamic single-membership groups, explicit-Apply editing with
+durable receipts, and incremental refresh. See
+docs/CHANNEL-CURATION-API.md, docs/CHANNEL-CURATION-MIGRATION.md and
+docs/CHANNEL-CURATION-HANDOFF.md. Until a deployment runs the migration
+(tool: `tools/migrate_channel_library.py`), every behavior below that
+mentions the library is dormant and the legacy stores rule.
 
 ## Architecture
 
@@ -24,6 +33,31 @@ beyond stdlib (+ optional PyYAML for the API-key fallback). Data flow:
   normalize tolerantly; validation reports malformed fields as
   `{path, code, message}`. Saves take a process-safe `catalog_lock` around the
   revision re-read/check/write and use unique temp files.
+- `justwatch/library.py` — the AUTHORITATIVE owner-editable library
+  (schema 1; both ch_/net_ namespaces + groups with immutable ids and exactly
+  one membership per channel; number bands 1–99 / 100–899). Strict loading
+  like the catalog; one write path: touched-record transactions with
+  expectedRevision + requestId, receipts committed atomically WITH the
+  document (idempotent replay; digest mismatch rejected), bounded history
+  snapshots, process-safe `.library.lock`.
+- `justwatch/criteria.py` — the canonical rule model: legacy shapes pass
+  through verbatim; the composite `filter` shape; the new `criteria` shape
+  (per-facet ANY/ALL + explicit exclusions + date/duration/recency/text).
+  A facet set to both ANY and ALL is a validation error; exclude-only pools
+  are the historical "everything except" shape and stay valid. Projection
+  reuses the tested Stash criterion shapes (exclusions ride their facet
+  criterion's `excludes`, never a NOT wrapper; tags/studios keep depth -1).
+- `justwatch/channel_service.py` — the ONE resolved channel view (library if
+  present, else legacy stores); Directory/FullDirectory/Lineup/Schedule/
+  programming/continuing read through it so what the GUI edits is what airs.
+- `justwatch/channel_ops.py` — the editing surface (GetChannelLibrary,
+  GetChannelDirectory, GetChannelDefinition, ValidateChannelChanges,
+  PreviewChannelPool, ApplyChannelChanges task, GetChannelApplyResult,
+  GetChannelHistory). Additive v1; playback shapes untouched.
+- `justwatch/refresh.py` — the durable pending-refresh journal: membership
+  changes enqueue per-channel work with membership signatures; stale workers
+  re-queue against the current signature under the lock; cosmetic edits never
+  reindex. Drained inline by Apply and by every PrepareProgramming run.
 - `justwatch/lineup.py` — source → `SceneFilterType` projection (saved filters
   used verbatim INCLUDING their text search `q`; tags/studios hierarchical
   INCLUDES depth -1; performers flat; the networks' composite `filter` type:
@@ -32,8 +66,8 @@ beyond stdlib (+ optional PyYAML for the API-key fallback). Data flow:
   ACTIVE ROTATION: up to 50 playable scenes in the channel's own order, paging
   past unplayable rows, bounded at 1000 raw rows; returns `rotationVersion`
   (ordering hash + catalog revision), `sourceTotal`, `rotationComplete`.
-- `justwatch/networks.py` — the NETWORK TIER: the owner's curated channel list
-  (100–899, currently 795 networks) compiled from
+- `justwatch/networks.py` — the LEGACY compiled network tier (100–899,
+  currently 795 networks) compiled from
   `data/proposed_channels_new_taxonomy_scene_validated.csv` by
   `tools/import_channels.py` into `justwatch/networks.json` (strict loader,
   `NetworksError` on malformed; a MISSING file is an empty tier). Since v0.6.0
@@ -46,10 +80,11 @@ beyond stdlib (+ optional PyYAML for the API-key fallback). Data flow:
   `FullDirectory` sections come from it with zero Stash queries. Replaces the
   retired autodir tiering (the TV app no longer generates sections client-side
   when the block is present; `specs.json`/`extract_specs.py` are gone).
-  **Pending (not deployed):** the approved v4-final proposal — 513 networks,
-  `data/proposed_channels_final.csv` + `analysis/just-watch-final/` (catalog,
-  migration map, 24/24 validation) — replaces production only after explicit
-  instruction.
+  **Superseded on migrated deployments** (see the library bullet): the
+  v4-final 513-network proposal is the seed of the owner library; the
+  compiled artifact becomes a backed-up provenance input. Re-running
+  `tools/import_channels.py` against a migrated deployment does NOT change
+  what airs — the library does.
 - `justwatch/snapshots.py` — health snapshots + `save_result.json` side-channel,
   dual-written to `<Dir>/stash-justwatch-data/snapshots/` and
   `<PluginDir>/assets/snapshots/` (the UI reads the assets mirror with
@@ -100,22 +135,22 @@ beyond stdlib (+ optional PyYAML for the API-key fallback). Data flow:
   include/exclude tags from settings apply ONLY to the TV app's legacy auto
   channels; never apply them to custom channel lineups or to network
   channels.
-- **The network tier is the compiled CSV, verbatim.** Networks are read-only:
-  they never enter catalog.json, are never editable via SaveCatalog, never
-  get health snapshots (the CSV-validated `count` IS the health), and are
-  FIXED-MODE by default. The one sanctioned exception (v0.7.0, plan
-  docs/CONTINUING-PROGRAMMING-PLAN.md): a network activated through the
-  rollout file runs a CONTINUING schedule — still CSV-authored membership
-  (identities, seeds, source/exclusion semantics unchanged), still outside
-  catalog.json, still no health snapshots (scheduling status is the separate
-  `status.json` surface, never health). `networks.json` is a build artifact —
-  change the CSV and re-import; ids/seeds hash the row identity, so a
-  re-import never reshuffles rotations. Network source ids are DATABASE ids
-  of the Stash the CSV was validated against; against any other library the
-  tier airs empty. Absent file = absent `networks` block = clients keep their
-  legacy generation. Deploying new plugin code alone NEVER activates
-  continuing mode; removing/disabling the rollout file is the rollback, and
-  old clients keep the unchanged fixed Lineup contract either way.
+- **Channel identity and source semantics are immutable across edits** (was:
+  "the network tier is the compiled CSV, verbatim" — superseded for migrated
+  deployments by the owner's explicit 2026-09 decision to make all channels
+  editable; see the handoff in docs/CHANNEL-CURATION-HANDOFF.md). Ids and
+  seeds are server-owned: an Apply can never change an existing channel's
+  id/seed/kind; groups and cosmetic edits never touch membership. On
+  migrations, seeds/sources/exclusions transfer byte-for-byte and the
+  v4-final proposal's five sanctioned JAV exceptions (225, 252, 407, 461,
+  480) are preserved — the OLD four-row recount recipe belongs to a
+  different catalog and must never run over the proposal. Pre-migration (and
+  for anything the library document does not cover) the compiled-tier rules
+  still apply: `networks.json` is a build artifact, ids/seeds hash row
+  identity, source ids are DATABASE ids of the validating Stash, absent file
+  = absent `networks` block = clients keep their legacy generation.
+  Deploying new plugin code alone NEVER activates continuing mode;
+  removing/disabling the rollout file is the rollback.
 - **Nowhere-tags (v0.5.0):** every network row EXCEPT the four all-JAV
   studios (407 Madonna Selects, 461 Nagae Style Showcase, 480 Hunter Vault,
   835 Madonna: Wrong Side of the Bed Nights — the sanctioned exception, noted
@@ -165,13 +200,20 @@ stepper with **Swap** conflict resolution), Programming (source chip + six
 play-order chips), Appearance (glyph grid + swatches), On Air strip (10 thumbs
 + loop-length line), Remove. Create/change-source share one sheet: grouped
 results always visible (Custom lineups → Studios → Tags → Performers), search
-narrows, inline prefilled name, lowest-free auto-number. **Autosave** with a
-muted Saved indicator — no Save button. ONE save coordinator backs every edit
-(create/edit/relink/renumber/delete/settings): saves submit against the last
-server-acknowledged revision, edits made mid-save serialize cleanly, an
-external revision conflict keeps the draft and offers reload vs deliberate
-overwrite, and failed saves leave a kept draft with a Retry action — a newer
-unsent draft is never labeled "Saved". Health: off-air (0), thin (<10),
+narrows, inline prefilled name, lowest-free auto-number.
+**Superseded (owner decision, 2026-09): explicit Apply replaces autosave.**
+Every mutation — create, renumber/swap, archive, group changes, bulk actions,
+restores, programming preferences — commits only through Apply as an
+immutable snapshot with expectedRevision + requestId; edits made while a
+request is in flight stay a newer dirty draft and need another Apply.
+Drafts survive navigation, validation errors, transport failures and revision
+conflicts; success means the correlated durable RECEIPT
+(GetChannelApplyResult), never a task id; persistence and background
+programming readiness are reported separately. (The autosave-era "ONE save
+coordinator" wording below describes the retired editor and is kept only for
+archaeology: saves submit against the last server-acknowledged revision, an
+external revision conflict keeps the draft, a newer unsent draft is never
+labeled "Saved". Health: off-air (0), thin (<10),
 missing-source relink states. Language is the TV fiction: lineup, airing
 from, play order, on air, off air, loops. TV side: "MY CHANNELS" banner,
 brand-tinted number cells; with networks present the dial is 1–99 My Channels
