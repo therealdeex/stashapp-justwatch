@@ -1,0 +1,33 @@
+{
+  "replay_exposure_count": {
+    "expected_before_extension": 336,
+    "actual": 338
+  },
+  "immediate_repeats_in_seven_days": {
+    "2": 167,
+    "8": 41,
+    "30": 0,
+    "100": 0
+  },
+  "custom_failure": {
+    "task_raised": false,
+    "returned_channels": {
+      "ch_12345678": "index failed"
+    }
+  },
+  "schema2_migration": {
+    "outcome": "ready",
+    "preserves_current_airing": false
+  },
+  "duplicate_oracle": {
+    "first_pass_size": 100,
+    "unique": 99,
+    "detected": []
+  },
+  "expired_status": {
+    "coverageHours": 0.0,
+    "ready": false,
+    "expiring": false,
+    "encore": false
+  }
+}
