@@ -1,22 +1,29 @@
-// Just Watch — Channel Studio.
+// Just Watch — Channel Studio (the owner's channel-library editor).
 //
-// Registers `/plugin/stash-justwatch` through Stash's PluginApi route surface
-// and renders the editor for the TV app's custom channels (1-99):
+// Registers /plugins/stash-justwatch through Stash's PluginApi route surface
+// and edits the plugin's channel library (My Channels 1-99 + the network tier
+// 100-899) through the channel-curation operations:
 //
-//   Master-detail: the left rail IS the dial (guide-row anatomy: number,
-//   glyph tile in brand color, name + summary). The editor pane edits the
-//   selected channel. Creation and source-change share one sheet with
-//   always-visible grouped results. Everything autosaves; no Save button.
+//   GetChannelLibrary / GetChannelDefinition / GetChannelHistory     reads
+//   PreviewChannelPool                                        draft preview
+//   ValidateChannelChanges                                     pre-flight
+//   ApplyChannelChanges (TASK)  ->  GetChannelApplyResult    THE write path
 //
-// Language is the TV fiction: lineup, airing from, play order, on air,
-// off air, loops. Never "filters", "JSON", or "plugin operations".
-//
-// Design invariants (stash-tag-curator precedent):
+// Design invariants (supersede the v0.7 autosave editor):
+//   * NO autosave. Every edit lands in a per-channel draft (sessionStorage);
+//     nothing reaches the server without an explicit Apply.
+//   * Writes dispatch through Stash's job queue (runPluginTask "Apply Channel
+//     Changes"). A queued job id is NOT success: the client polls
+//     GetChannelApplyResult with a client-generated requestId until the
+//     durable receipt resolves. RECEIPTS ARE THE TRUTH.
+//   * The requestId is generated once per SUBMIT and reused verbatim on retry
+//     after a transport failure — the server replays the stored receipt
+//     idempotently. A changed draft (or a changed expectedRevision) means a
+//     NEW requestId: the server rejects a replayed id with different content.
+//   * revision_conflict keeps the draft and offers "Apply onto r{N}"; it never
+//     silently reloads or overwrites.
 //   * XSS: no raw-HTML injection anywhere; server strings are React children.
-//   * No second React: React + libraries come from PluginApi.
-//   * Writes dispatch through Stash's job queue (runPluginTask); the result
-//     is read back from the plugin's save_result.json side-channel, matched
-//     by a client-generated requestId.
+//   * No second React: React comes from PluginApi; no extra libraries.
 
 (() => {
   const api = window.PluginApi;
@@ -27,23 +34,31 @@
 
   const React = api.React;
   const h = React.createElement;
-  const { useState, useEffect, useRef, useCallback } = React;
+  const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
   // ------------------------------------------------------------------
   // Constants
   // ------------------------------------------------------------------
 
+  const PLUGIN_ID = "stash-justwatch";
   const ROUTE_PATH = "/plugins/stash-justwatch";
   // Legacy path kept registered: early bookmarks/links used it. The server
   // only serves the app shell for /plugins/* (its /plugin mount owns assets
   // and /javascript), so the plural path is the only deep-linkable one.
   const LEGACY_ROUTE_PATH = "/plugin/stash-justwatch";
   const ASSET_BASE = "/plugin/stash-justwatch/assets/";
-  const POLL_INTERVAL_MS = 800;
-  const AUTOSAVE_DEBOUNCE_MS = 700;
-  const SEARCH_DEBOUNCE_MS = 300;
-  const PREVIEW_COUNT = 10;
-  const THIN_LINEUP = 10;
+
+  const ROTATION_SIZE = 50; // the on-air loop bound (mirrors the contract)
+  const ROTATION_SCAN_LIMIT = 1000;
+  const PREVIEW_DEBOUNCE_MS = 350;
+  const TEXT_DEBOUNCE_MS = 300;
+  const SEARCH_DEBOUNCE_MS = 250;
+  const APPLY_POLL_INTERVAL_MS = 2000;
+  const APPLY_POLL_TRIES = 60; // ~2 min: the Apply task refreshes inline
+  const REFRESH_NOTE_MS = 8000;
+  const MAX_NAME_LEN = 60;
+  const BANDS = { ch: [1, 99], net: [100, 899] };
+  const DRAFT_COUNT_CAP = 100; // chips shown per facet line
 
   const SORTS = [
     { key: "shuffle", label: "Shuffle" },
@@ -54,56 +69,14 @@
     { key: "shortest", label: "Shortest" },
   ];
 
-  const SOURCE_KINDS = {
-    savedFilter: { label: "Custom lineup", glyph: "\uf02d" },
-    studio: { label: "Studio", glyph: "\uf1ad" },
-    tag: { label: "Tag", glyph: "\uf02c" },
-    performer: { label: "Performer", glyph: "\uf007" },
-  };
-
-  // A tag channel airs from a SET of tags (any-of union). Canonical shape:
-  // {type:"tag", id:<first>, ids:[sorted]} — mirrors the server's normalize.
-  // Names resolve lazily (this Stash has no ids filter on findTags); null
-  // marks a tag deleted in Stash, known only after it has been looked up.
-  const TAG_NAMES = new Map();
-
-  function tagIdsOf(source) {
-    const src = source || {};
-    if (src.type !== "tag") return [];
-    const pool = [...new Set((Array.isArray(src.ids) ? src.ids : []).map(String).filter((x) => /^\d+$/.test(x)))];
-    if (pool.length) return pool.sort((a, b) => Number(a) - Number(b));
-    return /^\d+$/.test(String(src.id || "")) ? [String(src.id)] : [];
-  }
-
-  function tagSource(ids) {
-    const clean = [...new Set(ids.map(String))].sort((a, b) => Number(a) - Number(b));
-    return { type: "tag", id: clean[0], ids: clean };
-  }
-
-  function joinLabels(names) {
-    return names.length <= 2 ? names.join(", ") : names.slice(0, 2).join(", ") + " +" + (names.length - 2);
-  }
-
-  async function fetchTagNames(ids) {
-    const missing = [...new Set(ids)].filter((id) => !TAG_NAMES.has(id));
-    await Promise.all(missing.map(async (id) => {
-      try {
-        const r = await gql("query JwTagName($id: ID!) { findTag(id: $id) { name } }", { id });
-        TAG_NAMES.set(id, ((r || {}).findTag || {}).name || null);
-      } catch (e) {
-        TAG_NAMES.set(id, "#" + id);
-      }
-    }));
-  }
-
-  // Curated brand palette (one row of swatches; a custom color is allowed too).
+  // Same brand palette as before; the TV renders these as number-cell tints.
   const PALETTE = [
     "#E91E63", "#D32F2F", "#F57C00", "#F9A825", "#AFB42B", "#388E3C",
     "#00897B", "#00ACC1", "#3949AB", "#5E35B1", "#7B1FA2", "#455A64",
   ];
 
-  // The shared glyph set from the plugin contract (the TV dial's brand
-  // glyphs). DEFAULT_GLYPHS is the quick-pick pool for new channels.
+  // The shared glyph set from the plugin contract — the ONLY glyphs the server
+  // accepts (`channel.glyph` must be in this set or null).
   const GLYPH_POOL = [
     "\ue131", "\uf004", "\uf005", "\uf007", "\uf008", "\uf015", "\uf030",
     "\uf03d", "\uf043", "\uf06b", "\uf06c", "\uf06d", "\uf06e", "\uf072",
@@ -115,16 +88,15 @@
     "\uf56d", "\uf5bb", "\uf5e4", "\uf6de", "\uf6fa", "\uf753", "\uf773",
     "\uf8d7", "\uf8d9",
   ];
-  const DEFAULT_GLYPHS = [
-    "\uf111", "\uf005", "\uf008", "\uf06d", "\uf1b0", "\uf236",
-    "\uf3a5", "\uf4d8", "\uf5e4", "\uf0a1", "\uf11b", "\uf1da",
-  ];
 
-  // Section glyphs mirror the TV app's auto-channel branding; auto channels use
-  // the neutral slate so the owner's custom channels stay visually special.
-  const SECTION_GLYPHS = { general: "\uf02b", studios: "\uf1ad", performers: "\uf007" };
-  const AUTO_SLATE = "#546E7A";
-  const GROUP_SLATE = "#455A64";
+  const FACET_KEYS = ["tags", "tagsAny", "excludeTags", "performers", "performersAny",
+    "excludePerformers", "studios", "studiosAny", "excludeStudios"];
+  // A facet cannot be both ANY and ALL (Stash has one criterion per facet);
+  // ids + a scene-count rule DO compose (they AND).
+  const EXCLUSIVE_FACETS = [["tags", "tagsAny"], ["performers", "performersAny"], ["studios", "studiosAny"]];
+
+  const DIAL_ITEM_HEIGHT = 44;
+  const PICKER_ITEM_HEIGHT = 34;
 
   const TERMINAL_STATUSES = new Set([
     "FINISHED", "COMPLETE", "COMPLETED", "FAILED", "CANCELLED", "CANCELED", "REMOVED", "ABORTED",
@@ -134,10 +106,30 @@
   // Transport
   // ------------------------------------------------------------------
 
+  // Session cookie is the normal auth; when the page was opened with
+  // ?apikey=… (a bookmark/automation flow), reuse that key for same-origin
+  // GraphQL too and mirror it where Stash's own SPA keeps it.
+  const API_KEY = (() => {
+    try {
+      const fromUrl = new URLSearchParams(window.location.search).get("apikey");
+      if (fromUrl) {
+        try { if (!window.localStorage.getItem("apikey")) window.localStorage.setItem("apikey", fromUrl); } catch (e) { /* private mode */ }
+        return fromUrl;
+      }
+      return window.localStorage.getItem("apikey") || "";
+    } catch (e) { return ""; }
+  })();
+
+  function gqlHeaders() {
+    const headers = { "Content-Type": "application/json" };
+    if (API_KEY) headers.Apikey = API_KEY;
+    return headers;
+  }
+
   async function gql(query, variables) {
     const resp = await fetch("/graphql", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: gqlHeaders(),
       credentials: "same-origin",
       body: JSON.stringify({ query, variables: variables || {} }),
     });
@@ -148,23 +140,12 @@
     return body.data;
   }
 
-  // runPluginOperation with an explicitly-typed Map: absent keys arrive as
-  // null and the plugin treats them as "not provided".
+  // One Map variable carries the whole args envelope; the plugin reads
+  // args["mode"] and treats absent keys as "not provided".
   async function runOp(mode, args) {
-    const a = args || {};
     const data = await gql(
-      "mutation JwOp($mode: String!, $channelId: String, $page: String, $perPage: String, $channel: String, $catalog: String, $expectedRevision: String, $requestId: String) " +
-      '{ runPluginOperation(plugin_id: "stash-justwatch", args: {mode: $mode, channelId: $channelId, page: $page, perPage: $perPage, channel: $channel, catalog: $catalog, expectedRevision: $expectedRevision, requestId: $requestId}) }',
-      {
-        mode,
-        channelId: a.channelId != null ? String(a.channelId) : null,
-        page: a.page != null ? String(a.page) : null,
-        perPage: a.perPage != null ? String(a.perPage) : null,
-        channel: a.channel != null ? String(a.channel) : null,
-        catalog: a.catalog != null ? String(a.catalog) : null,
-        expectedRevision: a.expectedRevision != null ? String(a.expectedRevision) : null,
-        requestId: a.requestId != null ? String(a.requestId) : null,
-      },
+      "mutation JwOp($pid: ID!, $args: Map) { runPluginOperation(plugin_id: $pid, args: $args) }",
+      { pid: PLUGIN_ID, args: Object.assign({ mode }, args || {}) },
     );
     return data.runPluginOperation;
   }
@@ -173,55 +154,118 @@
     const flat = {};
     Object.keys(args || {}).forEach((k) => { flat[k] = String(args[k]); });
     const data = await gql(
-      "mutation JwTask($name: String!, $a: Map!) { runPluginTask(plugin_id: \"stash-justwatch\", task_name: $name, args_map: $a) }",
+      'mutation JwTask($name: String!, $a: Map!) { runPluginTask(plugin_id: "stash-justwatch", task_name: $name, args_map: $a) }',
       { name: taskName, a: flat },
     );
-    return data.runPluginTask; // job id
+    return data.runPluginTask; // job id — never treated as success by itself
   }
 
-  // Bounded: a job that never reaches a terminal state leaves an actionable
-  // "save failed — retry" state, not an endless Saving indicator.
-  const JOB_POLL_MAX = 150; // ~2 min at POLL_INTERVAL_MS
+  function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
-  async function pollJob(jobId) {
-    for (let i = 0; i < JOB_POLL_MAX; i++) {
-      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
-      let data = null;
+  // A queued task is not an outcome. Poll the plugin's durable receipt store
+  // until this requestId resolves; "unknown" past the budget is reported, not
+  // invented — the caller keeps its draft and may resubmit the SAME id.
+  async function pollApplyReceipt(requestId) {
+    for (let i = 0; i < APPLY_POLL_TRIES; i++) {
+      await sleep(i === 0 ? 700 : APPLY_POLL_INTERVAL_MS);
+      let receipt = null;
       try {
-        data = await gql(
-          "query JwJob($input: FindJobInput!) { findJob(input: $input) { status } }",
-          { input: { id: jobId } },
-        );
+        receipt = await runOp("GetChannelApplyResult", { requestId });
       } catch (e) {
-        continue; // transient query failure: keep waiting for the job
+        continue; // transient query failure: the task may still be running
       }
-      const job = (data || {}).findJob;
-      if (job == null) return "FINISHED"; // pruned from the queue = done
-      const status = String(job.status || "").toUpperCase();
-      if (TERMINAL_STATUSES.has(status)) return status;
+      if (receipt && receipt.status && receipt.status !== "unknown") return receipt;
     }
-    throw new Error("the save is taking unusually long — you can retry");
+    return {
+      requestId, status: "unknown",
+      message: "the server never reported a result for this request — applying again with the same draft reuses the same requestId",
+    };
   }
 
-  // Results are stored per requestId by the plugin (a small retention-capped
-  // list), so two tabs saving close together each find their own outcome
-  // instead of whoever wrote last.
-  async function readSaveResult(requestId, attempts) {
-    for (let i = 0; i < (attempts || 12); i++) {
-      try {
-        const resp = await fetch(ASSET_BASE + "snapshots/save_result.json?r=" + Date.now(), {
-          credentials: "same-origin",
-        });
-        if (resp.ok) {
-          const body = await resp.json();
-          const results = Array.isArray(body && body.results) ? body.results : [];
-          const match = results.find((r) => r && r.requestId === requestId);
-          if (match) return match;
-        }
-      } catch (e) { /* retry */ }
-      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+  // THE write path: task submit + receipt correlation.
+  async function applyChannelChanges(requestId, expectedRevision, ops) {
+    await runTask("Apply Channel Changes", {
+      mode: "ApplyChannelChanges",
+      requestId,
+      expectedRevision: String(expectedRevision),
+      ops: JSON.stringify(ops),
+    });
+    return pollApplyReceipt(requestId);
+  }
+
+  let idSeq = 0;
+  function newRequestId() {
+    if (window.crypto && typeof window.crypto.randomUUID === "function") {
+      return "req-" + window.crypto.randomUUID();
     }
-    throw new Error("the server never reported the save result");
+    return "req-" + Date.now().toString(36) + "-" + (idSeq++).toString(36) + "-" + Math.floor(Math.random() * 1e6).toString(36);
+  }
+
+  function newTempId() {
+    const bytes = new Uint8Array(4);
+    (window.crypto || { getRandomValues: (b) => b.forEach((_, i) => { b[i] = (Math.random() * 256) | 0; }) })
+      .getRandomValues(bytes);
+    return "temp-" + Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+
+  function newGroupId() {
+    // Server-side group ids look like grp_<lowercase>; a client-generated id
+    // lets channels.move reference a group created in the same transaction.
+    const bytes = new Uint8Array(5);
+    (window.crypto || { getRandomValues: (b) => b.forEach((_, i) => { b[i] = (Math.random() * 256) | 0; }) })
+      .getRandomValues(bytes);
+    return "grp" + Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+
+  // ------------------------------------------------------------------
+  // Entity names: resolved from picker/lookup queries, cached per session.
+  // Unknown ids render as "#id" (null = looked up and gone from Stash).
+  // ------------------------------------------------------------------
+
+  const ENTITY_NAMES = { tag: new Map(), performer: new Map(), studio: new Map() };
+
+  function entityName(kind, id) {
+    const m = ENTITY_NAMES[kind];
+    if (!m || !m.has(String(id))) return "#" + id;
+    return m.get(String(id)) || "#" + id;
+  }
+
+  async function searchEntities(kind, q) {
+    const filter = { per_page: 100, sort: "scenes_count", direction: "DESC" };
+    if (q) filter.q = q;
+    const queries = {
+      tag: ["query($f: FindFilterType!) { findTags(filter: $f) { tags { id name scene_count } } }", (d) => ((d.findTags || {}).tags || [])],
+      performer: ["query($f: FindFilterType!) { findPerformers(filter: $f) { performers { id name scene_count } } }", (d) => ((d.findPerformers || {}).performers || [])],
+      studio: ["query($f: FindFilterType!) { findStudios(filter: $f) { studios { id name scene_count } } }", (d) => ((d.findStudios || {}).studios || [])],
+    };
+    const [queryString, pick] = queries[kind];
+    const rows = pick(await gql(queryString, { f: filter }));
+    rows.forEach((r) => ENTITY_NAMES[kind].set(String(r.id), r.name));
+    return rows.map((r) => ({ id: String(r.id), name: r.name, count: r.scene_count }));
+  }
+
+  // Resolve display names for already-selected ids (chips), bounded.
+  const resolveSeq = { tag: 0, performer: 0, studio: 0 };
+  async function resolveEntityNames(kind, ids) {
+    const m = ENTITY_NAMES[kind];
+    const missing = [...new Set(ids.map(String))].filter((id) => !m.has(id)).slice(0, 60);
+    if (!missing.length) return;
+    const seq = ++resolveSeq[kind];
+    const singles = {
+      tag: "query($id: ID!) { findTag(id: $id) { name } }",
+      performer: "query($id: ID!) { findPerformer(id: $id) { name } }",
+      studio: "query($id: ID!) { findStudio(id: $id) { name } }",
+    };
+    await Promise.all(missing.map(async (id) => {
+      try {
+        const d = await gql(singles[kind], { id });
+        const node = d.findTag || d.findPerformer || d.findStudio;
+        m.set(id, (node && node.name) || null);
+      } catch (e) {
+        m.set(id, null);
+      }
+    }));
+    if (seq === resolveSeq[kind]) { /* callers re-render on their own tick */ }
   }
 
   // ------------------------------------------------------------------
@@ -236,7 +280,6 @@
     Object.keys(FAS).forEach((key) => {
       if (/^fa\d+$/.test(key)) return; // indexed duplicates; prefer named keys
       const def = FAS[key];
-      // IconDefinition shape: {prefix, iconName, icon: [w, h, ligatures, unicode, path]}
       const icon = def && def.icon;
       const unicode = Array.isArray(icon) ? icon[3] : (Array.isArray(def) ? def[3] : null);
       if (typeof unicode === "string" && /^[0-9a-f]+$/i.test(unicode)) {
@@ -259,7 +302,7 @@
 
   function Glyph({ codepoint, size, color, className }) {
     const IconCmp = api.components && api.components.Icon;
-    const key = fasKeyByCodepoint.get(codepoint.codePointAt(0));
+    const key = codepoint ? fasKeyByCodepoint.get(codepoint.codePointAt(0)) : null;
     const FAS = (api.libraries && api.libraries.FontAwesomeSolid) || {};
     if (key && isComponent(IconCmp)) {
       return h(IconCmp, {
@@ -271,1320 +314,2601 @@
     return h("span", {
       className: "jw-glyph " + (className || ""),
       style: { fontSize: (size || 14) + "px", color: color || "#fff", lineHeight: 1 },
-    }, codepoint);
+    }, codepoint || "");
   }
 
-  function GlyphTile({ codepoint, color, size }) {
+  // Brand tile: the FA glyph when the channel carries one; otherwise the
+  // channel number stands in (glyph is optional in the library).
+  function GlyphTile({ codepoint, color, size, fallback }) {
     const s = size || 28;
+    const inner = codepoint
+      ? h(Glyph, { codepoint, size: Math.round(s * 0.5) })
+      : h("span", { style: { fontSize: Math.round(s * 0.34) + "px", fontWeight: 700 } }, fallback != null ? String(fallback) : "");
     return h("div", {
       className: "jw-glyph-tile",
       style: {
         width: s + "px", height: s + "px", borderRadius: Math.max(6, s / 5) + "px",
         background: color || "#455A64",
       },
-    }, h(Glyph, { codepoint, size: Math.round(s * 0.5) }));
+    }, inner);
   }
 
   // ------------------------------------------------------------------
-  // Formatting helpers
+  // Pure helpers
   // ------------------------------------------------------------------
 
-  function formatCount(n) {
-    if (n == null) return "";
-    return n.toLocaleString() + (n === 1 ? " scene" : " scenes");
+  function clone(value) {
+    return value == null ? value : JSON.parse(JSON.stringify(value));
   }
 
-  function formatLoop(seconds) {
-    if (seconds == null) return "";
-    const hours = seconds / 3600;
-    if (hours >= 1) return "~" + (Math.round(hours * 10) / 10) + " h before it loops";
-    return "~" + Math.max(1, Math.round(seconds / 60)) + " min before it loops";
+  function deepEqual(a, b) {
+    return JSON.stringify(a) === JSON.stringify(b);
   }
 
-  function lowestFreeNumber(channels) {
-    const taken = new Set(channels.map((c) => c.number));
-    for (let n = 1; n <= 99; n++) if (!taken.has(n)) return n;
-    return null;
+  function idsOf(v) {
+    return Array.isArray(v) ? v.map(String).filter((x) => /^\d+$/.test(x)) : [];
   }
 
-  function pickDefaultGlyph(name) {
-    let hash = 0;
-    for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) >>> 0;
-    return DEFAULT_GLYPHS[hash % DEFAULT_GLYPHS.length];
+  function sortedIds(list) {
+    return [...new Set(list.map(String))].sort((a, b) => Number(a) - Number(b));
   }
 
-  function newChannelId() {
-    const bytes = new Uint8Array(4);
-    (window.crypto || { getRandomValues: (b) => b.map((_, i) => (Math.random() * 256) | 0).forEach((v, i) => { b[i] = v; }) })
-      .getRandomValues(bytes);
-    return "ch_" + Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
-  }
-
-  function summarize(channel) {
-    const src = channel.source || {};
-    const kind = SOURCE_KINDS[src.type] || { label: "" };
-    const ids = tagIdsOf(src);
-    const kindLabel = ids.length > 1 ? "Tags" : kind.label;
-    const base = kind.label === "Custom lineup"
-      ? (channel.sourceLabel || "Custom lineup")
-      : kindLabel + " · " + (channel.sourceLabel || "?");
-    if (channel.sourceMissing) return base + " · lineup missing";
-    const missing = ids.filter((id) => TAG_NAMES.get(id) === null).length;
-    const missingNote = !channel.sourceMissing && missing
-      ? " · " + missing + (missing === 1 ? " tag missing" : " tags missing") : "";
-    if (channel.sceneCount != null) return base + missingNote + " · " + formatCount(channel.sceneCount);
-    return base + missingNote;
-  }
-
-  // ------------------------------------------------------------------
-  // API surface used by components
-  // ------------------------------------------------------------------
-
-  function loadCatalog() {
-    return runOp("GetCatalog");
-  }
-
-  function loadFullDirectory() {
-    return runOp("FullDirectory");
-  }
-
-  function previewLineup(channel, perPage) {
-    return runOp("PreviewLineup", {
-      channel: JSON.stringify(channel),
-      perPage: String(perPage || PREVIEW_COUNT),
-    });
-  }
-
-  let saveSeq = 0;
-
-  function newRequestId() {
-    // Random UUID: safe across tabs and sessions, unlike wall-clock sequences.
-    if (window.crypto && typeof window.crypto.randomUUID === "function") {
-      return "req-" + window.crypto.randomUUID();
-    }
-    return "req-" + Date.now() + "-" + Math.random().toString(36).slice(2) + "-" + (++saveSeq);
-  }
-
-  // After a successful save the server has refreshed labels + health counts,
-  // so re-pull the catalog instead of letting local guesses linger. The
-  // caller decides what to adopt — a newer local draft is never clobbered.
-  async function commitAndReload(catalog, expectedRevision) {
-    const requestId = newRequestId();
-    const jobId = await runTask("Save Channel Edit", {
-      mode: "SaveCatalog",
-      catalog: JSON.stringify(catalog),
-      expectedRevision: String(expectedRevision),
-      requestId,
-    });
-    const status = await pollJob(jobId);
-    if (status === "FAILED" || status === "ABORTED" || status === "CANCELLED" || status === "CANCELED") {
-      throw new Error("the server reported the save failed");
-    }
-    const result = await readSaveResult(requestId);
-    if (result.saved) {
-      try { return { result, fresh: await loadCatalog() }; } catch (e) { return { result, fresh: null }; }
-    }
-    return { result, fresh: null };
-  }
-
-  async function fetchSources(q) {
-    const filter = { q: q || undefined, per_page: 8, sort: "scenes_count", direction: "DESC" };
-    const [saved, tags, performers, studios] = await Promise.all([
-      gql("query JwSaved { findSavedFilters(mode: SCENES) { id name } }").catch(() => null),
-      gql("query JwTags($f: FindFilterType!) { findTags(filter: $f) { tags { id name scene_count } } }", { f: filter }).catch(() => null),
-      gql("query JwPerformers($f: FindFilterType!) { findPerformers(filter: $f) { performers { id name scene_count } } }", { f: filter }).catch(() => null),
-      gql("query JwStudios($f: FindFilterType!) { findStudios(filter: $f) { studios { id name scene_count } } }", { f: filter }).catch(() => null),
-    ]);
-    const savedRows = ((saved || {}).findSavedFilters || [])
-      .filter((r) => !q || r.name.toLowerCase().includes(q.toLowerCase()))
-      .slice(0, 8)
-      .map((r) => ({ type: "savedFilter", id: String(r.id), name: r.name, count: null }));
-    const norm = (rows, type) => (rows || []).map((r) => ({
-      type, id: String(r.id), name: r.name, count: r.scene_count != null ? r.scene_count : null,
-    }));
-    return {
-      savedFilters: savedRows,
-      tags: norm((((tags || {}).findTags || {}).tags) || [], "tag"),
-      performers: norm((((performers || {}).findPerformers || {}).performers) || [], "performer"),
-      studios: norm((((studios || {}).findStudios || {}).studios) || [], "studio"),
-    };
-  }
-
-  // ------------------------------------------------------------------
-  // Components
-  // ------------------------------------------------------------------
-
-  function SaveIndicator({ state, onRetry }) {
-    if (state === "saving") return h("span", { className: "jw-save-indicator" }, "Saving…");
-    if (state === "error") {
-      return h("span", { className: "jw-save-indicator jw-save-error" },
-        "Save failed — your changes are kept. ",
-        h("button", { className: "jw-link", onClick: onRetry }, "Retry now"),
+  // Canonical form of a criteria/filter source: every list key present (empty
+  // when unused) so "the editor touched nothing" stays equal to the stored
+  // record. Mirrors the server's canonical stored source.
+  function canonicalSource(source) {
+    const s = source || {};
+    if (s.type !== "filter" && s.type !== "criteria") return s;
+    const out = { type: s.type };
+    for (const k of FACET_KEYS) out[k] = idsOf(s[k]);
+    if (s.date && (s.date.from || s.date.to)) out.date = { from: s.date.from || "", to: s.date.to || "" };
+    if (s.duration && (s.duration.min || s.duration.max)) {
+      out.duration = Object.assign(
+        {},
+        s.duration.min ? { min: s.duration.min } : {},
+        s.duration.max ? { max: s.duration.max } : {},
       );
     }
-    if (state === "saved") return h("span", { className: "jw-save-indicator" }, "Saved");
+    if (s.createdAt && s.createdAt.withinDays) out.createdAt = { withinDays: s.createdAt.withinDays };
+    for (const k of ["studioSceneCount", "performerSceneCount"]) {
+      const spec = s[k];
+      if (spec && (spec.min != null || spec.max != null)) {
+        out[k] = Object.assign(
+          {},
+          spec.min != null ? { min: spec.min } : {},
+          spec.max != null ? { max: spec.max } : {},
+        );
+      }
+    }
+    if (s.q) out.q = s.q;
+    return out;
+  }
+
+  function sourcesEquivalent(a, b) {
+    return JSON.stringify(canonicalSource(a)) === JSON.stringify(canonicalSource(b));
+  }
+
+  // Mirrors the server's programming policy clamp so a field the user touched
+  // and reverted compares clean against a shorter stored policy.
+  function canonicalProgramming(raw) {
+    const p = raw && typeof raw === "object" ? raw : {};
+    const int = (key, def, lo, hi) => {
+      const v = p[key] != null ? p[key] : def;
+      return typeof v === "number" ? Math.max(lo, Math.min(hi, v)) : def;
+    };
+    return {
+      mode: ["fixed", "explore", "discovery", "continuing"].includes(p.mode) ? p.mode : "fixed",
+      spacing: int("spacing", 0, 0, 10),
+      repeatHours: int("repeatHours", 0, 0, 168),
+      spotlight: ["studio", "performer"].includes(p.spotlight) ? p.spotlight : "none",
+      spotlightDay: int("spotlightDay", 5, 0, 6),
+      spotlightHour: int("spotlightHour", 20, 0, 23),
+    };
+  }
+
+  function fullProgramming(p) {
+    return Object.assign(canonicalProgramming(p), { mode: (p && p.mode) || "fixed" });
+  }
+
+  function nextFreeNumber(channels, kind) {
+    const [lo, hi] = BANDS[kind] || BANDS.net;
+    const taken = new Set(channels.map((c) => c.number));
+    for (let n = lo; n <= hi; n++) if (!taken.has(n)) return n;
     return null;
   }
 
-  function RailRow({ row, selected, onSelect }) {
-    return h("div", {
-      className: "jw-rail-row" + (selected ? " jw-selected" : "") + (row.paused ? " jw-row-paused" : ""),
-      style: selected ? { boxShadow: "inset 3px 0 0 " + row.color } : null,
-      onClick: () => onSelect(row.sel),
-      onKeyDown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(row.sel); } },
-      tabIndex: 0,
-      role: "button",
-    },
-      h("div", { className: "jw-rail-number", style: selected ? { color: row.color } : null }, row.number != null ? String(row.number) : "—"),
-      h(GlyphTile, { codepoint: row.glyph, color: row.color }),
-      h("div", { className: "jw-rail-body" },
-        h("div", { className: "jw-rail-name" }, row.name),
-        h("div", { className: "jw-rail-sub" }, row.sub),
-      ),
-      row.badges && row.badges.length ? h("div", { className: "jw-rail-badges" }, row.badges) : null,
-    );
+  function pickDefaultColor(number) {
+    return PALETTE[(Math.max(1, number) - 1) % PALETTE.length];
   }
 
-  /** The whole lineup: My Channels (editable) + the TV's automatic sections. */
-  function buildRailSections(catalog, fullDir) {
-    const sections = [];
-    const customRows = (catalog.channels || [])
-      .slice()
-      .sort((a, b) => a.number - b.number)
-      .map((channel) => {
-        const badges = [];
-        if (channel.sourceMissing) {
-          badges.push(h("span", { key: "m", className: "jw-badge jw-badge-missing", title: "This lineup's source was deleted in Stash. Relink it." }, "relink"));
-        } else if (channel.sceneCount === 0) {
-          badges.push(h("span", { key: "o", className: "jw-badge jw-badge-off" }, "off air"));
-        } else if (channel.sceneCount != null && channel.sceneCount < THIN_LINEUP) {
-          badges.push(h("span", { key: "t", className: "jw-badge jw-badge-thin", title: "A lineup this small repeats all evening." }, "thin"));
-        }
-        if (!channel.enabled) badges.push(h("span", { key: "d", className: "jw-badge jw-badge-off" }, "paused"));
-        return {
-          sel: channel.id,
-          number: channel.number,
-          name: channel.name,
-          glyph: channel.glyph,
-          color: channel.color,
-          sub: summarize(channel),
-          badges,
-          channel,
-        };
-      });
-    sections.push({ label: "My Lineup", rows: customRows });
+  function fmtCount(n) {
+    return typeof n === "number" ? n.toLocaleString("en-US") : "—";
+  }
 
-    if (fullDir) {
-      const autoRow = (row, section) => {
-        const badges = [];
-        if (row.offAir) badges.push(h("span", { key: "o", className: "jw-badge jw-badge-off" }, "off air"));
-        else if (row.count === 0 && row.count != null) badges.push(h("span", { key: "o", className: "jw-badge jw-badge-off" }, "off air"));
-        else if (row.count != null && row.count < THIN_LINEUP) badges.push(h("span", { key: "t", className: "jw-badge jw-badge-thin", title: "A lineup this small repeats all evening." }, "thin"));
-        const countText =
-          row.count != null ? formatCount(row.count)
-            : row.members != null ? row.members + (row.members === 1 ? " member" : " members")
-              : "";
-        const network = row.origin === "network";
-        const group = !network && row.kind && /Group|Spillover$/.test(row.kind);
-        return {
-          sel: network ? "auto:" + section + ":" + row.id
-            : "auto:" + section + ":" + row.number + ":" + row.name,
-          number: row.number,
-          name: row.name,
-          glyph: row.glyph || SECTION_GLYPHS[section] || "\uf111",
-          color: row.color || (group ? GROUP_SLATE : AUTO_SLATE),
-          sub: countText ? countText + " · " + (network ? "network" : "automatic")
-            : network ? "network" : "automatic",
-          badges,
-          auto: { section, row },
-        };
-      };
-      sections.push({
-        label: "General",
-        note: fullDir.networksNote != null ? fullDir.networksNote : fullDir.curatedDialNote,
-        rows: (fullDir.general && fullDir.general.tagChannels || []).map((r) => autoRow(r, "general")),
-      });
-      sections.push({
-        label: "Studios",
-        rows: (fullDir.studios && fullDir.studios.channels || []).map((r) => autoRow(r, "studios")),
-      });
-      sections.push({
-        label: "Performers",
-        rows: (fullDir.performers && fullDir.performers.channels || []).map((r) => autoRow(r, "performers")),
-      });
+  function fmtDuration(seconds) {
+    if (!seconds || seconds <= 0) return "0m";
+    const s = Math.round(seconds);
+    const hh = Math.floor(s / 3600);
+    const mm = Math.round((s % 3600) / 60);
+    return hh ? hh + "h " + mm + "m" : mm + "m";
+  }
+
+  const SOURCE_LABELS = {
+    savedFilter: "saved search",
+    tag: "tag set",
+    performer: "performer",
+    studio: "studio",
+    criteria: "rules",
+    filter: "rules",
+  };
+
+  function describeRow(ch, groupsById) {
+    const g = groupsById.get(ch.groupId);
+    const bits = [g ? g.name : ""];
+    bits.push(SOURCE_LABELS[ch.sourceType] || ch.sourceType || "");
+    return bits.filter(Boolean).join(" · ");
+  }
+
+  // ---------- plain-language summary (ported from the approved prototype,
+  // with the dynamic activity rows added) ----------
+
+  function nameList(kind, list, cap) {
+    const capN = cap == null ? 3 : cap;
+    if (!list.length) return null;
+    const shown = list.slice(0, capN).map((id) => entityName(kind, id));
+    const rest = list.length - shown.length;
+    return shown.join(", ") + (rest > 0 ? " +" + rest + " more" : "");
+  }
+
+  function summarizeLines(source) {
+    const s = source || {};
+    if (s.type === "savedFilter") {
+      return ["Airs from the saved search linked to this channel — used verbatim, including its text query. Editing that search in Stash changes what airs."];
     }
-    return sections;
+    if (s.type === "tag") {
+      const listing = idsOf(s.ids).length ? idsOf(s.ids) : idsOf([s.id]);
+      return ["Scenes tagged with any of: " + (nameList("tag", listing, 8) || "—") + " (sub-tags included)."];
+    }
+    if (s.type === "performer") return ["Scenes featuring " + entityName("performer", s.id) + ". No other rules."];
+    if (s.type === "studio") return ["Scenes from studio " + entityName("studio", s.id) + " (sub-studios included). No other rules."];
+    if (s.type !== "filter" && s.type !== "criteria") return ["Airs from a " + (s.type || "unknown") + " source."];
+
+    const active = [];
+    if (idsOf(s.tags).length || idsOf(s.tagsAny).length || idsOf(s.excludeTags).length) {
+      const parts = [];
+      if (idsOf(s.tags).length) parts.push("tagged with ALL of: " + nameList("tag", idsOf(s.tags), 8));
+      if (idsOf(s.tagsAny).length) parts.push("tagged with any of: " + nameList("tag", idsOf(s.tagsAny), 8));
+      if (idsOf(s.excludeTags).length) parts.push("without any of: " + nameList("tag", idsOf(s.excludeTags), 8));
+      active.push("Scenes " + parts.join(", ") + " (sub-tags included)");
+    }
+    if (idsOf(s.performers).length) active.push("Featuring ALL of: " + nameList("performer", idsOf(s.performers), 8));
+    if (idsOf(s.performersAny).length) active.push("Featuring any of: " + nameList("performer", idsOf(s.performersAny), 8));
+    if (idsOf(s.excludePerformers).length) active.push("NOT featuring: " + nameList("performer", idsOf(s.excludePerformers), 8));
+    if (idsOf(s.studios).length) active.push("From studios (sub-studios included): " + nameList("studio", idsOf(s.studios), 8));
+    if (idsOf(s.studiosAny).length) active.push("From any of: " + nameList("studio", idsOf(s.studiosAny), 8));
+    if (idsOf(s.excludeStudios).length) active.push("NOT from: " + nameList("studio", idsOf(s.excludeStudios), 8));
+    if (s.date && (s.date.from || s.date.to)) {
+      active.push("Dated " + (s.date.from || "the beginning") + " to " + (s.date.to || "today"));
+    }
+    if (s.duration && s.duration.min) active.push("Running at least " + Math.round(s.duration.min / 60) + " min");
+    if (s.duration && s.duration.max) active.push("Running at most " + Math.round(s.duration.max / 60) + " min");
+    if (s.createdAt && s.createdAt.withinDays) {
+      active.push("Added to the library within the last " + s.createdAt.withinDays + " days (moves with the calendar)");
+    }
+    for (const [facet, noun] of [["studioSceneCount", "studios"], ["performerSceneCount", "performers"]]) {
+      const spec = s[facet];
+      if (!spec || !(spec.min != null || spec.max != null)) continue;
+      const lo = spec.min;
+      const hi = spec.max;
+      let cond;
+      if (lo != null && hi != null) cond = "with " + lo + "–" + hi + " scenes";
+      else if (hi != null) cond = "with fewer than " + hi + " scenes";
+      else cond = "with " + lo + " or more scenes";
+      active.push("Dynamically: any " + noun + " " + cond + " — membership updates itself as the library grows");
+    }
+    if (typeof s.q === "string" && s.q.trim()) active.push("Matching the text search “" + s.q.trim() + "”");
+    if (!active.length) return ["No rules yet — this pool would be empty until at least one rule is on."];
+    const head = active.length + " rule" + (active.length === 1 ? "" : "s") + ", combined with AND" +
+      (active.length > 1 ? " — then ALL of the following must hold:" : ":");
+    return [head, ...active.map((a, i) => (i + 1) + ". " + a)];
   }
 
-  function DialRail({ railSections, selectedId, onSelect, onNew, channelCount }) {
-    return h("div", { className: "jw-rail" },
-      h("div", { className: "jw-rail-head" },
-        h("span", { className: "jw-section-label" }, "My Lineup"),
-        h("span", { className: "jw-rail-count" }, channelCount + (channelCount === 1 ? " channel" : " channels")),
-      ),
-      h("button", { className: "jw-btn jw-btn-primary jw-new-channel", onClick: onNew }, "+ New channel"),
-      railSections.every((s) => s.rows.length === 0) && !railSections.some((s) => s.note)
-        ? h("div", { className: "jw-empty" },
-            h("div", { className: "jw-empty-title" }, "Your dial starts here"),
-            h("div", { className: "jw-empty-sub" }, "Channels you create here air on numbers 1–99, ahead of the built-in dial on your TV."),
-          )
-        : railSections.map((section) =>
-            section.rows.length === 0 && !section.note
-              ? null
-              : h("div", { key: section.label, className: "jw-rail-section" },
-                  h("div", { className: "jw-rail-section-label" }, section.label),
-                  section.note ? h("div", { className: "jw-rail-note" }, section.note) : null,
-                  h("div", { className: "jw-rail-list" },
-                    section.rows.map((row) =>
-                      h(RailRow, { key: row.sel, row, selected: row.sel === selectedId, onSelect })),
-                  ),
-                ),
-          ),
-    );
+  // Legacy sources (and the compiled tier's filter shape) keep their stored
+  // type; the visual rows read and write the same field names.
+  function isRuleSource(source) {
+    return !!source && (source.type === "criteria" || source.type === "filter");
   }
 
-  function NumberStepper({ channel, channels, onAssign }) {
-    const [raw, setRaw] = useState(String(channel.number));
-    useEffect(() => { setRaw(String(channel.number)); }, [channel.id, channel.number]);
-
-    const parsed = parseInt(raw, 10);
-    const valid = parsed >= 1 && parsed <= 99;
-    const occupant = valid && parsed !== channel.number
-      ? channels.find((c) => c.id !== channel.id && c.number === parsed) : null;
-
-    const step = (delta) => {
-      const taken = new Set(channels.filter((c) => c.id !== channel.id).map((c) => c.number));
-      let n = channel.number;
-      do { n += delta; } while (n >= 1 && n <= 99 && taken.has(n));
-      if (n >= 1 && n <= 99) onAssign(n, null);
-    };
-
-    return h("div", { className: "jw-number-stepper" },
-      h("div", { className: "jw-number-line" },
-        h("button", { className: "jw-btn jw-btn-ghost jw-step", onClick: () => step(-1), title: "Previous free number" }, "–"),
-        h("input", {
-          className: "jw-number-input" + (!valid ? " jw-input-bad" : ""),
-          value: raw,
-          onChange: (e) => setRaw(e.target.value.replace(/[^0-9]/g, "").slice(0, 2)),
-          onBlur: () => {
-            if (valid && parsed !== channel.number && !occupant) onAssign(parsed, null);
-            else setRaw(String(channel.number));
-          },
-          onKeyDown: (e) => { if (e.key === "Enter") e.target.blur(); },
-        }),
-        h("button", { className: "jw-btn jw-btn-ghost jw-step", onClick: () => step(1), title: "Next free number" }, "+"),
-      ),
-      occupant
-        ? h("div", { className: "jw-swap-note" },
-            h("span", null, parsed + " is " + occupant.name + ". "),
-            h("button", { className: "jw-link", onClick: () => { onAssign(parsed, occupant.id); setRaw(String(parsed)); } }, "Swap channels"),
-          )
-        : (!valid ? h("div", { className: "jw-swap-note" }, "Channel numbers run 1–99.") : null),
-    );
+  // One-way conversion of a legacy source into editable criteria. Tag sets
+  // are ANY-of unions (that is their historical semantics), so they convert to
+  // the any-lists; single performer/studio ids are mode-independent. Unused
+  // keys stay ABSENT — the server rejects present-but-empty id lists, and the
+  // canonical comparison treats absent and empty alike.
+  function convertLegacySource(source) {
+    const s = source || {};
+    const out = { type: "criteria" };
+    if (s.type === "tag") {
+      const tags = sortedIds(idsOf(s.ids && s.ids.length ? s.ids : [s.id]));
+      if (tags.length) out.tagsAny = tags;
+    } else if (s.type === "performer") {
+      const ids = sortedIds(idsOf([s.id]));
+      if (ids.length) out.performersAny = ids;
+    } else if (s.type === "studio") {
+      const ids = sortedIds(idsOf([s.id]));
+      if (ids.length) out.studiosAny = ids;
+    }
+    // savedFilter: the linked search's own criteria live in Stash and are not
+    // copied — the converted pool starts empty and the owner rebuilds it.
+    return out;
   }
 
-  function OnAirStrip({ channel, isDraft }) {
-    const [state, setState] = useState({ loading: true, items: null, total: null, sourceTotal: null, error: null });
-    const spec = JSON.stringify(channel);
-
-    useEffect(() => {
-      let alive = true;
-      setState({ loading: true, items: null, total: null, sourceTotal: null, error: null });
-      const t = setTimeout(async () => {
-        try {
-          const result = await previewLineup(JSON.parse(spec), PREVIEW_COUNT + 1);
-          if (!alive) return;
-          setState({
-            loading: false, items: result.items || [], total: result.total,
-            sourceTotal: result.sourceTotal, error: null,
-          });
-        } catch (e) {
-          if (alive) setState({ loading: false, items: null, total: null, sourceTotal: null, error: String((e && e.message) || e) });
-        }
-      }, 250);
-      return () => { alive = false; clearTimeout(t); };
-    }, [spec]);
-
-    const missing = channel.sourceMissing && !isDraft;
-    // The preview count IS the rotation: the same bounded loop the TV plays,
-    // not the size of the library behind it (that's shown separately).
-    const countBits = [];
-    if (!state.loading && !missing) {
-      if (state.total != null) countBits.push(formatCount(state.total) + " in rotation");
-      if (!isDraft && state.sourceTotal != null && state.sourceTotal > state.total) {
-        countBits.push(formatCount(state.sourceTotal) + " in your library");
+  function ruleSourceClientErrors(source) {
+    const errors = [];
+    const s = source || {};
+    for (const [a, b] of EXCLUSIVE_FACETS) {
+      if (idsOf(s[a]).length && idsOf(s[b]).length) {
+        errors.push({ field: "source." + a, code: "conflicting_rows", message: "This facet cannot be both ALL and ANY — use the toggle to move the ids into one row." });
       }
-      if (!isDraft && channel.loopSeconds != null) countBits.push(formatLoop(channel.loopSeconds));
-      if (!isDraft && channel.loopCapped) countBits.push("sampled from a very long lineup");
     }
-    return h("div", { className: "jw-editor-section" },
-      h("div", { className: "jw-onair-head" },
-        h("span", { className: "jw-section-label" }, "On air tonight"),
-        h("span", { className: "jw-onair-meta" }, countBits.join(" · ")),
-      ),
-      missing
-        ? h("div", { className: "jw-missing-note" }, "This lineup's source was deleted in Stash. Use “Airing from” above to relink it.")
-        : state.loading
-          ? h("div", { className: "jw-thumb-strip" }, [0, 1, 2, 3].map((i) => h("div", { key: i, className: "jw-thumb jw-thumb-skeleton" })))
-          : state.error
-            ? h("div", { className: "jw-missing-note" }, "Could not load a preview: " + state.error)
-            : (state.items || []).length === 0
-              ? h("div", { className: "jw-missing-note" }, "Nothing matches this lineup yet — it goes live as the library grows.")
-              : h("div", { className: "jw-thumb-strip" },
-                  state.items.slice(0, PREVIEW_COUNT).map((item, i) => h("div", { key: item.id, className: "jw-thumb-wrap" },
-                    i === 0 ? h("span", { className: "jw-now-badge" }, "NOW") : null,
-                    h("div", {
-                      className: "jw-thumb",
-                      style: item.preview ? { backgroundImage: "url('" + item.preview + "')" } : null,
-                    }),
-                  )),
-                  state.total != null && state.total > PREVIEW_COUNT
-                    ? h("div", { className: "jw-thumb-more" }, "+" + (state.total - PREVIEW_COUNT).toLocaleString())
-                    : null,
-                ),
-    );
+    for (const k of ["studioSceneCount", "performerSceneCount"]) {
+      const spec = s[k];
+      if (spec && spec.min != null && spec.max != null && Number(spec.max) <= Number(spec.min)) {
+        errors.push({ field: "source." + k, code: "bad_scene_count", message: "The upper bound must exceed the lower one." });
+      }
+    }
+    if (s.duration && s.duration.min != null && s.duration.max != null && Number(s.duration.max) < Number(s.duration.min)) {
+      errors.push({ field: "source.duration", code: "bad_duration", message: "Maximum duration is below the minimum." });
+    }
+    if (s.date && s.date.from && s.date.to && s.date.from > s.date.to) {
+      errors.push({ field: "source.date", code: "bad_date", message: "The start date is after the end date." });
+    }
+    return errors;
   }
 
-  function GlyphPicker({ current, onPick, onClose }) {
+  function debounce(fn, ms) {
+    let handle = null;
+    const wrapped = (...args) => {
+      if (handle) clearTimeout(handle);
+      handle = setTimeout(() => { handle = null; fn(...args); }, ms);
+    };
+    wrapped.cancel = () => { if (handle) clearTimeout(handle); handle = null; };
+    return wrapped;
+  }
+
+  // ------------------------------------------------------------------
+  // Drafts: in-memory + sessionStorage, versioned, never applied
+  // automatically. Keyed jw-studio-drafts-v1:<libraryId>.
+  // ------------------------------------------------------------------
+
+  function makeDraftStore(libraryId) {
+    const key = "jw-studio-drafts-v1:" + libraryId;
+    let listeners = [];
+    const emit = () => listeners.slice().forEach((fn) => { try { fn(); } catch (e) { /* noop */ } });
+    function readAll() {
+      try {
+        const parsed = JSON.parse(sessionStorage.getItem(key) || "{}");
+        return parsed && typeof parsed === "object" ? parsed : {};
+      } catch (e) { return {}; }
+    }
+    function writeAll(all) {
+      try { sessionStorage.setItem(key, JSON.stringify(all)); } catch (e) { /* full storage: drafts stay in memory */ }
+    }
+    return {
+      get(id) {
+        const entry = readAll()[id];
+        return entry && entry.v === 1 && entry.draft ? entry : null;
+      },
+      put(id, draft) {
+        const all = readAll();
+        all[id] = { v: 1, draft, savedAt: Date.now() };
+        writeAll(all);
+        emit();
+      },
+      drop(id) {
+        const all = readAll();
+        if (all[id] != null) { delete all[id]; writeAll(all); emit(); }
+      },
+      ids() { return Object.keys(readAll()); },
+      clear() { try { sessionStorage.removeItem(key); } catch (e) { /* noop */ } emit(); },
+      subscribe(fn) { listeners.push(fn); return () => { listeners = listeners.filter((f) => f !== fn); }; },
+    };
+  }
+
+  // ------------------------------------------------------------------
+  // In-flight applies: a channel's apply survives the editor being navigated
+  // away (poll continues; the receipt lands; drafts/library update).
+  // channelId -> { requestId, snapshot, expected, promise }
+  // ------------------------------------------------------------------
+
+  const inflightApplies = new Map();
+
+  // ------------------------------------------------------------------
+  // Small shared UI
+  // ------------------------------------------------------------------
+
+  function useOutsideClose(open, onClose) {
     const ref = useRef(null);
     useEffect(() => {
+      if (!open) return undefined;
       const onDoc = (e) => { if (ref.current && !ref.current.contains(e.target)) onClose(); };
+      const onKey = (e) => { if (e.key === "Escape") { e.stopPropagation(); onClose(); } };
       document.addEventListener("mousedown", onDoc);
-      return () => document.removeEventListener("mousedown", onDoc);
-    }, [onClose]);
-    return h("div", { className: "jw-glyph-pop", ref },
-      h("div", { className: "jw-glyph-grid" },
-        GLYPH_POOL.map((g) => h("button", {
-          key: g,
-          className: "jw-glyph-cell" + (g === current ? " jw-glyph-active" : ""),
-          title: glyphName(g),
-          onClick: () => onPick(g),
-        }, h(Glyph, { codepoint: g, size: 16 }))),
-      ),
-    );
+      document.addEventListener("keydown", onKey, true);
+      return () => {
+        document.removeEventListener("mousedown", onDoc);
+        document.removeEventListener("keydown", onKey, true);
+      };
+    }, [open, onClose]);
+    return ref;
   }
 
-  function ProgrammingControls({ channel, onPatch }) {
-    const p = channel.programming || { mode: "fixed", spacing: 0, repeatHours: 0, spotlight: "none", spotlightDay: 5, spotlightHour: 20 };
-    const patch = (values) => onPatch({ programming: Object.assign({}, p, values) });
-    return h("div", { className: "jw-editor-section" },
-      h("div", { className: "jw-section-label" }, "Keep the channel moving"),
-      h("div", { className: "jw-chip-row" }, [
-        ["fixed", "Favorite rotation"], ["explore", "Explore the library"], ["discovery", "Discovery"]
-      ].map(([mode, label]) => h("button", { key: mode, className: "jw-chip" + (p.mode === mode ? " jw-chip-active" : ""),
-        onClick: () => patch({ mode }) }, label))),
-      h("p", { className: "jw-settings-hint" }, p.mode === "fixed"
-        ? "A familiar rotation of up to 50 scenes, on repeat."
-        : p.mode === "discovery" ? "Give overlooked scenes a turn. Uses scheduled airtime, never your watch history."
-        : "A continuing schedule through this source. Every scene gets a turn before the next pass."),
-      p.mode !== "fixed" ? h("div", { className: "jw-programming" },
-        h("label", { className: "jw-field" }, "Space performers and studios",
-          h("select", { className: "jw-search", value: p.spacing || 0, onChange: e => patch({ spacing: Number(e.target.value) }) },
-            [0, 1, 2, 3, 5].map(n => h("option", { key: n, value: n }, n ? n + (n === 1 ? " program apart when possible" : " programs apart when possible") : "Follow play order")))),
-        h("label", { className: "jw-field" }, "Prefer no repeats within",
-          h("select", { className: "jw-search", value: p.repeatHours || 0, onChange: e => patch({ repeatHours: Number(e.target.value) }) },
-            [0, 12, 24, 48, 72, 168].map(n => h("option", { key: n, value: n }, n ? n + " hours" : "One complete library pass")))),
-        h("label", { className: "jw-field" }, "Weekly double feature",
-          h("select", { className: "jw-search", value: p.spotlight || "none", onChange: e => patch({ spotlight: e.target.value }) },
-            [["none", "No spotlight"], ["studio", "Studio spotlight"], ["performer", "Performer double feature"]].map(([v, label]) => h("option", { key: v, value: v }, label)))),
-        p.spotlight !== "none" ? h("div", { className: "jw-chip-row" },
-          h("select", { className: "jw-search", "aria-label": "Spotlight day in UTC", value: p.spotlightDay == null ? 5 : p.spotlightDay, onChange: e => patch({ spotlightDay: Number(e.target.value) }) },
-            ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map((d, i) => h("option", { key: d, value: i }, d))),
-          h("select", { className: "jw-search", "aria-label": "Spotlight hour in UTC", value: p.spotlightHour == null ? 20 : p.spotlightHour, onChange: e => patch({ spotlightHour: Number(e.target.value) }) },
-            Array.from({ length: 24 }, (_, i) => h("option", { key: i, value: i }, String(i).padStart(2, "0") + ":00 UTC")))) : null,
-      ) : null);
-  }
-
-  function PublishedSchedule({ channel }) {
-    const [tomorrow, setTomorrow] = useState(false);
-    const [data, setData] = useState(null);
-    const [desk, setDesk] = useState(null);
-    const [error, setError] = useState(null);
-    const [busy, setBusy] = useState(false);
-    const [refresh, setRefresh] = useState(0);
-    const spec = JSON.stringify([channel.id, channel.programming, channel.sort, channel.source, channel.programmingVersion]);
-    useEffect(() => {
-      let alive = true;
-      setData(null); setError(null);
-      const at = Date.now() + (tomorrow ? 86400000 : 0);
-      Promise.all([
-        gql('mutation($a: Map!) { runPluginOperation(plugin_id: "stash-justwatch", args: $a) }', { a: { mode: "Schedule", channelId: channel.id, at: String(at), limit: "20" } }),
-        runOp("ProgrammingDesk"),
-      ]).then(([result, overview]) => { if (alive) { setData(result.runPluginOperation); setDesk(overview); } })
-        .catch(e => { if (alive) setError(e.message); });
-      return () => { alive = false; };
-    }, [spec, tomorrow, refresh]);
-    if (!channel.programming || channel.programming.mode === "fixed") return null;
-    const summary = desk && (desk.channels || []).find(c => c.id === channel.id);
-    const prepare = async () => {
-      setBusy(true); setError(null);
-      try {
-        const id = await runTask("Prepare Programming", { mode: "PrepareProgramming", channelId: channel.id });
-        const status = await pollJob(id);
-        if (status !== "FINISHED" && status !== "COMPLETE" && status !== "COMPLETED") throw new Error("Programming could not be prepared. Try again.");
-        setRefresh(v => v + 1);
-      } catch (e) { setError(e.message); } finally { setBusy(false); }
-    };
-    return h("div", { className: "jw-editor-section jw-published" },
-      h("div", { className: "jw-section-label" }, "Your programming desk"),
-      h("div", { className: "jw-chip-row" },
-        h("button", { className: "jw-chip" + (!tomorrow ? " jw-chip-active" : ""), onClick: () => setTomorrow(false) }, "On now"),
-        h("button", { className: "jw-chip" + (tomorrow ? " jw-chip-active" : ""), onClick: () => setTomorrow(true) }, "Tomorrow"),
-        h("button", { className: "jw-chip", disabled: busy, onClick: prepare }, busy ? "Preparing…" : "Prepare upcoming programming")),
-      error ? h("p", { role: "alert", className: "jw-missing-note" }, error) : null,
-      summary ? h("p", { className: "jw-settings-hint" }, formatCount(summary.sourceTotal) + " in this source · " + summary.scheduledUnique + " have a place in the schedule · Ready through " + new Date(summary.preparedThrough).toLocaleString()) : null,
-      summary && summary.overlap && summary.overlap.length ? h("p", { className: "jw-settings-hint" }, "Shared programming: " + summary.overlap.map(o => o.percent + "% also belongs to " + o.name).join(" · ")) : null,
-      data && (data.warnings || []).map(w => h("p", { key: w, className: "jw-settings-hint" }, w)),
-      data && data.status === "preparing" ? h("p", null, "Your first schedule is being prepared. Save your channel, then prepare upcoming programming.") : null,
-      data && data.status === "repeat" ? h("p", { className: "jw-settings-hint" }, "Encore programming is airing until the next schedule is ready.") : null,
-      h("div", { className: "jw-airings" }, data && (data.programs || []).map(p => h("div", { className: "jw-airing", key: p.airingId },
-        h("time", null, new Date(p.startEpochMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })),
-        h("div", null, h("strong", null, p.item.title || "Untitled"),
-          h("div", { className: "jw-settings-hint" }, [p.block, p.item.studio, Math.round((p.endEpochMs - p.startEpochMs) / 60000) + " min"].filter(Boolean).join(" · ")))))),
-    );
-  }
-
-  function ProgrammingTrial({ channel, onApply, onClose }) {
-    const [draft, setDraft] = useState(() => JSON.parse(JSON.stringify(channel)));
-    const [result, setResult] = useState(null);
-    const [error, setError] = useState(null);
-    const [busy, setBusy] = useState(false);
-    const [tested, setTested] = useState(null);
+  function Dialog({ title, onClose, children, footer, wide }) {
     const ref = useRef(null);
     useEffect(() => {
       const previous = document.activeElement;
-      ref.current.querySelector("button").focus();
-      const keys = e => {
-        if (e.key === "Escape") { e.preventDefault(); onClose(); }
+      const node = ref.current;
+      const focusables = () => node
+        ? node.querySelectorAll("button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex='-1'])")
+        : [];
+      const first = focusables()[0];
+      if (first) first.focus();
+      const onKey = (e) => {
+        if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); onClose(); }
         if (e.key === "Tab") {
-          const nodes = Array.from(ref.current.querySelectorAll("button:not(:disabled), select"));
-          const first = nodes[0], last = nodes[nodes.length - 1];
-          if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
-          if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+          const nodes = focusables();
+          if (!nodes.length) return;
+          const firstNode = nodes[0];
+          const last = nodes[nodes.length - 1];
+          if (e.shiftKey && document.activeElement === firstNode) { e.preventDefault(); last.focus(); }
+          else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); firstNode.focus(); }
         }
       };
-      document.addEventListener("keydown", keys);
-      return () => { document.removeEventListener("keydown", keys); if (previous && previous.isConnected) previous.focus(); };
+      document.addEventListener("keydown", onKey, true);
+      return () => {
+        document.removeEventListener("keydown", onKey, true);
+        if (previous && previous.isConnected) previous.focus();
+      };
+      // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
-    const preview = async () => {
-      setBusy(true); setError(null);
-      try {
-        const answer = await runOp("PreviewProgramming", { channel: JSON.stringify(draft) });
-        setResult(answer); setTested(JSON.stringify(draft.programming));
-      } catch (e) { setError(e.message); } finally { setBusy(false); }
-    };
-    return h("div", { className: "jw-overlay" }, h("div", { className: "jw-sheet", ref, role: "dialog", "aria-modal": true, "aria-label": "Try different programming" },
-      h("div", { className: "jw-sheet-head" }, h("strong", null, "Try different programming"), h("button", { className: "jw-btn", onClick: onClose }, "Close")),
-      h("p", { className: "jw-settings-hint" }, "Experiment here before changing what airs. The current program always finishes."),
-      h(ProgrammingControls, { channel: draft, onPatch: patch => setDraft(Object.assign({}, draft, patch)) }),
-      h("button", { className: "jw-btn", disabled: busy || draft.programming.mode === "fixed", onClick: preview }, busy ? "Preparing preview…" : "Preview this programming"),
-      error ? h("p", { role: "alert" }, error) : null,
-      result && result.message ? h("p", null, result.message) : null,
-      result && result.effectiveAt ? h("p", { className: "jw-settings-hint" }, "This preview changes programming from " + new Date(result.effectiveAt).toLocaleString() + ". Playback continues through the published boundary.") : null,
-      result && (result.warnings || []).map(w => h("p", { key: w }, w)),
-      h("div", { className: "jw-airings" }, result && (result.programs || []).slice(0,8).map(p => h("div", { className: "jw-airing", key: p.airingId },
-        h("time", null, new Date(p.startEpochMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })), h("span", null, p.item.title || "Untitled")))),
-      h("div", { className: "jw-sheet-foot" }, h("button", { className: "jw-btn jw-btn-primary", disabled: !result || result.status !== "preview" || tested !== JSON.stringify(draft.programming),
-        onClick: () => { onApply({ programming: draft.programming }); onClose(); } }, "Use this programming")),
-    ));
+    return h("div", {
+      className: "jw-overlay", role: "presentation",
+      onMouseDown: (e) => { if (e.target === e.currentTarget) onClose(); },
+    },
+      h("div", {
+        className: "jw-dialog" + (wide ? " jw-dialog-wide" : ""),
+        role: "dialog", "aria-modal": "true", "aria-label": title, ref,
+      },
+        h("header", { className: "jw-dialog-head" },
+          h("h2", { className: "jw-dialog-title" }, title),
+          h("button", { className: "jw-btn jw-btn-ghost jw-btn-small", "aria-label": "Close dialog", onClick: onClose }, "✕"),
+        ),
+        h("div", { className: "jw-dialog-body" }, children),
+        footer ? h("footer", { className: "jw-dialog-foot" }, footer) : null,
+      ),
+    );
   }
 
-  /** The tag-set "Airing from" field: one pill per tag, plus add/switch. */
-  function TagPillRow({ channel, onRemoveTag, onAddTags, onChangeSource }) {
-    const ids = tagIdsOf(channel.source);
-    const [, setNamesTick] = useState(0);
+  function ConfirmDialog({ spec }) {
+    if (!spec) return null;
+    const close = (ok) => { spec.resolve(ok); };
+    return h(Dialog, {
+      title: spec.title, onClose: () => close(false),
+      footer: [
+        h("button", { key: "c", className: "jw-btn", onClick: () => close(false) }, "Cancel"),
+        h("button", {
+          key: "k", className: "jw-btn " + (spec.danger ? "jw-btn-danger" : "jw-btn-primary"),
+          onClick: () => close(true),
+        }, spec.confirmLabel || "Confirm"),
+      ],
+    },
+      h("p", { className: "jw-confirm-message" }, spec.message),
+      spec.detail || null,
+    );
+  }
+
+  // Fixed-height windowed list: renders only the visible slice (+overscan).
+  function WindowedList({ items, itemHeight, render, overscan, resetKey, ariaLabel, className }) {
+    const ref = useRef(null);
+    const [range, setRange] = useState({ start: 0, end: 60 });
+    const itemsRef = useRef(items);
+    itemsRef.current = items;
+    const overscanN = overscan == null ? 10 : overscan;
+
+    const measure = useCallback(() => {
+      const node = ref.current;
+      if (!node) return;
+      const top = node.scrollTop;
+      const height = node.clientHeight || 600;
+      const start = Math.max(0, Math.floor(top / itemHeight) - overscanN);
+      const end = Math.min(itemsRef.current.length, Math.ceil((top + height) / itemHeight) + overscanN);
+      setRange((cur) => (cur.start === start && cur.end === end ? cur : { start, end }));
+    }, [itemHeight, overscanN]);
+
+    useEffect(() => {
+      measure();
+      const node = ref.current;
+      if (!node) return undefined;
+      let raf = 0;
+      const onScroll = () => {
+        if (raf) cancelAnimationFrame(raf);
+        raf = requestAnimationFrame(measure);
+      };
+      node.addEventListener("scroll", onScroll, { passive: true });
+      const ro = typeof ResizeObserver === "function" ? new ResizeObserver(() => measure()) : null;
+      if (ro) ro.observe(node);
+      return () => {
+        node.removeEventListener("scroll", onScroll);
+        if (ro) ro.disconnect();
+        if (raf) cancelAnimationFrame(raf);
+      };
+    }, [measure]);
+
+    useEffect(() => {
+      const node = ref.current;
+      if (node) node.scrollTop = 0;
+      measure();
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [resetKey]);
+
+    const slice = items.slice(range.start, range.end);
+    return h("div", {
+      className: "jw-winlist" + (className ? " " + className : ""), ref,
+      role: "listbox", "aria-label": ariaLabel,
+    },
+      h("div", { style: { height: items.length * itemHeight + "px", position: "relative" } },
+        h("div", { style: { position: "absolute", top: range.start * itemHeight + "px", left: 0, right: 0 } },
+          slice.map(render)),
+      ),
+    );
+  }
+
+  function Toasts({ items, onDismiss }) {
+    return h("div", { className: "jw-toast-zone", role: "status", "aria-live": "polite" },
+      items.map((t) => h("div", {
+        key: t.id,
+        className: "jw-toast" + (t.kind ? " jw-toast-" + t.kind : ""),
+        onClick: () => onDismiss(t.id),
+      }, t.message)),
+    );
+  }
+
+  function StatusChip({ kind, children }) {
+    return h("span", { className: "jw-status-chip jw-status-" + kind }, children);
+  }
+
+  // ------------------------------------------------------------------
+  // Entity picker (searchable against Stash, windowed, thousands-safe)
+  // ------------------------------------------------------------------
+
+  function EntityPickerDialog({ kind, title, selectedIds, onClose, onDone }) {
+    const [query, setQueryRaw] = useState("");
+    const [rows, setRows] = useState(null);
+    const [picked, setPicked] = useState(() => new Set(selectedIds.map(String)));
+    const [error, setError] = useState(null);
+
+    const setQuery = useMemo(() => debounce((v) => setQueryRaw(v), SEARCH_DEBOUNCE_MS), []);
+
     useEffect(() => {
       let alive = true;
-      fetchTagNames(ids).then(() => { if (alive) setNamesTick((t) => t + 1); });
+      setError(null);
+      searchEntities(kind, query)
+        .then((r) => { if (alive) setRows(r); })
+        .catch((e) => { if (alive) { setRows([]); setError(String((e && e.message) || e)); } });
       return () => { alive = false; };
-    }, [ids.join(",")]);
-    const [confirmSwitch, setConfirmSwitch] = useState(false);
-    return h("div", { className: "jw-field jw-field-wide" },
-      h("div", { className: "jw-field-label" }, "Airing from"),
-      h("div", { className: "jw-chip-row" },
-        ids.map((id) => {
-          const name = TAG_NAMES.get(id);
-          const missing = name === null;
-          return h("span", {
-            key: id,
-            className: "jw-pill" + (missing ? " jw-pill-missing" : ""),
-            title: missing ? "This tag was deleted in Stash — remove it from the channel." : null,
-          },
-            h("span", { className: "jw-pill-name" }, missing ? "Deleted tag" : name || ("#" + id)),
-            h("button", {
-              className: "jw-pill-remove",
-              disabled: ids.length === 1,
-              "aria-label": "Remove tag " + (name || id),
-              title: ids.length === 1 ? "A channel needs at least one tag." : "Remove this tag",
-              onClick: () => onRemoveTag(id),
-            }, "×"),
-          );
+    }, [query, kind]);
+
+    const toggle = (id) => {
+      setPicked((cur) => {
+        const next = new Set(cur);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        return next;
+      });
+    };
+
+    const pickedList = [...picked];
+    const nameOf = (id) => entityName(kind, id);
+
+    const rowRender = (row) => h("div", {
+      key: row.id,
+      className: "jw-pick-row" + (picked.has(row.id) ? " jw-pick-row-checked" : ""),
+      role: "option", "aria-selected": picked.has(row.id) ? "true" : "false", tabIndex: 0,
+      onClick: () => toggle(row.id),
+      onKeyDown: (e) => { if (e.key === " " || e.key === "Enter") { e.preventDefault(); toggle(row.id); } },
+    },
+      h("span", { className: "jw-pick-check" }, picked.has(row.id) ? "✓" : ""),
+      h("span", { className: "jw-pick-name" }, row.name),
+      h("span", { className: "jw-pick-count" }, row.count === 0 ? "unused" : fmtCount(row.count)),
+      h("span", { className: "jw-pick-eid" }, "#" + row.id),
+    );
+
+    return h(Dialog, {
+      title, onClose, wide: true,
+      footer: [
+        h("button", { key: "cancel", className: "jw-btn", onClick: onClose }, "Cancel"),
+        h("button", {
+          key: "done", className: "jw-btn jw-btn-primary",
+          onClick: () => { onDone(sortedIds(pickedList)); onClose(); },
+        }, "Done"),
+      ],
+    },
+      h("div", { className: "jw-field" },
+        h("label", { className: "jw-field-label", htmlFor: "jw-picker-search" }, "Search"),
+        h("input", {
+          id: "jw-picker-search", className: "jw-input", type: "search",
+          placeholder: "Search " + kind + "s…", defaultValue: "",
+          onChange: (e) => setQuery(e.target.value.trim().toLowerCase()),
         }),
-        h("button", { className: "jw-pill-add", onClick: onAddTags }, "+ Add tag"),
       ),
-      ids.length > 1
-        ? h("div", { className: "jw-swap-note" }, "Airs scenes tagged with any of these.")
-        : h("div", { className: "jw-swap-note" }, "A channel needs at least one tag — add more, or switch to a different kind of lineup below."),
-      confirmSwitch
-        ? h("div", { className: "jw-confirm-row" },
-            h("span", null, "Switching to a different kind of lineup removes these " + ids.length + " tags."),
-            h("button", { className: "jw-btn jw-btn-danger", onClick: () => { setConfirmSwitch(false); onChangeSource(); } }, "Switch"),
-            h("button", { className: "jw-btn jw-btn-ghost", onClick: () => setConfirmSwitch(false) }, "Keep tags"),
-          )
-        : h("button", { className: "jw-link", onClick: () => (ids.length > 1 ? setConfirmSwitch(true) : onChangeSource()) },
-            "Switch to a different kind of lineup…"),
-    );
-  }
-
-  function EditorPane({ channel, channels, onPatch, onAssignNumber, onChangeSource, onRemoveTag, onAddTags, onRemove }) {
-    const [confirmRemove, setConfirmRemove] = useState(false);
-    const [glyphOpen, setGlyphOpen] = useState(false);
-    const [trialOpen, setTrialOpen] = useState(false);
-    if (!channel) return null;
-
-    return h("div", { className: "jw-editor" },
-      h("div", { className: "jw-network-card" },
-        h("div", { style: { position: "relative" } },
-          h("div", { onClick: () => setGlyphOpen(!glyphOpen), style: { cursor: "pointer" }, title: "Choose a logo" },
-            h(GlyphTile, { codepoint: channel.glyph, color: channel.color, size: 56 }),
-          ),
-          glyphOpen ? h(GlyphPicker, {
-            current: channel.glyph,
-            onPick: (g) => { onPatch({ glyph: g }); setGlyphOpen(false); },
-            onClose: () => setGlyphOpen(false),
-          }) : null,
-        ),
-        h("div", { className: "jw-network-id" },
-          h("input", {
-            className: "jw-name-input",
-            value: channel.name,
-            maxLength: 60,
-            onChange: (e) => onPatch({ name: e.target.value }),
-            onBlur: (e) => { const v = e.target.value.trim(); if (v && v !== channel.name) onPatch({ name: v }); },
+      error ? h("p", { className: "jw-error-text", role: "alert" }, error) : null,
+      rows == null
+        ? h("p", { className: "jw-hint" }, "Searching…")
+        : h(WindowedList, {
+            items: rows, itemHeight: PICKER_ITEM_HEIGHT, render: rowRender,
+            resetKey: query + ":" + kind, ariaLabel: "Search results",
+            className: "jw-pick-list",
           }),
-          h(NumberStepper, { channel, channels, onAssign: onAssignNumber }),
-        ),
-      ),
-
-      h("div", { className: "jw-editor-section" },
-        h("div", { className: "jw-section-label" }, "Programming"),
-        h("div", { className: "jw-programming" },
-          (channel.source || {}).type === "tag"
-            ? h(TagPillRow, { channel, onRemoveTag, onAddTags, onChangeSource })
-            : h("div", { className: "jw-field" },
-                h("div", { className: "jw-field-label" }, "Airing from"),
-                h("button", {
-                  className: "jw-source-chip" + (channel.sourceMissing ? " jw-source-missing" : ""),
-                  onClick: onChangeSource,
-                  title: "Change what this channel airs",
-                },
-                  h(Glyph, { codepoint: SOURCE_KINDS[(channel.source || {}).type] ? SOURCE_KINDS[(channel.source || {}).type].glyph : "\uf111", size: 12, color: "inherit" }),
-                  h("span", null, channel.sourceMissing
-                    ? "Lineup missing — relink"
-                    : (channel.sourceLabel || (SOURCE_KINDS[(channel.source || {}).type] || {}).label || "?")),
-                ),
-              ),
-          h("div", { className: "jw-field" },
-            h("div", { className: "jw-field-label" }, "Play order"),
-            h("div", { className: "jw-chip-row" }, SORTS.map((s) =>
-              h("button", {
-                key: s.key,
-                className: "jw-chip" + (channel.sort === s.key ? " jw-chip-active" : ""),
-                onClick: () => onPatch({ sort: s.key }),
-              }, s.label))),
-          ),
-          h("div", { className: "jw-field" },
-            h("div", { className: "jw-field-label" }, "Channel is"),
-            h("button", {
-              className: "jw-chip" + (channel.enabled ? " jw-chip-active" : ""),
-              onClick: () => onPatch({ enabled: !channel.enabled }),
-            }, channel.enabled ? "On air" : "Paused"),
-          ),
-        ),
-      ),
-
-      h(ProgrammingControls, { channel, onPatch }),
-      channel.programming && channel.programming.mode !== "fixed" ? h("button", { className: "jw-btn", onClick: () => setTrialOpen(true) }, "Try different programming…") : null,
-      trialOpen ? h(ProgrammingTrial, { channel, onApply: onPatch, onClose: () => setTrialOpen(false) }) : null,
-      h(PublishedSchedule, { channel }),
-      h("div", { className: "jw-editor-section" },
-        h("div", { className: "jw-section-label" }, "Appearance"),
-        h("div", { className: "jw-appearance" },
-          h("div", { className: "jw-field" },
-            h("div", { className: "jw-field-label" }, "Color"),
-            h("div", { className: "jw-swatch-row" },
-              PALETTE.map((c) => h("button", {
-                key: c,
-                className: "jw-swatch" + (channel.color === c ? " jw-swatch-active" : ""),
-                style: { background: c },
-                onClick: () => onPatch({ color: c }),
-                title: c,
-              })),
-              h("label", { className: "jw-swatch jw-swatch-custom", title: "Custom color" },
-                h("input", {
-                  type: "color",
-                  value: channel.color,
-                  style: { opacity: 0, position: "absolute", width: 1, height: 1 },
-                  onChange: (e) => onPatch({ color: e.target.value.toUpperCase() }),
-                }),
-                "…",
-              ),
-            ),
-          ),
-        ),
-      ),
-
-      (!channel.programming || channel.programming.mode === "fixed") ? h(OnAirStrip, { channel, isDraft: false }) : null,
-
-      h("div", { className: "jw-editor-section jw-danger" },
-        confirmRemove
-          ? h("div", { className: "jw-confirm-row" },
-              h("span", null, "Remove " + channel.name + " from the dial?"),
-              h("button", { className: "jw-btn jw-btn-danger", onClick: onRemove }, "Remove"),
-              h("button", { className: "jw-btn jw-btn-ghost", onClick: () => setConfirmRemove(false) }, "Keep"),
-            )
-          : h("button", { className: "jw-link jw-link-danger", onClick: () => setConfirmRemove(true) }, "Remove this channel…"),
-      ),
-    );
-  }
-
-  /** Read-only detail for an automatic (library-derived) or network channel. */
-  function AutoChannelPane({ row }) {
-    const info = row.auto;
-    const r = info.row;
-    const network = r.origin === "network";
-    const soloSource =
-      r.kind === "studio" ? { type: "studio", id: r.id }
-        : r.kind === "performer" ? { type: "performer", id: r.id }
-          : null;
-    const draft = soloSource
-      ? {
-          id: "draft", number: r.number || 1, name: r.name,
-          glyph: SECTION_GLYPHS[info.section] || "\uf111", color: AUTO_SLATE,
-          source: soloSource, sort: "shuffle", seed: 0, enabled: true,
-        }
-      : null;
-    const tileGlyph = network ? (r.glyph || SECTION_GLYPHS[info.section] || "\uf111") : (SECTION_GLYPHS[info.section] || "\uf111");
-    const tileColor = network ? (r.color || AUTO_SLATE) : (r.kind && /Group|Spillover$/.test(r.kind) ? GROUP_SLATE : AUTO_SLATE);
-
-    return h("div", { className: "jw-editor" },
-      h("div", { className: "jw-network-card" },
-        h(GlyphTile, { codepoint: tileGlyph, color: tileColor, size: 56 }),
-        h("div", { className: "jw-network-id" },
-          h("div", { className: "jw-name-input jw-name-readonly" }, r.name),
-          h("div", { className: "jw-swap-note" }, r.number != null ? "Channel " + r.number : "Unnumbered"),
-        ),
-      ),
-      h("div", { className: "jw-editor-section" },
-        h("div", { className: "jw-section-label" }, "Programming"),
-        h("div", { className: "jw-programming" },
-          h("div", { className: "jw-field" },
-            h("div", { className: "jw-field-label" }, "Airing from"),
-            h("div", { className: "jw-field-value jw-auto-note" },
-              network ? (r.sourceLabel || "Curated network")
-                : r.kind === "tags" ? "Tags matching this channel's theme"
-                  : r.kind === "studio" ? "Studio"
-                    : r.kind === "performer" ? "Performer"
-                      : r.count != null || r.members != null ? "A group of related " + (info.section === "studios" ? "studios" : "performers") : ""),
-          ),
-          h("div", { className: "jw-field" },
-            h("div", { className: "jw-field-label" }, "Size"),
-            h("div", { className: "jw-field-value jw-auto-note" },
-              r.count != null ? formatCount(r.count)
-                : r.members != null ? r.members + (r.members === 1 ? " member" : " members")
-                  : ""),
-          ),
-          network && r.schedule
-            ? h("div", { className: "jw-field" },
-                h("div", { className: "jw-field-label" }, "Schedule"),
-                h("div", { className: "jw-field-value jw-auto-note" },
-                  r.schedule.degraded ? "Encore — the scheduler fell behind; the last schedule keeps repeating until the next run."
-                    : "Advancing — " + Math.round(r.schedule.coverageHours) + " h of airings scheduled ahead, refreshed hourly.",
-                ),
-              )
+      h("div", { className: "jw-picked-pane" },
+        h("div", { className: "jw-picked-head" },
+          h("span", null, pickedList.length.toLocaleString() + " selected"),
+          pickedList.length
+            ? h("button", {
+                className: "jw-btn jw-btn-ghost jw-btn-small",
+                onClick: () => setPicked(new Set()),
+              }, "Clear all")
             : null,
         ),
-      ),
-      r.offAir
-        ? h("div", { className: "jw-editor-section" },
-            h("div", { className: "jw-missing-note" }, "Off air — nothing in your library matches this channel yet. It goes live as the library grows."),
-          )
-        : null,
-      draft
-        ? h(OnAirStrip, { channel: draft, isDraft: true })
-        : h("div", { className: "jw-editor-section" },
-            h("div", { className: "jw-missing-note" },
-              r.kind === "tags"
-                ? "This channel pools every tag matching its theme; open the TV guide to see what's playing."
-                : "This channel pools several members; open the TV guide to see what's playing."),
-          ),
-      h("div", { className: "jw-editor-section" },
-        h("div", { className: "jw-missing-note" }, "Generated automatically from your library — shape it with the thresholds in Tuning (⚙), or create a custom channel to take over a number."),
+        pickedList.length
+          ? h("div", { className: "jw-entity-summary" },
+              pickedList.slice(0, DRAFT_COUNT_CAP).map((id) => h("span", { key: id, className: "jw-entity-chip" },
+                h("span", null, nameOf(id)),
+                h("button", {
+                  "aria-label": "Remove " + nameOf(id),
+                  onClick: () => toggle(id),
+                }, "✕"),
+              )),
+              pickedList.length > DRAFT_COUNT_CAP
+                ? h("span", { className: "jw-entity-chip" }, "+ " + (pickedList.length - DRAFT_COUNT_CAP) + " more (all kept)")
+                : null,
+            )
+          : h("p", { className: "jw-hint" }, "Nothing selected yet."),
       ),
     );
   }
 
-  function CreateChannelSheet({ onClose, onCreate, editingChannel }) {
-    const [query, setQuery] = useState("");
-    const [results, setResults] = useState(null);
-    const [picked, setPicked] = useState(editingChannel
-      ? { type: editingChannel.source.type, id: String(editingChannel.source.id), name: editingChannel.sourceLabel || "" }
-      : null);
-    const [name, setName] = useState(editingChannel ? editingChannel.name : "");
+  // ------------------------------------------------------------------
+  // Groups manager (each change is its own Apply)
+  // ------------------------------------------------------------------
+
+  function GroupsManagerDialog({ lib, drafts, onClose, submitOps }) {
     const [busy, setBusy] = useState(false);
-    const [error, setError] = useState(null);
-    const inputRef = useRef(null);
+    const [newName, setNewName] = useState("");
+    const [confirmDelete, setConfirmDelete] = useState(null); // {group, moveTo}
+    const groups = (lib.groups || []).slice().sort((a, b) => a.position - b.position);
+    const memberCount = (gid) => (lib.channels || []).filter((c) => c.groupId === gid).length;
 
-    useEffect(() => { if (inputRef.current) inputRef.current.focus(); }, []);
-    useEffect(() => {
-      let alive = true;
-      const t = setTimeout(async () => {
-        try {
-          const r = await fetchSources(query.trim());
-          if (alive) setResults(r);
-        } catch (e) {
-          if (alive) setResults({ savedFilters: [], tags: [], performers: [], studios: [] });
-        }
-      }, query.trim() ? SEARCH_DEBOUNCE_MS : 0);
-      return () => { alive = false; clearTimeout(t); };
-    }, [query]);
-
-    useEffect(() => {
-      if (picked && !name && picked.name) setName(picked.name);
-      // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [picked]);
-
-    const groups = [];
-    if (results) {
-      if (results.savedFilters.length) groups.push({ title: "Custom lineups", glyph: SOURCE_KINDS.savedFilter.glyph, rows: results.savedFilters, hint: "saved search" });
-      if (results.studios.length) groups.push({ title: "Studios", glyph: SOURCE_KINDS.studio.glyph, rows: results.studios });
-      if (results.tags.length) groups.push({ title: "Tags", glyph: SOURCE_KINDS.tag.glyph, rows: results.tags });
-      if (results.performers.length) groups.push({ title: "Performers", glyph: SOURCE_KINDS.performer.glyph, rows: results.performers });
-    }
-
-    const submit = async () => {
-      if (!picked || busy) return;
+    const run = async (ops, label) => {
+      if (busy) return;
       setBusy(true);
-      setError(null);
       try {
-        await onCreate({
-          source: picked.type === "tag"
-            ? { type: "tag", id: picked.id, ids: [picked.id] }
-            : { type: picked.type, id: picked.id },
-          name: (name || picked.name || "New channel").trim().slice(0, 60),
-        });
-        onClose();
-      } catch (e) {
-        setError(String((e && e.message) || e));
+        await submitOps(ops, { label });
+      } finally {
         setBusy(false);
       }
     };
 
-    return h("div", { className: "jw-overlay", onMouseDown: (e) => { if (e.target === e.currentTarget) onClose(); } },
-      h("div", { className: "jw-sheet" },
-        h("div", { className: "jw-sheet-head" },
-          h("span", { className: "jw-sheet-title" }, editingChannel ? "Change what airs" : "New channel"),
-          h("button", { className: "jw-btn jw-btn-ghost", onClick: onClose }, "✕"),
-        ),
-        !picked ? [
-          h("input", {
-            key: "search", ref: inputRef, className: "jw-search",
-            placeholder: "Search saved searches, studios, tags, performers…",
-            value: query, onChange: (e) => setQuery(e.target.value),
-          }),
-          results == null
-            ? h("div", { className: "jw-sheet-loading" }, "Loading…")
-            : groups.length === 0
-              ? h("div", { className: "jw-sheet-loading" }, "Nothing matches “" + query + "”")
-              : groups.map((g) => h("div", { key: g.title, className: "jw-result-group" },
-                  h("div", { className: "jw-section-label" }, g.title),
-                  g.rows.map((row) => h("button", {
-                    key: row.type + "-" + row.id,
-                    className: "jw-result-row",
-                    onClick: () => setPicked(row),
-                  },
-                    h(Glyph, { codepoint: g.glyph, size: 13, color: "rgba(235,235,240,.6)" }),
-                    h("span", { className: "jw-result-name" }, row.name),
-                    h("span", { className: "jw-result-count" + (row.count === 0 ? " jw-off-air-text" : "") },
-                      row.count == null ? (g.hint || "") : (row.count === 0 ? "off air" : formatCount(row.count))),
-                  )),
-                )),
-        ] : [
-          h("div", { key: "picked", className: "jw-picked-row" },
-            h("span", { className: "jw-field-label" }, "Airing from"),
-            h("span", { className: "jw-picked-name" }, picked.name || picked.id),
-            h("button", { className: "jw-link", onClick: () => { setPicked(null); setName(editingChannel ? editingChannel.name : ""); } }, "change"),
-          ),
-          h("div", { key: "name", className: "jw-field" },
-            h("div", { className: "jw-field-label" }, "Channel name"),
-            h("input", {
-              className: "jw-search", value: name, maxLength: 60,
-              placeholder: picked.name || "New channel",
-              onChange: (e) => setName(e.target.value),
-              onKeyDown: (e) => { if (e.key === "Enter") submit(); },
-              autoFocus: true,
-            }),
-          ),
-          error ? h("div", { key: "err", className: "jw-missing-note" }, error) : null,
-          h("div", { key: "foot", className: "jw-sheet-foot" },
-            h("button", { className: "jw-btn jw-btn-ghost", onClick: onClose }, "Cancel"),
-            h("button", { className: "jw-btn jw-btn-primary", disabled: busy, onClick: submit },
-              busy ? "Working…" : (editingChannel ? "Relink channel" : "Create channel")),
-          ),
-        ],
-      ),
-    );
-  }
-
-  /** Multi-pick tag sheet: toggle membership; Done applies the whole set. */
-  function TagPickSheet({ channel, onClose, onDone }) {
-    const [query, setQuery] = useState("");
-    const [results, setResults] = useState(null);
-    const [picked, setPicked] = useState(tagIdsOf(channel.source));
-    const [busy, setBusy] = useState(false);
-    const inputRef = useRef(null);
-
-    useEffect(() => { if (inputRef.current) inputRef.current.focus(); }, []);
-    useEffect(() => { fetchTagNames(picked); }, [picked.join(",")]);
-    useEffect(() => {
-      let alive = true;
-      const t = setTimeout(async () => {
-        try {
-          const r = await fetchSources(query.trim());
-          if (alive) setResults(r.tags);
-        } catch (e) {
-          if (alive) setResults([]);
-        }
-      }, query.trim() ? SEARCH_DEBOUNCE_MS : 0);
-      return () => { alive = false; clearTimeout(t); };
-    }, [query]);
-
-    const toggle = (id) => setPicked((cur) => cur.includes(id)
-      ? cur.filter((x) => x !== id)
-      : [...cur, id].sort((a, b) => Number(a) - Number(b)));
-    const done = () => {
-      if (!picked.length || busy) return;
-      setBusy(true);
-      onDone(picked);
-      onClose();
+    const rename = (g, name) => {
+      const trimmed = String(name || "").trim();
+      if (!trimmed || trimmed === g.name) return;
+      void run([{ op: "group.put", group: { id: g.id, name: trimmed, position: g.position } }], "Group renamed");
     };
 
-    return h("div", { className: "jw-overlay", onMouseDown: (e) => { if (e.target === e.currentTarget) onClose(); } },
-      h("div", { className: "jw-sheet" },
-        h("div", { className: "jw-sheet-head" },
-          h("span", { className: "jw-sheet-title" }, "Tags this channel airs from"),
-          h("button", { className: "jw-btn jw-btn-ghost", onClick: onClose }, "✕"),
+    const move = (g, dir) => {
+      const i = groups.findIndex((x) => x.id === g.id);
+      const j = i + dir;
+      if (i < 0 || j < 0 || j >= groups.length) return;
+      const ops = groups.map((x, idx) => {
+        const pos = idx === i ? j + 1 : idx === j ? i + 1 : idx + 1;
+        return { op: "group.put", group: { id: x.id, name: x.name, position: pos } };
+      });
+      void run(ops, "Groups reordered");
+    };
+
+    const create = () => {
+      const trimmed = newName.trim();
+      if (!trimmed) return;
+      const maxPos = Math.max(0, ...groups.map((g) => g.position));
+      setNewName("");
+      void run([{ op: "group.put", group: { id: newGroupId(), name: trimmed, position: maxPos + 1 } }], "Group created");
+    };
+
+    if (confirmDelete) {
+      const g = confirmDelete.group;
+      const members = memberCount(g.id);
+      const others = groups.filter((x) => x.id !== g.id);
+      return h(Dialog, {
+        title: "Delete “" + g.name + "”", onClose: () => setConfirmDelete(null),
+        footer: [
+          h("button", { key: "c", className: "jw-btn", onClick: () => setConfirmDelete(null) }, "Cancel"),
+          h("button", {
+            key: "d", className: "jw-btn jw-btn-danger", disabled: busy,
+            onClick: () => {
+              const ops = [{ op: "group.delete", id: g.id }];
+              if (members) ops[0].moveTo = confirmDelete.moveTo;
+              setConfirmDelete(null);
+              // keep stored drafts consistent: their group moved too
+              if (drafts && members) {
+                for (const c of lib.channels || []) {
+                  if (c.groupId !== g.id) continue;
+                  const entry = drafts.get(c.id);
+                  if (entry) drafts.put(c.id, Object.assign({}, entry.draft, { groupId: confirmDelete.moveTo }));
+                }
+              }
+              void run(ops, "Group deleted");
+            },
+          }, "Delete group"),
+        ],
+      },
+        h("p", { className: "jw-confirm-message" },
+          members
+            ? members + (members === 1 ? " channel moves" : " channels move") + " to another group. One Apply."
+            : "The group is empty. One Apply."),
+        h("div", { className: "jw-field" },
+          h("label", { className: "jw-field-label", htmlFor: "jw-group-dest" }, "Destination group"),
+          h("select", {
+            id: "jw-group-dest", className: "jw-input", disabled: !members,
+            value: confirmDelete.moveTo, onChange: (e) => setConfirmDelete({ group: g, moveTo: e.target.value }),
+          }, others.map((x) => h("option", { key: x.id, value: x.id }, x.name))),
         ),
-        h("div", { className: "jw-settings-hint" }, "Pick any number — the channel airs scenes matching any of them."),
-        picked.length
-          ? h("div", { className: "jw-chip-row jw-picked-tags" },
-              picked.map((id) => {
-                const name = TAG_NAMES.get(id);
-                return h("span", { key: id, className: "jw-pill" },
-                  h("span", { className: "jw-pill-name" }, name || "#" + id),
-                  h("button", { className: "jw-pill-remove", "aria-label": "Remove tag " + (name || id), onClick: () => toggle(id) }, "×"),
+      );
+    }
+
+    return h(Dialog, {
+      title: "Groups", onClose,
+      footer: [h("button", { key: "done", className: "jw-btn jw-btn-primary", onClick: onClose }, "Done")],
+    },
+      h("p", { className: "jw-hint" },
+        "Every channel belongs to exactly one group. Renames, reorders, creates and deletes each apply immediately as their own revision."),
+      h("div", { className: "jw-groups-list", role: "list" },
+        groups.map((g, i) => h("div", { key: g.id, className: "jw-groups-row", role: "listitem" },
+          h("span", { className: "jw-groups-pos" }, "#" + g.position),
+          h("input", {
+            className: "jw-input jw-groups-name", defaultValue: g.name,
+            "aria-label": "Group name " + g.name,
+            onBlur: (e) => rename(g, e.target.value),
+            onKeyDown: (e) => { if (e.key === "Enter") e.target.blur(); },
+          }),
+          h("span", { className: "jw-groups-count" }, memberCount(g.id) + " ch"),
+          h("button", {
+            className: "jw-btn jw-btn-ghost jw-btn-small", "aria-label": "Move " + g.name + " up",
+            disabled: busy || i === 0, onClick: () => move(g, -1),
+          }, "↑"),
+          h("button", {
+            className: "jw-btn jw-btn-ghost jw-btn-small", "aria-label": "Move " + g.name + " down",
+            disabled: busy || i === groups.length - 1, onClick: () => move(g, +1),
+          }, "↓"),
+          h("button", {
+            className: "jw-btn jw-btn-ghost jw-btn-small", "aria-label": "Delete group " + g.name,
+            disabled: busy || groups.length <= 1, title: groups.length <= 1 ? "Cannot remove the last group." : null,
+            onClick: () => setConfirmDelete({ group: g, moveTo: (groups.filter((x) => x.id !== g.id)[0] || {}).id }),
+          }, "🗑"),
+        )),
+      ),
+      h("div", { className: "jw-groups-create" },
+        h("input", {
+          className: "jw-input", placeholder: "New group name", value: newName,
+          "aria-label": "New group name",
+          onChange: (e) => setNewName(e.target.value),
+          onKeyDown: (e) => { if (e.key === "Enter") create(); },
+        }),
+        h("button", { className: "jw-btn jw-btn-primary", disabled: busy || !newName.trim(), onClick: create }, "Create"),
+      ),
+    );
+  }
+
+  // ------------------------------------------------------------------
+  // New channel dialog → local DRAFT (committed on Apply)
+  // ------------------------------------------------------------------
+
+  function NewChannelDialog({ lib, drafts, onClose, onCreate }) {
+    const groups = (lib.groups || []).slice().sort((a, b) => a.position - b.position);
+    const [kind, setKind] = useState("net");
+    const [number, setNumber] = useState(() => nextFreeNumber(lib.channels || [], "net"));
+    const [name, setName] = useState("");
+    const [groupId, setGroupId] = useState(groups[0] ? groups[0].id : "");
+    const [error, setError] = useState(null);
+
+    const band = BANDS[kind];
+    const numberOk = Number.isInteger(number) && number >= band[0] && number <= band[1]
+      && !(lib.channels || []).some((c) => c.number === number);
+
+    const switchKind = (k) => {
+      setKind(k);
+      setNumber(nextFreeNumber(lib.channels || [], k));
+    };
+
+    const submit = () => {
+      const trimmed = name.trim();
+      if (!trimmed) { setError("Give the channel a name."); return; }
+      if (!numberOk) { setError("Number " + (number || "") + " is not free in " + band[0] + "–" + band[1] + "."); return; }
+      if (!groupId) { setError("Pick a group."); return; }
+      const tempId = newTempId();
+      const draft = {
+        kind, number, name: trimmed, glyph: null,
+        color: pickDefaultColor(number), groupId, sort: "shuffle",
+        enabled: true, archived: false, paused: false,
+        source: convertLegacySource({ type: "none" }),
+        sourceLabel: "", programming: null,
+      };
+      drafts.put(tempId, draft);
+      onCreate(tempId);
+    };
+
+    return h(Dialog, {
+      title: "New channel", onClose,
+      footer: [
+        h("button", { key: "c", className: "jw-btn", onClick: onClose }, "Cancel"),
+        h("button", { key: "g", className: "jw-btn jw-btn-primary", onClick: submit }, "Create draft"),
+      ],
+    },
+      h("p", { className: "jw-hint" },
+        "This stages a local draft. Nothing exists on the server until you Apply in the editor."),
+      h("div", { className: "jw-field" },
+        h("label", { className: "jw-field-label", htmlFor: "jw-new-name" }, "Name"),
+        h("input", {
+          id: "jw-new-name", className: "jw-input", value: name, maxLength: MAX_NAME_LEN,
+          onChange: (e) => setName(e.target.value),
+          onKeyDown: (e) => { if (e.key === "Enter") submit(); },
+        }),
+      ),
+      h("div", { className: "jw-field" },
+        h("span", { className: "jw-field-label" }, "Number band"),
+        h("div", { className: "jw-chip-row", role: "group", "aria-label": "Number band" },
+          h("button", {
+            className: "jw-chip" + (kind === "net" ? " jw-chip-active" : ""), "aria-pressed": kind === "net" ? "true" : "false",
+            onClick: () => switchKind("net"),
+          }, "100–899 · network tier"),
+          h("button", {
+            className: "jw-chip" + (kind === "ch" ? " jw-chip-active" : ""), "aria-pressed": kind === "ch" ? "true" : "false",
+            onClick: () => switchKind("ch"),
+          }, "1–99 · My Channels"),
+        ),
+        h("p", { className: "jw-hint" },
+          kind === "ch"
+            ? "1–99 are your personal slots ahead of the built-in dial on the TV."
+            : "100–899 is the network tier; pick a free number in that range."),
+      ),
+      h("div", { className: "jw-field" },
+        h("label", { className: "jw-field-label", htmlFor: "jw-new-number" }, "Number (free: " + band[0] + "–" + band[1] + ")"),
+        h("input", {
+          id: "jw-new-number", className: "jw-input jw-num-wide", type: "number",
+          min: band[0], max: band[1], value: number != null ? number : "",
+          onChange: (e) => setNumber(e.target.value === "" ? null : parseInt(e.target.value, 10)),
+        }),
+        !numberOk && number != null
+          ? h("p", { className: "jw-error-text" }, "That number is taken or out of the band.")
+          : null,
+      ),
+      h("div", { className: "jw-field" },
+        h("label", { className: "jw-field-label", htmlFor: "jw-new-group" }, "Group"),
+        h("select", { id: "jw-new-group", className: "jw-input", value: groupId, onChange: (e) => setGroupId(e.target.value) },
+          groups.map((g) => h("option", { key: g.id, value: g.id }, g.name))),
+      ),
+      error ? h("p", { className: "jw-error-text", role: "alert" }, error) : null,
+    );
+  }
+
+  // ------------------------------------------------------------------
+  // History modal: restore stages a draft — never a rewind
+  // ------------------------------------------------------------------
+
+  function HistoryDialog({ channelId, channelName, fetchPage, onClose, onRestore }) {
+    const [entries, setEntries] = useState(null);
+    const [offset, setOffset] = useState(0);
+    const [error, setError] = useState(null);
+    const limit = 20;
+
+    useEffect(() => {
+      let alive = true;
+      setError(null);
+      fetchPage({ offset, limit })
+        .then((r) => { if (alive) setEntries(r.entries || []); })
+        .catch((e) => { if (alive) setError(String((e && e.message) || e)); });
+      return () => { alive = false; };
+    }, [offset]);
+
+    const versionIn = (entry) => (entry.channels || []).find((c) => c && c.id === channelId) || null;
+
+    return h(Dialog, {
+      title: "History — " + channelName, onClose,
+      footer: [
+        h("button", { key: "older", className: "jw-btn", disabled: !entries || entries.length < limit, onClick: () => setOffset((o) => o + limit) }, "Older"),
+        h("button", { key: "newer", className: "jw-btn", disabled: offset === 0, onClick: () => setOffset((o) => Math.max(0, o - limit)) }, "Newer"),
+        h("button", { key: "done", className: "jw-btn jw-btn-primary", onClick: onClose }, "Done"),
+      ],
+    },
+      h("p", { className: "jw-hint" },
+        "Restore stages that revision's version of THIS channel as your current draft — Apply commits it as a new change. Nothing rewinds."),
+      error ? h("p", { className: "jw-error-text", role: "alert" }, error) : null,
+      entries == null
+        ? h("p", { className: "jw-hint" }, "Loading…")
+        : entries.length === 0
+          ? h("p", { className: "jw-hint" }, "No history yet — every Apply is archived here.")
+          : h("div", { className: "jw-history-list" },
+              entries.map((entry) => {
+                const version = versionIn(entry);
+                const changed = version != null;
+                return h("div", { key: entry.revision, className: "jw-history-row" },
+                  h("span", { className: "jw-history-rev" }, "r" + entry.revision),
+                  h("span", { className: "jw-history-date" },
+                    entry.savedAt ? new Date(entry.savedAt).toLocaleString() : ""),
+                  h("span", { className: "jw-hint" }, entry.channelCount + " channels"),
+                  h("button", {
+                    className: "jw-btn jw-btn-small", disabled: !changed,
+                    title: changed ? "Stage this version as the current draft" : "This channel did not change in that revision",
+                    onClick: () => { onRestore(clone(version)); onClose(); },
+                  }, changed ? "Restore…" : "unchanged"),
                 );
               }),
-            )
-          : null,
-        h("input", {
-          ref: inputRef, className: "jw-search",
-          placeholder: "Search tags…",
-          value: query, onChange: (e) => setQuery(e.target.value),
-        }),
-        results == null
-          ? h("div", { className: "jw-sheet-loading" }, "Loading…")
-          : results.length === 0
-            ? h("div", { className: "jw-sheet-loading" }, "Nothing matches “" + query + "”")
-            : results.map((row) => h("button", {
-                key: row.id,
-                className: "jw-result-row" + (picked.includes(row.id) ? " jw-result-picked" : ""),
-                onClick: () => toggle(row.id),
-              },
-                h(Glyph, { codepoint: SOURCE_KINDS.tag.glyph, size: 13, color: "rgba(235,235,240,.6)" }),
-                h("span", { className: "jw-result-name" }, row.name),
-                h("span", { className: "jw-result-count" + (row.count === 0 ? " jw-off-air-text" : "") },
-                  row.count === 0 ? "off air" : formatCount(row.count)),
-              )),
-        h("div", { className: "jw-sheet-foot" },
-          h("button", { className: "jw-btn jw-btn-ghost", onClick: onClose }, "Cancel"),
-          h("button", { className: "jw-btn jw-btn-primary", disabled: !picked.length || busy, onClick: done,
-            title: picked.length ? null : "A channel needs at least one tag." },
-            "Done"),
-        ),
+            ),
+    );
+  }
+
+  // ------------------------------------------------------------------
+  // Swap dialog
+  // ------------------------------------------------------------------
+
+  function SwapDialog({ draft, lib, onClose, onPick }) {
+    const others = (lib.channels || [])
+      .filter((c) => c.id !== draft.id && c.kind === (draft.kind || "net"))
+      .sort((a, b) => Math.abs(a.number - draft.number) - Math.abs(b.number - draft.number))
+      .slice(0, 30);
+    return h(Dialog, {
+      title: "Swap number " + draft.number + " with…", onClose,
+      footer: [h("button", { key: "c", className: "jw-btn", onClick: onClose }, "Cancel")],
+    },
+      h("p", { className: "jw-hint" },
+        "Both numbers exchange in the SAME Apply — one transaction, no duplicate-number window."),
+      h("div", { className: "jw-swap-list", role: "listbox", "aria-label": "Swap with" },
+        others.map((c) => h("div", {
+          key: c.id, className: "jw-swap-row", role: "option", tabIndex: 0,
+          onClick: () => { onPick(c); onClose(); },
+          onKeyDown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onPick(c); onClose(); } },
+        },
+          h(GlyphTile, { codepoint: c.glyph, color: c.color, size: 24, fallback: c.number }),
+          h("span", { className: "jw-swap-name" }, c.name),
+          h("span", { className: "jw-pick-eid" }, "#" + c.number),
+        )),
       ),
     );
   }
 
-  function SettingsSheet({ catalog, onClose, onPatchSettings }) {
-    const s = catalog.settings || {};
-    const num = (key, def) => h("input", {
-      className: "jw-number-input jw-num-wide", type: "number", min: 2, max: 98,
-      value: s[key] != null ? s[key] : def,
-      onChange: (e) => {
-        const v = parseInt(e.target.value, 10);
-        if (!isNaN(v)) onPatchSettings({ [key]: v });
-      },
+  // ------------------------------------------------------------------
+  // Editor pane — the Option A layout + the Apply state machine
+  //
+  //   clean -> dirty -> validating -> applying -> applied
+  //              |         |            |
+  //              +-- invalid   +-- revision_conflict / transport
+  //  (the draft always survives; edits typed while applying stay draft and
+  //   need a second Apply)
+  // ------------------------------------------------------------------
+
+  function EditorPane({
+    channelId, lib, getRevision, drafts, confirm, toast,
+    submitOps, onApplied, onCreated, reportPhase,
+  }) {
+    const isTemp = String(channelId).startsWith("temp-");
+
+    const [stored, setStored] = useState(null);   // server definition (channel record)
+    const [summary, setSummary] = useState([]);   // server plain-language lines
+    const [draft, setDraft] = useState(null);
+    const [phase, setPhase] = useState("clean");  // clean|dirty|validating|applying|applied
+    const [applyError, setApplyError] = useState(null); // {kind, message, errors, currentRevision}
+    const [lastAppliedRev, setLastAppliedRev] = useState(null);
+    const [refreshNote, setRefreshNote] = useState(null);
+    const [preview, setPreview] = useState(null);
+    const [previewState, setPreviewState] = useState("idle"); // idle|loading|ok|error
+    const [menuOpen, setMenuOpen] = useState(false);
+    const [glyphOpen, setGlyphOpen] = useState(false);
+    const [picker, setPicker] = useState(null);   // {kind, title, facets...}
+    const [swapOpen, setSwapOpen] = useState(false);
+    const [historyOpen, setHistoryOpen] = useState(false);
+    const [loadError, setLoadError] = useState(null);
+    const [nameTick, setNameTick] = useState(0);  // re-render chips after name resolution
+
+    const draftRef = useRef(null);
+    const storedRef = useRef(null);
+    const phaseRef = useRef("clean");
+    const inFlightRef = useRef(false);
+    const pendingRef = useRef(null);   // {requestId, snapshot, expected} — kept on transport failure
+    const previewSeqRef = useRef(0);
+    const aliveRef = useRef(true);
+    const refreshTimerRef = useRef(null);
+    const menuRef = useOutsideClose(menuOpen, () => setMenuOpen(false));
+    const glyphRef = useOutsideClose(glyphOpen, () => setGlyphOpen(false));
+
+    draftRef.current = draft;
+    storedRef.current = stored;
+    phaseRef.current = phase;
+
+    useEffect(() => {
+      aliveRef.current = true;
+      resolveGlyphs();
+      return () => {
+        aliveRef.current = false;
+        if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+      };
+    }, []);
+
+    // Phase reporting (the app guards channel switches + Reload while applying)
+    useEffect(() => {
+      reportPhase({ phase, dirty: isDirty() });
     });
-    return h("div", { className: "jw-overlay", onMouseDown: (e) => { if (e.target === e.currentTarget) onClose(); } },
-      h("div", { className: "jw-sheet jw-sheet-settings" },
-        h("div", { className: "jw-sheet-head" },
-          h("span", { className: "jw-sheet-title" }, "Tuning"),
-          h("button", { className: "jw-btn jw-btn-ghost", onClick: onClose }, "✕"),
-        ),
-        h("p", { className: "jw-settings-hint" },
-          "These thresholds shape the General, Studios, and Performers sections shown on THIS page. ",
-          "Your TV generates its own channels from its own Just Watch settings (TV → Settings → Just Watch); ",
-          "the two are not connected. Channels you create here are never touched by either."),
-        h("div", { className: "jw-programming" },
-          h("div", { className: "jw-field" },
-            h("div", { className: "jw-field-label" }, "A studio or performer is listed on its own row at"),
-            num("soloThreshold", 10),
-          ),
-          h("div", { className: "jw-field" },
-            h("div", { className: "jw-field-label" }, "Smaller ones are pooled into groups below"),
-            num("groupThreshold", 5),
-          ),
-        ),
-        h("p", { className: "jw-settings-hint" },
-          "Launch behavior (pick up where you left off vs. a random channel) is set on your TV, under Just Watch settings."),
-        h("div", { className: "jw-sheet-foot" },
-          h("button", { className: "jw-btn jw-btn-primary", onClick: onClose }, "Done"),
-        ),
-      ),
-    );
-  }
 
-  // ------------------------------------------------------------------
-  // App root: catalog state + one save coordinator
-  // ------------------------------------------------------------------
+    // Local mirror of the rules text-search input (committed to the draft on a
+    // debounce). Null = mirror the committed value.
+    const committedQ = draft && draft.source && draft.source.q ? String(draft.source.q) : "";
+    const [qLocal, setQLocal] = useState(null);
+    useEffect(() => { setQLocal(null); }, [committedQ, channelId]);
 
-  // Server-authoritative fields are merged into a draft that moved on while a
-  // save ran: only per-channel display facts (labels + health), and only for
-  // channels the finished save actually covered with an unchanged source.
-  function rebaseAcknowledged(latest, savedDraft, fresh, revision) {
-    const out = Object.assign({}, latest, { revision });
-    if (!fresh) return out;
-    const freshById = new Map((fresh.channels || []).map((c) => [c.id, c]));
-    const savedSources = new Map((savedDraft.channels || []).map((c) => [c.id, JSON.stringify(c.source)]));
-    out.channels = (latest.channels || []).map((ch) => {
-      const saved = freshById.get(ch.id);
-      if (!saved) return ch; // brand-new local channel: no server truth yet
-      if (savedSources.get(ch.id) !== JSON.stringify(ch.source)) return ch; // source moved on
-      return Object.assign({}, ch, {
-        sourceLabel: saved.sourceLabel || ch.sourceLabel,
-        sceneCount: saved.sceneCount,
-        loopSeconds: saved.loopSeconds,
-        loopCapped: saved.loopCapped,
-        sourceMissing: saved.sourceMissing,
+    // ---- init / retarget ----
+    useEffect(() => {
+      let alive = true;
+      setLoadError(null);
+      setPreview(null);
+      setPreviewState("idle");
+      setApplyError(null);
+      setLastAppliedRev(null);
+      setRefreshNote(null);
+      pendingRef.current = null;
+      (async () => {
+        let storedChannel = null;
+        let serverSummary = [];
+        if (isTemp) {
+          const saved = drafts.get(channelId);
+          if (!saved) {
+            if (alive) setLoadError("This draft no longer exists. Discard it and start again.");
+            return;
+          }
+          storedChannel = null; // nothing on the server yet
+        } else {
+          try {
+            const def = await runOp("GetChannelDefinition", { channelId });
+            if (!alive) return;
+            storedChannel = def.channel;
+            serverSummary = def.summary || [];
+          } catch (e) {
+            if (alive) setLoadError(String((e && e.message) || e));
+            return;
+          }
+        }
+        const saved = drafts.get(channelId);
+        const base = saved ? saved.draft : clone(storedChannel);
+        if (!alive) return;
+        setStored(storedChannel);
+        setSummary(serverSummary);
+        setDraft(base);
+        draftRef.current = base;
+        setPhase(saved ? "dirty" : "clean");
+        phaseRef.current = saved ? "dirty" : "clean";
+        // resume an apply that outlived the previous editor instance
+        const infl = inflightApplies.get(channelId);
+        if (infl) {
+          inFlightRef.current = true;
+          pendingRef.current = { requestId: infl.requestId, snapshot: infl.snapshot, expected: infl.expected };
+          setPhase("applying");
+          infl.promise.then((receipt) => { finalize(receipt, infl.snapshot, true); }).catch(() => {});
+        }
+        void loadPreview();
+        resolveNamesFor(base && base.source);
+      })();
+      return () => { alive = false; };
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [channelId]);
+
+    // Re-resolve summary names whenever the stored summary changes
+    useEffect(() => {
+      if (!summary.length) return undefined;
+      let alive = true;
+      const ids = [];
+      const scan = (kind, list) => list.forEach((id) => ids.push([kind, id]));
+      (summary.join(" ").match(/#[0-9]+/g) || []).forEach((m) => {
+        // summary placeholders render "#id" — resolution needs kinds; the
+        // rules summary below re-derives names client-side instead.
+        void m;
       });
+      void scan;
+      const t = setTimeout(() => { if (alive) setNameTick((x) => x + 1); }, 400);
+      return () => { alive = false; clearTimeout(t); };
+    }, [summary]);
+
+    function resolveNamesFor(source) {
+      const s = source || {};
+      const jobs = [
+        ["tag", [...idsOf(s.tags), ...idsOf(s.tagsAny), ...idsOf(s.excludeTags)]],
+        ["performer", [...idsOf(s.performers), ...idsOf(s.performersAny), ...idsOf(s.excludePerformers)]],
+        ["studio", [...idsOf(s.studios), ...idsOf(s.studiosAny), ...idsOf(s.excludeStudios)]],
+      ];
+      Promise.all(jobs.map(([kind, ids]) => resolveEntityNames(kind, ids))).then(() => {
+        if (aliveRef.current) setNameTick((x) => x + 1);
+      });
+    }
+
+    // ---- draft plumbing ----
+    function isDirty() {
+      const d = draftRef.current;
+      const s = storedRef.current;
+      if (!d) return false;
+      if (!s) return true; // temp channel: nothing stored yet
+      if (deepEqual(d, s)) return false;
+      // Rule editing may add empty canonical keys and programming touches may
+      // add explicit defaults — equivalent values are not a change (mirrors
+      // the server's canonical stored record).
+      const a = Object.assign({}, d, { source: undefined, programming: undefined });
+      const b = Object.assign({}, s, { source: undefined, programming: undefined });
+      const headEqual = deepEqual(a, b)
+        && deepEqual(canonicalProgramming(d.programming), canonicalProgramming(s.programming));
+      return !headEqual || !sourcesEquivalent(d.source, s.source);
+    }
+
+    function edit(mutator) {
+      const cur = draftRef.current;
+      if (!cur) return;
+      const next = mutator(clone(cur));
+      if (next == null || deepEqual(next, cur)) return; // a no-op edit never dirties
+      draftRef.current = next;
+      setDraft(next);
+      if (phaseRef.current !== "applying") {
+        setPhase("dirty");
+        phaseRef.current = "dirty";
+        drafts.put(channelId, clone(next));
+      }
+      if (applyError) setApplyError(null);
+      schedulePreview();
+      resolveNamesFor(next.source);
+    }
+
+    const schedulePreview = useMemo(() => debounce(() => { void loadPreview(); }, PREVIEW_DEBOUNCE_MS), []);
+
+    // Debounced commit of the rules text-search input.
+    const commitQRef = useRef(null);
+    const commitQ = useMemo(() => debounce((v) => {
+      edit((d) => {
+        if (v.trim()) d.source.q = v.trim();
+        else delete d.source.q;
+        return d;
+      });
+    }, TEXT_DEBOUNCE_MS), []);
+    commitQRef.current = commitQ;
+
+    async function loadPreview() {
+      const d = draftRef.current;
+      if (!d || !d.source) return;
+      const seq = ++previewSeqRef.current;
+      setPreviewState("loading");
+      try {
+        const args = {
+          source: JSON.stringify(d.source),
+          sort: d.sort || "shuffle",
+          sampleLimit: "10",
+          includePaths: true,
+        };
+        if (storedRef.current && storedRef.current.seed != null) args.seed = String(storedRef.current.seed);
+        const result = await runOp("PreviewChannelPool", args);
+        if (!aliveRef.current || seq !== previewSeqRef.current) return; // stale response
+        setPreview(result);
+        setPreviewState("ok");
+      } catch (e) {
+        if (!aliveRef.current || seq !== previewSeqRef.current) return;
+        setPreview({ status: "error", message: String((e && e.message) || e) });
+        setPreviewState("error");
+      }
+    }
+
+    function validateDraft() {
+      const d = draftRef.current;
+      const errors = [];
+      if (!d) return errors;
+      const name = String(d.name || "").trim();
+      if (!name) errors.push({ field: "name", message: "Name can't be empty." });
+      else if (name.length > MAX_NAME_LEN) errors.push({ field: "name", message: "Name must be " + MAX_NAME_LEN + " characters or fewer." });
+      if (!d.groupId) errors.push({ field: "group", message: "Pick a group." });
+      const band = BANDS[d.kind || "net"];
+      const num = d.number;
+      if (!Number.isInteger(num) || num < band[0] || num > band[1]) {
+        errors.push({ field: "number", message: "Number must be " + band[0] + "–" + band[1] + " for this band." });
+      } else {
+        const occupant = (lib.channels || []).find((c) => c.number === num && c.id !== channelId);
+        if (occupant) {
+          errors.push({ field: "number", message: "Channel " + num + " is taken by “" + occupant.name + "”. Use Swap." });
+        }
+      }
+      if (isRuleSource(d.source)) {
+        for (const e of ruleSourceClientErrors(d.source)) errors.push(e);
+        const canon = canonicalSource(d.source);
+        const hasRule = FACET_KEYS.some((k) => canon[k] && canon[k].length)
+          || canon.date || canon.duration || canon.createdAt || canon.q
+          || canon.studioSceneCount || canon.performerSceneCount;
+        if (!hasRule && d.source.type === "criteria") {
+          errors.push({ field: "source", code: "empty_rules", message: "Add at least one rule — an empty criteria pool matches nothing." });
+        }
+      }
+      return errors;
+    }
+
+    // membership effects of the last pre-flight (drives the refresh-pending note)
+    const effectsRef = useRef([]);
+
+    function fieldError(field) {
+      if (applyError && Array.isArray(applyError.errors)) {
+        const hit = applyError.errors.find((e) => {
+          const p = String(e.path || "");
+          return p === "ops[0]." + field || p.endsWith("." + field) || p === field
+            || (field === "group" && p.endsWith("groupId"))
+            || (field === "source" && p.includes(".source") && !p.includes(".source."));
+        });
+        if (hit) return hit.message;
+      }
+      const local = validateDraft().find((e) => e.field === field);
+      return local ? local.message : null;
+    }
+
+    function rulesErrors() {
+      const out = [];
+      if (applyError && Array.isArray(applyError.errors)) {
+        for (const e of applyError.errors) {
+          const p = String(e.path || "");
+          if (p.includes(".source")) out.push(e);
+        }
+      }
+      for (const e of validateDraft()) if (String(e.field || "").startsWith("source")) out.push(e);
+      return out;
+    }
+
+    // ---- the Apply state machine ----
+    // NOTE: swap is NOT part of a draft transaction. This server build cannot
+    // statically validate channel.put onto a taken number (its swap-pair
+    // exemption crashes: library.py _check_channel_draft references an out-of-
+    // scope `swap_pairs`), so swapping numbers is its OWN immediate Apply —
+    // exactly the prototype's behavior. The draft never carries a taken number.
+    function buildOps(snapshot) {
+      if (isTemp) {
+        const channel = clone(snapshot);
+        delete channel.id;
+        delete channel.seed;
+        delete channel.provenance;
+        return [{ op: "channel.create", tempId: channelId, channel }];
+      }
+      return [{ op: "channel.put", channel: clone(snapshot) }];
+    }
+
+    async function doApply(expectedOverride) {
+      if (inFlightRef.current) return;
+      setApplyError(null);
+      const invalid = validateDraft();
+      setPhase("validating");
+      if (invalid.length) {
+        setPhase("dirty");
+        return;
+      }
+      const snapshot = clone(draftRef.current);
+      const ops = buildOps(snapshot);
+      const expected = expectedOverride != null ? expectedOverride : getRevision();
+      // Pre-flight against the live document: precise typed errors before the
+      // task queue is involved (no writes; revision races are still handled
+      // by the receipt).
+      try {
+        const check = await runOp("ValidateChannelChanges", { ops: JSON.stringify(ops) });
+        if (!aliveRef.current) return;
+        if (check && check.valid === false && (check.errors || []).length) {
+          setPhase("dirty");
+          setApplyError({ kind: "validation", errors: check.errors, message: "the server rejected these changes" });
+          return;
+        }
+        effectsRef.current = (check && check.effects) || [];
+      } catch (e) { /* pre-flight is best-effort; the receipt remains the truth */ }
+      if (!aliveRef.current) return;
+      // Reuse the pending requestId ONLY for a byte-identical retry (same ops,
+      // same expectedRevision) — that is the idempotent-replay case.
+      const pending = pendingRef.current;
+      const reuse = pending && pending.expected === expected && deepEqual(snapshot, pending.snapshot);
+      const requestId = reuse ? pending.requestId : newRequestId();
+      pendingRef.current = { requestId, snapshot, expected };
+      setPhase("applying");
+      inFlightRef.current = true;
+
+      const promise = applyChannelChanges(requestId, expected, ops);
+      inflightApplies.set(channelId, { requestId, snapshot, expected, promise });
+      let receipt;
+      try {
+        receipt = await promise;
+      } catch (e) {
+        // Transport failure: the draft AND the requestId survive. Retrying the
+        // unchanged draft replays or lands the same transaction.
+        inFlightRef.current = false;
+        inflightApplies.delete(channelId);
+        if (!aliveRef.current) return;
+        setPhase("dirty");
+        setApplyError({ kind: "transport", message: "Submit failed (" + String((e && e.message) || e) + ")." });
+        toast("Apply failed to reach the server — draft kept. Apply again to retry the same request.", "err");
+        return;
+      }
+      finalize(receipt, snapshot, false);
+    }
+
+    async function finalize(receipt, snapshot, resumed) {
+      inFlightRef.current = false;
+      inflightApplies.delete(channelId);
+      if (!receipt) return;
+      const transportLike = receipt.status === "unknown";
+
+      if (receipt.status === "committed") {
+        pendingRef.current = null;
+        // Did the draft move on while the request was in flight? Compare the
+        // LIVE draft (an editor that died mid-apply falls back to its stored
+        // session draft, which by definition matches the snapshot).
+        const currentDraft = aliveRef.current && draftRef.current
+          ? draftRef.current
+          : (drafts.get(channelId) ? drafts.get(channelId).draft : snapshot);
+        const untouched = deepEqual(currentDraft, snapshot);
+        if (untouched) drafts.drop(channelId);
+        onApplied(receipt, { channelId, isTemp, untouched, idMap: receipt.idMap });
+        if (!aliveRef.current) return; // registry side effects already done
+        // refresh the definition from the server
+        let freshStored = null;
+        let freshSummary = [];
+        if (!isTemp || receipt.idMap) {
+          const finalId = (receipt.idMap && receipt.idMap[channelId]) || channelId;
+          try {
+            const def = await runOp("GetChannelDefinition", { channelId: finalId });
+            freshStored = def.channel;
+            freshSummary = def.summary || [];
+          } catch (e) { /* channel vanished? keep local draft state */ }
+        }
+        setStored(freshStored);
+        setSummary(freshSummary);
+        setLastAppliedRev(receipt.revision);
+        // The durable receipt (what we poll) does not carry the task's inline
+        // refresh map — membership effects come from the pre-flight instead.
+        const membershipChanged = effectsRef.current.some((e) => e.reindex);
+        const outcomes = receipt.refresh && typeof receipt.refresh === "object"
+          ? Object.entries(receipt.refresh) : [];
+        if (outcomes.length || membershipChanged) {
+          setRefreshNote(outcomes.length
+            ? "Background programming refresh pending — " + outcomes.length
+              + (outcomes.length === 1 ? " channel" : " channels") + " ("
+              + [...new Set(outcomes.map(([, o]) => String(o).split(":")[0]))].join(", ") + ")"
+            : "Background programming refresh pending — membership changed.");
+          if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+          refreshTimerRef.current = setTimeout(() => {
+            if (aliveRef.current) setRefreshNote(null);
+          }, REFRESH_NOTE_MS);
+        }
+        if (untouched) {
+          const nextDraft = freshStored ? clone(freshStored) : clone(snapshot);
+          draftRef.current = nextDraft;
+          setDraft(nextDraft);
+          setPhase("applied");
+          phaseRef.current = "applied";
+        } else {
+          setPhase("dirty");
+          phaseRef.current = "dirty";
+          toast("Applied your earlier snapshot — newer edits are still draft.", "");
+        }
+        if (resumed) toast("Applied at r" + receipt.revision + " (recovered receipt).", "ok");
+      } else if (receipt.error === "revision_conflict") {
+        if (!transportLike) pendingRef.current = null;
+        setPhase("dirty");
+        setApplyError({ kind: "conflict", currentRevision: receipt.currentRevision, message: receipt.message });
+      } else if (receipt.error === "validation_failed") {
+        if (!transportLike) pendingRef.current = null;
+        setPhase("dirty");
+        setApplyError({ kind: "validation", errors: receipt.errors || [], message: receipt.message });
+      } else if (transportLike) {
+        // unresolved: KEEP the pending requestId — a retry of the unchanged
+        // draft is the idempotent path the server documents.
+        setPhase("dirty");
+        setApplyError({ kind: "transport", message: receipt.message || "the server never reported a result" });
+        toast("No receipt yet — draft kept. Apply again to reuse the same requestId.", "err");
+      } else {
+        pendingRef.current = null;
+        setPhase("dirty");
+        setApplyError({ kind: "rejected", message: receipt.message || receipt.error || "rejected" });
+      }
+    }
+
+    function discardDraft() {
+      confirm({
+        title: "Discard draft?",
+        message: "Your unsaved changes to this channel will be thrown away.",
+        confirmLabel: "Discard", danger: true,
+      }).then((ok) => {
+        if (!ok) return;
+        drafts.drop(channelId);
+        pendingRef.current = null;
+        if (isTemp) { onCreated(null, channelId); return; }
+        const fresh = storedRef.current;
+        draftRef.current = clone(fresh);
+        setDraft(clone(fresh));
+        setApplyError(null);
+        setPhase("clean");
+        phaseRef.current = "clean";
+      });
+    }
+
+    // ---- per-channel menu actions ----
+    const patchChannel = async (patch, label) => {
+      const receipt = await submitOps(
+        [{ op: "channels.patch", channelIds: [channelId], patch }],
+        { busyChannel: true },
+      );
+      if (receipt.status === "committed") {
+        toast(label + " — applied at r" + receipt.revision + ".", "ok");
+        // adopt the server's record: wholesale when clean, kept-draft otherwise
+        try {
+          const def = await runOp("GetChannelDefinition", { channelId });
+          if (!aliveRef.current) return;
+          setStored(def.channel);
+          setSummary(def.summary || []);
+          if (!drafts.get(channelId)) {
+            const fresh = clone(def.channel);
+            draftRef.current = fresh;
+            setDraft(fresh);
+          } else {
+            toast("Your draft for this channel was kept — it now differs from the server.", "");
+          }
+        } catch (e) { /* keep local state */ }
+      }
+    };
+
+    const duplicate = () => {
+      setMenuOpen(false);
+      const base = storedRef.current || draftRef.current;
+      if (!base) return;
+      const band = base.kind || "net";
+      const number = nextFreeNumber(lib.channels || [], band);
+      if (number == null) { toast("No free number left in " + BANDS[band][0] + "–" + BANDS[band][1] + ".", "err"); return; }
+      const copy = clone(base);
+      delete copy.id;
+      delete copy.seed;
+      delete copy.provenance;
+      copy.name = (String(base.name || "Channel").trim() + " (copy)").slice(0, MAX_NAME_LEN);
+      copy.number = number;
+      copy.archived = false;
+      copy.paused = false;
+      copy.enabled = true;
+      const tempId = newTempId();
+      drafts.put(tempId, copy);
+      onCreated(tempId);
+      toast("Copy staged as a draft — Apply in the editor to commit it.", "");
+    };
+
+    // Swap numbers with another channel: one immediate Apply (a swap rides
+    // alone — the draft stays out of it and must be clean beforehand).
+    const doSwap = async (other) => {
+      setSwapOpen(false);
+      const d = draftRef.current;
+      if (!d || !d.number || d.number === other.number) return;
+      if (inFlightRef.current) { toast("An apply is in flight — wait for its receipt.", "err"); return; }
+      if (isDirty()) { toast("Apply or discard your draft first — a number swap is its own Apply.", "err"); return; }
+      const ok = await confirm({
+        title: "Swap numbers " + d.number + " ↔ " + other.number + "?",
+        message: "“" + (d.name || "This channel") + "” and “" + other.name + "” exchange numbers. One Apply, atomic — no duplicate-number window.",
+        confirmLabel: "Swap numbers",
+      });
+      if (!ok) return;
+      const receipt = await submitOps(
+        [{ op: "channel.swap", a: channelId, b: other.id }],
+        { label: "Numbers swapped" },
+      );
+      if (receipt.status === "committed") {
+        try {
+          const def = await runOp("GetChannelDefinition", { channelId });
+          if (!aliveRef.current) return;
+          setStored(def.channel);
+          setSummary(def.summary || []);
+          const fresh = clone(def.channel);
+          draftRef.current = fresh;
+          setDraft(fresh);
+        } catch (e) { /* keep local state */ }
+      }
+    };
+
+    if (loadError) {
+      return h("div", { className: "jw-editor" },
+        h("div", { className: "jw-editor-empty" },
+          h("div", { className: "jw-empty-title" }, "This channel can't be edited right now."),
+          h("div", { className: "jw-empty-sub" }, loadError),
+          h("button", { className: "jw-btn", onClick: discardDraft, style: { marginTop: "10px" } }, "Discard draft"),
+        ),
+      );
+    }
+
+    if (!draft) {
+      return h("div", { className: "jw-editor" }, h("div", { className: "jw-loading" }, "Loading definition…"));
+    }
+
+    const groups = (lib.groups || []).slice().sort((a, b) => a.position - b.position);
+    const groupById = new Map(groups.map((g) => [g.id, g]));
+    const band = BANDS[draft.kind || "net"];
+    const numberErr = fieldError("number");
+    const occupant = Number.isInteger(draft.number)
+      ? (lib.channels || []).find((c) => c.number === draft.number && c.id !== channelId) : null;
+    const invalid = validateDraft();
+    const rErrors = rulesErrors();
+
+    // ---------- sub-components (inline for draft access) ----------
+
+    const identityCard = h("div", { className: "jw-card" },
+      h("h3", { className: "jw-card-title" }, "Identity"),
+      h("div", { className: "jw-fieldrow" },
+        h("div", { className: "jw-field" + (fieldError("name") ? " jw-field-invalid" : "") },
+          h("label", { className: "jw-field-label", htmlFor: "f-name" }, "Name"),
+          h("input", {
+            id: "f-name", className: "jw-input", value: draft.name || "", maxLength: MAX_NAME_LEN + 10,
+            "aria-invalid": fieldError("name") ? "true" : "false",
+            "aria-describedby": fieldError("name") ? "err-name" : null,
+            onChange: (e) => edit((d) => { d.name = e.target.value; return d; }),
+          }),
+          fieldError("name") ? h("div", { className: "jw-error-text", id: "err-name" }, fieldError("name")) : null,
+        ),
+        h("div", { className: "jw-field jw-field-number" + (numberErr ? " jw-field-invalid" : "") },
+          h("label", { className: "jw-field-label", htmlFor: "f-number" }, "Number (" + band[0] + "–" + band[1] + ")"),
+          h("input", {
+            id: "f-number", className: "jw-input jw-num-wide", type: "number",
+            min: band[0], max: band[1],
+            value: draft.number != null ? draft.number : "",
+            "aria-invalid": numberErr ? "true" : "false",
+            "aria-describedby": numberErr ? "err-number" : null,
+            onChange: (e) => edit((d) => { d.number = e.target.value === "" ? null : parseInt(e.target.value, 10); return d; }),
+          }),
+          numberErr ? h("div", { className: "jw-error-text", id: "err-number" }, numberErr) : null,
+          occupant && !numberErr
+            ? h("div", { className: "jw-hint" },
+                draft.number + " is “" + occupant.name + "”. ",
+                h("button", { className: "jw-link", onClick: () => void doSwap(occupant) }, "Swap numbers"))
+            : null,
+          h("div", { className: "jw-hint" },
+            h("button", { className: "jw-link", onClick: () => setSwapOpen(true) }, "Swap with a nearby channel…")),
+        ),
+      ),
+      h("div", { className: "jw-field" },
+        h("span", { className: "jw-field-label" }, "Brand color"),
+        h("div", { className: "jw-swatch-row", role: "group", "aria-label": "Brand color" },
+          PALETTE.map((c) => h("button", {
+            key: c, className: "jw-swatch" + (draft.color === c ? " jw-swatch-active" : ""),
+            style: { background: c }, title: c,
+            "aria-pressed": draft.color === c ? "true" : "false",
+            "aria-label": "Color " + c,
+            onClick: () => edit((d) => { d.color = c; return d; }),
+          })),
+          h("label", { className: "jw-swatch jw-swatch-custom", title: "Custom color" },
+            h("input", {
+              type: "color", value: /^#[0-9a-fA-F]{6}$/.test(draft.color || "") ? draft.color : "#455A64",
+              "aria-label": "Custom color",
+              style: { opacity: 0, position: "absolute", width: 1, height: 1 },
+              onChange: (e) => edit((d) => { d.color = e.target.value.toUpperCase(); return d; }),
+            }),
+            "…",
+          ),
+        ),
+      ),
+      h("div", { className: "jw-field" },
+        h("span", { className: "jw-field-label" }, "Glyph (optional — the TV renders the number without one)"),
+        h("div", { style: { position: "relative", display: "inline-block" }, ref: glyphRef },
+          h("button", {
+            className: "jw-btn", onClick: () => setGlyphOpen((v) => !v),
+            "aria-expanded": glyphOpen ? "true" : "false",
+          },
+            h(GlyphTile, { codepoint: draft.glyph, color: draft.color, size: 22, fallback: draft.number }),
+            h("span", { style: { marginLeft: "8px" } }, draft.glyph ? glyphName(draft.glyph) : "No glyph"),
+          ),
+          glyphOpen ? h("div", { className: "jw-glyph-pop" },
+            h("div", { className: "jw-glyph-grid" },
+              GLYPH_POOL.map((g) => h("button", {
+                key: g, className: "jw-glyph-cell" + (draft.glyph === g ? " jw-glyph-active" : ""),
+                title: glyphName(g), "aria-label": glyphName(g),
+                "aria-pressed": draft.glyph === g ? "true" : "false",
+                onClick: () => { edit((d) => { d.glyph = g; return d; }); setGlyphOpen(false); },
+              }, h(Glyph, { codepoint: g, size: 16 })))),
+            h("button", {
+              className: "jw-btn jw-btn-small", style: { marginTop: "6px" },
+              onClick: () => { edit((d) => { d.glyph = null; return d; }); setGlyphOpen(false); },
+            }, "Clear glyph"),
+          ) : null,
+        ),
+      ),
+      draft.archived ? h("p", { className: "jw-note-warn" }, "Archived — not playable until restored.") : null,
+      draft.paused ? h("p", { className: "jw-note-warn" }, "Paused — definition kept, removed from the guide.") : null,
+    );
+
+    const groupCard = h("div", { className: "jw-card" },
+      h("h3", { className: "jw-card-title" }, "Group"),
+      h("div", { className: "jw-field" + (fieldError("group") ? " jw-field-invalid" : "") },
+        h("label", { className: "jw-field-label", htmlFor: "f-group" }, "Belongs to exactly one group"),
+        h("select", {
+          id: "f-group", className: "jw-input", value: draft.groupId || "",
+          onChange: (e) => edit((d) => { d.groupId = e.target.value; return d; }),
+        }, groups.map((g) => h("option", { key: g.id, value: g.id }, g.name))),
+        fieldError("group") ? h("div", { className: "jw-error-text" }, fieldError("group")) : null,
+        h("p", { className: "jw-hint" }, "Groups organize this library and the guide. Membership never changes what airs."),
+      ),
+    );
+
+    // ---------- rules (What airs) ----------
+
+    const facetRow = (facet) => {
+      const cfg = {
+        tags: { kind: "tag", allKey: "tags", anyKey: "tagsAny", exclKey: "excludeTags", note: "Sub-tags always count (hierarchy included). ALL = a scene must carry every tag; ANY = at least one." },
+        performers: { kind: "performer", allKey: "performers", anyKey: "performersAny", exclKey: "excludePerformers", sceneKey: "performerSceneCount", noun: "performers" },
+        studios: { kind: "studio", allKey: "studios", anyKey: "studiosAny", exclKey: "excludeStudios", sceneKey: "studioSceneCount", noun: "studios", note: "Sub-studios count (hierarchy included)." },
+      }[facet];
+      const src = draft.source;
+      const all = idsOf(src[cfg.allKey]);
+      const any = idsOf(src[cfg.anyKey]);
+      const excl = idsOf(src[cfg.exclKey]);
+      const scene = src[cfg.sceneKey] || null;
+      const union = [...all, ...any];
+
+      const setFacet = (mutate) => edit((d) => {
+        const s = d.source;
+        mutate(s);
+        return d;
+      });
+
+      const toggleLogic = (mode) => setFacet((s) => {
+        // Move the ids of BOTH lists into the chosen storage field (sparse
+        // sources may omit the unused list entirely).
+        const merged = sortedIds([...idsOf(s[cfg.allKey]), ...idsOf(s[cfg.anyKey])]);
+        s[cfg.allKey] = mode === "all" ? merged : [];
+        s[cfg.anyKey] = mode === "any" ? merged : [];
+        return s;
+      });
+
+      const pressedAll = all.length > 0 && any.length === 0;
+      const pressedAny = any.length > 0 && all.length === 0;
+
+      const pickInto = (key) => setPicker({
+        kind: cfg.kind,
+        title: (key === cfg.exclKey ? "Choose excluded " : "Choose ") + cfg.noun,
+        selected: key === cfg.exclKey ? excl : union,
+        onDone: (ids) => {
+          const target = key === cfg.exclKey
+            ? cfg.exclKey
+            : (src[cfg.allKey] && src[cfg.allKey].length ? cfg.allKey : cfg.anyKey);
+          setFacet((s) => { s[target] = ids; return s; });
+        },
+      });
+
+      const setScene = (half, raw) => setFacet((s) => {
+        const spec = Object.assign({}, s[cfg.sceneKey] || {});
+        const v = parseInt(raw, 10);
+        if (Number.isNaN(v)) delete spec[half];
+        else spec[half] = v;
+        if (spec.min == null && spec.max == null) delete s[cfg.sceneKey];
+        else s[cfg.sceneKey] = spec;
+        return s;
+      });
+
+      const sceneErr = rErrors.find((e) => String(e.path || e.field || "").includes(cfg.sceneKey));
+      const facetErr = rErrors.find((e) => {
+        const p = String(e.path || e.field || "");
+        return !sceneErr && (p.includes("." + cfg.allKey) || p.includes("." + cfg.anyKey)
+          || p.endsWith(".source." + cfg.allKey));
+      });
+
+      return h("div", { key: facet, className: "jw-rule-row" + (facetErr ? " jw-rule-row-invalid" : "") },
+        h("div", { className: "jw-rule-head" },
+          h("span", { className: "jw-rule-name" }, facet.charAt(0).toUpperCase() + facet.slice(1)),
+          h("span", { className: "jw-logic", role: "group", "aria-label": facet + " match logic" },
+            h("button", {
+              "aria-pressed": pressedAll ? "true" : "false",
+              className: pressedAll ? "jw-logic-on" : "",
+              title: "A scene must match every one of these",
+              onClick: () => toggleLogic("all"),
+            }, "ALL"),
+            h("button", {
+              "aria-pressed": pressedAny ? "true" : "false",
+              className: pressedAny ? "jw-logic-on" : "",
+              title: "A scene matches at least one of these",
+              onClick: () => toggleLogic("any"),
+            }, "ANY"),
+          ),
+          h("button", { className: "jw-btn jw-btn-small", onClick: () => pickInto("main") },
+            "Choose (" + (union.length ? union.length.toLocaleString() : "none") + ")"),
+          h("label", { className: "jw-exclude-label" },
+            "exclude",
+            h("button", { className: "jw-btn jw-btn-small", onClick: () => pickInto(cfg.exclKey) },
+              excl.length ? excl.length.toLocaleString() : "none"),
+          ),
+        ),
+        h("div", { className: "jw-entity-summary" },
+          union.length
+            ? union.slice(0, DRAFT_COUNT_CAP).map((id) => h("span", { key: id, className: "jw-entity-chip" },
+                h("span", null, entityName(cfg.kind, id) + (any.includes(id) ? " (any)" : "")),
+                h("button", {
+                  "aria-label": "Remove " + entityName(cfg.kind, id),
+                  onClick: () => setFacet((s) => {
+                    s[cfg.allKey] = (s[cfg.allKey] || []).filter((x) => x !== id);
+                    s[cfg.anyKey] = (s[cfg.anyKey] || []).filter((x) => x !== id);
+                    return s;
+                  }),
+                }, "✕"),
+              ))
+            : h("span", { className: "jw-hint" }, "none"),
+          union.length > DRAFT_COUNT_CAP
+            ? h("span", { className: "jw-entity-chip" }, "+ " + (union.length - DRAFT_COUNT_CAP) + " more")
+            : null,
+        ),
+        excl.length
+          ? h("div", { className: "jw-entity-summary" },
+              excl.slice(0, DRAFT_COUNT_CAP).map((id) => h("span", { key: id, className: "jw-entity-chip jw-entity-chip-excl" },
+                h("span", null, "without " + entityName(cfg.kind, id)),
+                h("button", {
+                  "aria-label": "Keep " + entityName(cfg.kind, id),
+                  onClick: () => setFacet((s) => { s[cfg.exclKey] = (s[cfg.exclKey] || []).filter((x) => x !== id); return s; }),
+                }, "✕"),
+              )))
+          : null,
+        cfg.sceneKey ? h("div", { className: "jw-dynamic-row" },
+          h("span", { className: "jw-dynamic-label" }, "…or match by activity:"),
+          h("label", { className: "jw-dynamic-num" },
+            h("input", {
+              type: "number", min: 0, style: { width: "72px" },
+              "aria-label": cfg.noun + " with N or more scenes",
+              value: scene && scene.min != null ? scene.min : "",
+              onChange: (e) => setScene("min", e.target.value),
+            }),
+            "or more scenes",
+          ),
+          h("label", { className: "jw-dynamic-num" },
+            h("input", {
+              type: "number", min: 1, style: { width: "72px" },
+              "aria-label": cfg.noun + " with fewer than N scenes",
+              value: scene && scene.max != null ? scene.max : "",
+              onChange: (e) => setScene("max", e.target.value),
+            }),
+            "or fewer scenes",
+          ),
+          h("span", { className: "jw-hint jw-dynamic-hint" },
+            "dynamic — membership updates itself as the library grows"),
+        ) : null,
+        cfg.note ? h("p", { className: "jw-hint" }, cfg.note) : null,
+        facetErr || sceneErr
+          ? h("div", { className: "jw-error-text", role: "alert" }, (facetErr || sceneErr).message)
+          : null,
+      );
+    };
+
+    const sceneDetailsRow = (() => {
+      const src = draft.source;
+      const setMeta = (mutate) => edit((d) => { mutate(d.source); return d; });
+      const dateFrom = src.date && src.date.from ? src.date.from : "";
+      const dateTo = src.date && src.date.to ? src.date.to : "";
+      const durMin = src.duration && src.duration.min != null ? Math.round(src.duration.min / 60) : "";
+      const durMax = src.duration && src.duration.max != null ? Math.round(src.duration.max / 60) : "";
+      const within = src.createdAt && src.createdAt.withinDays ? src.createdAt.withinDays : "";
+      const qErr = rErrors.find((e) => String(e.path || e.field || "").includes("duration"));
+      const dateErr = rErrors.find((e) => String(e.path || e.field || "").includes("date"));
+      const qValue = qLocal != null ? qLocal : committedQ;
+      return h("div", { className: "jw-rule-row" + (qErr || dateErr ? " jw-rule-row-invalid" : "") },
+        h("div", { className: "jw-rule-head" },
+          h("span", { className: "jw-rule-name" }, "Scene details"),
+        ),
+        h("div", { className: "jw-rule-dates" },
+          h("label", { className: "jw-dynamic-num" }, "dated",
+            h("input", {
+              type: "date", "aria-label": "Scene date from", value: dateFrom,
+              onChange: (e) => setMeta((s) => {
+                s.date = { from: e.target.value, to: s.date && s.date.to ? s.date.to : "" };
+                if (!s.date.from && !s.date.to) delete s.date;
+                return s;
+              }),
+            })),
+          h("span", { className: "jw-hint" }, "→"),
+          h("input", {
+            type: "date", "aria-label": "Scene date to", value: dateTo,
+            onChange: (e) => setMeta((s) => {
+              s.date = { from: s.date && s.date.from ? s.date.from : "", to: e.target.value };
+              if (!s.date.from && !s.date.to) delete s.date;
+              return s;
+            }),
+          }),
+          h("label", { className: "jw-dynamic-num" }, "duration ≥",
+            h("input", {
+              type: "number", min: 0, style: { width: "76px" }, "aria-label": "Minimum duration in minutes",
+              value: durMin, placeholder: "min",
+              onChange: (e) => setMeta((s) => {
+                const v = parseInt(e.target.value, 10);
+                const spec = Object.assign({}, s.duration || {});
+                if (Number.isNaN(v)) delete spec.min; else spec.min = v * 60;
+                if (spec.min == null && spec.max == null) delete s.duration;
+                else s.duration = spec;
+                return s;
+              }),
+            })),
+          h("label", { className: "jw-dynamic-num" }, "≤",
+            h("input", {
+              type: "number", min: 0, style: { width: "76px" }, "aria-label": "Maximum duration in minutes",
+              value: durMax, placeholder: "max",
+              onChange: (e) => setMeta((s) => {
+                const v = parseInt(e.target.value, 10);
+                const spec = Object.assign({}, s.duration || {});
+                if (Number.isNaN(v)) delete spec.max; else spec.max = v * 60;
+                if (spec.min == null && spec.max == null) delete s.duration;
+                else s.duration = spec;
+                return s;
+              }),
+            })),
+          h("span", { className: "jw-hint" }, "min"),
+        ),
+        h("div", { className: "jw-rule-dates", style: { marginTop: "8px" } },
+          h("label", { className: "jw-dynamic-num" }, "added within",
+            h("input", {
+              type: "number", min: 1, style: { width: "76px" }, "aria-label": "Added within days",
+              value: within, placeholder: "days",
+              onChange: (e) => setMeta((s) => {
+                const v = parseInt(e.target.value, 10);
+                if (Number.isNaN(v) || v < 1) delete s.createdAt;
+                else s.createdAt = { withinDays: v };
+                return s;
+              }),
+            })),
+          h("span", { className: "jw-hint" }, "days"),
+          h("input", {
+            type: "text", className: "jw-input", style: { flex: 1 }, "aria-label": "Text search",
+            placeholder: "text search…", value: qValue,
+            onChange: (e) => {
+              setQLocal(e.target.value);
+              commitQRef.current(e.target.value);
+            },
+          }),
+        ),
+        qErr || dateErr ? h("div", { className: "jw-error-text", role: "alert" }, (qErr || dateErr).message) : null,
+      );
+    })();
+
+    const legacySummary = (() => {
+      const src = draft.source || {};
+      const kinds = ["savedFilter", "tag", "performer", "studio"];
+      if (!kinds.includes(src.type)) return null;
+      const notes = {
+        savedFilter: "This channel airs from a linked saved search — used verbatim, including its text query. Editing that search in Stash changes membership.",
+        tag: "This channel airs a fixed set of tags. Convert to rules to add exclusions, metadata and dynamic rows.",
+        performer: "This channel airs one performer. Convert to rules to combine them with other criteria.",
+        studio: "This channel airs one studio (sub-studios included). Convert to rules to combine it with other criteria.",
+      };
+      return h("div", { className: "jw-card" },
+        h("h3", { className: "jw-card-title" }, "What airs"),
+        h("p", { className: "jw-hint" }, notes[src.type] || ""),
+        h("div", { className: "jw-summary-box", "aria-label": "Plain-language rule summary" },
+          summarizeLines(src).map((line, i) => h("div", { key: i, className: "jw-rule-sentence" }, line))),
+        h("div", { style: { marginTop: "10px" } },
+          h("button", {
+            className: "jw-btn",
+            onClick: () => {
+              edit((d) => {
+                d.source = convertLegacySource(d.source);
+                return d;
+              });
+              toast(src.type === "savedFilter"
+                ? "Converted to editable rules. The saved search's own criteria are not copied — rebuild them below and watch the preview."
+                : "Converted to editable rules. Apply to unlink the legacy source.", "");
+            },
+          }, "Convert to editable rules…"),
+        ),
+      );
+    })();
+
+    const rulesCard = isRuleSource(draft.source)
+      ? h("div", { className: "jw-card" },
+          h("h3", { className: "jw-card-title" }, "What airs (rules)"),
+          h("p", { className: "jw-hint" }, "Rows combine with AND. ALL / ANY applies within a row; ids and the dynamic activity rule combine too."),
+          ["tags", "performers", "studios"].map(facetRow),
+          sceneDetailsRow,
+          h("div", { className: "jw-summary-box", "aria-label": "Plain-language rule summary", style: { marginTop: "10px" } },
+            summarizeLines(draft.source).map((line, i) => h("div", {
+              key: i, className: "jw-rule-sentence" + (i === 0 ? " jw-rule-sentence-head" : ""),
+            }, line))),
+          rErrors.filter((e) => {
+            const p = String(e.path || e.field || "");
+            return p === "source" || p.endsWith(".source") || p.includes("empty_rules");
+          }).length
+            ? h("div", { className: "jw-error-text", role: "alert" },
+                rErrors.find((e) => {
+                  const p = String(e.path || e.field || "");
+                  return p === "source" || p.endsWith(".source") || p.includes("empty_rules");
+                }).message)
+            : null,
+        )
+      : legacySummary;
+
+    // ---------- programming ----------
+
+    const prog = draft.programming && typeof draft.programming === "object" ? draft.programming : null;
+    const progMode = prog ? prog.mode || "fixed" : "fixed";
+    const setProgramming = (values) => edit((d) => {
+      d.programming = fullProgramming(Object.assign({}, canonicalProgramming(d.programming), values));
+      return d;
     });
-    return out;
+    const programmingCard = h("div", { className: "jw-card" },
+      h("h3", { className: "jw-card-title" }, "Programming"),
+      h("div", { className: "jw-fieldrow" },
+        h("div", { className: "jw-field" },
+          h("label", { className: "jw-field-label", htmlFor: "f-mode" }, "Mode"),
+          h("select", {
+            id: "f-mode", className: "jw-input", value: progMode,
+            onChange: (e) => setProgramming({ mode: e.target.value }),
+          },
+            h("option", { value: "fixed" }, "Fixed loop — the rotation repeats"),
+            h("option", { value: "explore" }, "Explore — shuffled, no recent repeats"),
+            h("option", { value: "discovery" }, "Discovery — pushes unheard content"),
+            h("option", { value: "continuing", disabled: progMode !== "continuing" },
+              progMode === "continuing" ? "Continuing — full library like a broadcast" : "Continuing — operator rollout gate"),
+          ),
+          progMode !== "continuing"
+            ? h("p", { className: "jw-hint" }, "Continuing is activation-gated by the operator rollout; the GUI cannot switch it on.")
+            : null,
+        ),
+        h("div", { className: "jw-field" },
+          h("label", { className: "jw-field-label", htmlFor: "f-spacing" }, "Spacing"),
+          h("select", {
+            id: "f-spacing", className: "jw-input", value: canonicalProgramming(prog).spacing,
+            onChange: (e) => setProgramming({ spacing: Number(e.target.value) }),
+          }, Array.from({ length: 11 }, (_, n) => h("option", { key: n, value: n },
+            n ? n + (n === 1 ? " program apart" : " programs apart") : "Follow play order"))),
+        ),
+      ),
+      progMode !== "fixed" ? h("div", { className: "jw-fieldrow" },
+        h("div", { className: "jw-field" },
+          h("label", { className: "jw-field-label", htmlFor: "f-repeat" }, "No repeats within"),
+          h("select", {
+            id: "f-repeat", className: "jw-input", value: canonicalProgramming(prog).repeatHours,
+            onChange: (e) => setProgramming({ repeatHours: Number(e.target.value) }),
+          }, [0, 12, 24, 48, 72, 168].map((n) => h("option", { key: n, value: n },
+            n ? n + " hours" : "One complete pass"))),
+        ),
+        h("div", { className: "jw-field" },
+          h("label", { className: "jw-field-label", htmlFor: "f-spotlight" }, "Weekly spotlight"),
+          h("select", {
+            id: "f-spotlight", className: "jw-input", value: canonicalProgramming(prog).spotlight,
+            onChange: (e) => setProgramming({ spotlight: e.target.value }),
+          },
+            h("option", { value: "none" }, "No spotlight"),
+            h("option", { value: "studio" }, "Studio spotlight"),
+            h("option", { value: "performer" }, "Performer double feature")),
+        ),
+      ) : null,
+      h("p", { className: "jw-hint" },
+        "Renaming, regrouping, or re-branding never resets what's playing. Changing rules re-prepares the schedule without touching aired history."),
+    );
+
+    // ---------- preview ----------
+
+    const previewCard = h("div", { className: "jw-card" },
+      h("h3", { className: "jw-card-title" }, "Preview"),
+      previewState === "loading" ? h("p", { className: "jw-hint" }, "Checking the current draft…") : null,
+      previewState === "error"
+        ? h("p", { className: "jw-error-text", role: "alert" }, "Preview failed: " + (preview && preview.message ? preview.message : "unknown error"))
+        : null,
+      previewState === "ok" && preview && preview.status === "missing_source"
+        ? h("p", { className: "jw-error-text", role: "alert" }, preview.message || "This source no longer resolves.")
+        : null,
+      previewState === "ok" && preview && preview.status === "ok" ? h("div", null,
+        h("div", { className: "jw-count-line" },
+          h("div", { className: "jw-count-block" },
+            h("div", { className: "jw-count-n" }, fmtCount(preview.poolCount)),
+            h("div", { className: "jw-count-l" }, "source pool (matches rules)")),
+          h("div", { className: "jw-count-block" },
+            h("div", { className: "jw-count-n" }, fmtCount(preview.rotationSize)),
+            h("div", { className: "jw-count-l" }, "on-air rotation (max " + ROTATION_SIZE + ")")),
+        ),
+        preview.poolCount === 0
+          ? h("p", { className: "jw-error-text", role: "alert" },
+              "Empty pool — nothing matches these rules yet. The channel would be off air.")
+          : h("div", { className: "jw-preview-strip" },
+              (preview.sample || []).map((sItem) => h("div", { key: sItem.id, className: "jw-sample-card" },
+                h("div", {
+                  className: "jw-sample-art", "aria-hidden": "true",
+                  style: sItem.preview ? { backgroundImage: "url('" + sItem.preview + "')" } : null,
+                }, sItem.preview ? "" : "▶"),
+                h("div", { className: "jw-sample-cap" },
+                  h("div", { className: "jw-sample-title" }, sItem.title || "Untitled"),
+                  [sItem.studio, fmtDuration(sItem.duration), sItem.date].filter(Boolean).join(" · ")),
+              ))),
+        preview.rotationComplete === false
+          ? h("p", { className: "jw-hint" }, "The scan bound (" + ROTATION_SCAN_LIMIT.toLocaleString() + " rows) capped this rotation.")
+          : null,
+      ) : null,
+      previewState === "idle" ? h("p", { className: "jw-hint" }, "No preview yet.") : null,
+    );
+
+    // ---------- action bar ----------
+
+    const dirty = isDirty();
+    const barState = (() => {
+      if (phase === "applying") {
+        return h("span", { className: "jw-apply-state" }, "Applying… (edits you type now stay draft)");
+      }
+      if (phase === "validating") return h("span", { className: "jw-apply-state" }, "Validating…");
+      if (applyError && applyError.kind === "conflict") {
+        return h("span", { className: "jw-apply-state jw-apply-state-err" },
+          "Revision conflict — someone else applied r" + applyError.currentRevision + ". Your draft is intact.");
+      }
+      if (applyError && applyError.kind === "transport") {
+        return h("span", { className: "jw-apply-state jw-apply-state-err" },
+          applyError.message + " — your draft is intact. Apply again to retry with the same requestId.");
+      }
+      if (applyError && applyError.kind === "validation") {
+        return h("span", { className: "jw-apply-state jw-apply-state-err" },
+          (applyError.errors.length) + " server validation error(s) — shown under the fields. Draft intact.");
+      }
+      if (applyError && applyError.kind === "rejected") {
+        return h("span", { className: "jw-apply-state jw-apply-state-err" },
+          "Rejected: " + applyError.message + " — draft intact.");
+      }
+      if (phase === "applied") {
+        return h("span", { className: "jw-apply-state jw-apply-state-ok" }, "Applied at r" + lastAppliedRev + ".");
+      }
+      if (invalid.length) return h("span", { className: "jw-apply-state jw-apply-state-err" }, invalid[0].message);
+      if (dirty) return h("span", { className: "jw-apply-state" }, "Unsaved draft — Apply to commit.");
+      return h("span", { className: "jw-apply-state" }, "All changes applied.");
+    })();
+
+    const conflicting = applyError && applyError.kind === "conflict";
+
+    const actionBar = h("div", { className: "jw-editor-actions" },
+      h("div", { className: "jw-apply-row" },
+        barState,
+        h("span", { style: { flex: 1 } }),
+        refreshNote ? h("span", { className: "jw-pill jw-pill-dirty", title: "The receipt's refresh map" }, refreshNote) : null,
+        phase === "applied" && !dirty && !refreshNote ? h("span", { className: "jw-pill jw-pill-clean" }, "Ready") : null,
+        h("button", { className: "jw-btn", onClick: discardDraft, disabled: !dirty && !isTemp || phase === "applying" }, "Discard"),
+        h("button", {
+          className: "jw-btn jw-btn-primary", id: "apply-btn",
+          disabled: !dirty || invalid.length > 0 || phase === "applying" || phase === "validating",
+          onClick: () => void doApply(),
+        }, phase === "applying" ? "Applying…" : phase === "validating" ? "Validating…" : "Apply"),
+      ),
+      conflicting ? h("div", { className: "jw-apply-row", style: { marginTop: "8px" } },
+        h("button", { className: "jw-btn", onClick: () => setApplyError(null) }, "Keep draft"),
+        h("button", { className: "jw-btn jw-btn-primary", onClick: () => void doApply(applyError.currentRevision) },
+          "Apply onto r" + applyError.currentRevision),
+      ) : null,
+    );
+
+    // ---------- editor header + menu ----------
+
+    const menuItems = [];
+    menuItems.push({ label: "Duplicate…", action: duplicate });
+    if (draft.paused) menuItems.push({ label: "Resume", action: () => patchChannel({ paused: false }, "Resumed") });
+    else menuItems.push({ label: "Pause", action: () => patchChannel({ paused: true }, "Paused") });
+    if (draft.archived) menuItems.push({ label: "Restore from archive", action: () => patchChannel({ archived: false }, "Restored") });
+    else menuItems.push({ label: "Archive", action: () => patchChannel({ archived: true }, "Archived") });
+    if (drafts.get(channelId)) menuItems.push({ label: "Discard draft", action: discardDraft });
+    if (!isTemp) menuItems.push({ label: "History…", action: () => { setMenuOpen(false); setHistoryOpen(true); } });
+
+    const head = h("div", { className: "jw-editor-head" },
+      h(GlyphTile, { codepoint: draft.glyph, color: draft.color, size: 36, fallback: draft.number }),
+      h("div", { className: "jw-editor-head-id" },
+        h("h2", { className: "jw-editor-head-name" }, draft.name || "(unnamed)"),
+        h("div", { className: "jw-editor-head-sub" },
+          [
+            "Channel " + (draft.number != null ? draft.number : "—"),
+            groupById.get(draft.groupId) ? groupById.get(draft.groupId).name : "",
+            SOURCE_LABELS[draft.source && draft.source.type] || "",
+            draft.provenance && draft.provenance.origin === "v4-final-proposal" ? "from v4-final proposal" : (isTemp ? "new — not on the server yet" : "custom"),
+          ].filter(Boolean).join(" · ")),
+      ),
+      h("div", { className: "jw-editor-head-badges" },
+        drafts.get(channelId) ? h(StatusChip, { kind: "warn" }, "draft") : null,
+        draft.archived ? h(StatusChip, { kind: "dim" }, "archived") : null,
+        draft.paused ? h(StatusChip, { kind: "dim" }, "paused") : null,
+      ),
+      h("div", { className: "jw-menu-host", ref: menuRef },
+        h("button", {
+          className: "jw-btn jw-btn-small", "aria-haspopup": "menu",
+          "aria-expanded": menuOpen ? "true" : "false",
+          "aria-label": "Channel actions", onClick: () => setMenuOpen((v) => !v),
+        }, "⋯"),
+        menuOpen ? h("div", { className: "jw-menu", role: "menu" },
+          menuItems.map((item) => h("button", {
+            key: item.label, role: "menuitem", className: "jw-menu-item",
+            onClick: () => { setMenuOpen(false); item.action(); },
+          }, item.label)),
+        ) : null,
+      ),
+    );
+
+    return h("div", { className: "jw-editor" },
+      head,
+      h("div", { className: "jw-editor-scroll" },
+        identityCard,
+        groupCard,
+        rulesCard,
+        programmingCard,
+        previewCard,
+      ),
+      actionBar,
+      picker ? h(EntityPickerDialog, {
+        kind: picker.kind, title: picker.title, selectedIds: picker.selected,
+        onClose: () => setPicker(null),
+        onDone: (ids) => { picker.onDone(ids); },
+      }) : null,
+      swapOpen ? h(SwapDialog, {
+        draft, lib, onClose: () => setSwapOpen(false),
+        onPick: (c) => { void doSwap(c); },
+      }) : null,
+      historyOpen ? h(HistoryDialog, {
+        channelId, channelName: draft.name || channelId,
+        fetchPage: ({ offset: pageOffset, limit: pageLimit }) => runOp("GetChannelHistory", {
+          offset: pageOffset, limit: pageLimit, includeDefinitions: true,
+        }),
+        onClose: () => setHistoryOpen(false),
+        onRestore: (version) => {
+          edit((d) => Object.assign(d, version));
+          toast("Revision staged as your draft — Apply to commit it as a new change.", "");
+        },
+      }) : null,
+    );
   }
+
+  // ------------------------------------------------------------------
+  // Dial list (left rail): grouped, collapsible, windowed
+  // ------------------------------------------------------------------
+
+  function buildDialItems({ channels, groups, query, groupFilter, collapsed }) {
+    const items = [];
+    const q = query.trim().toLowerCase();
+    const searching = !!q || !!groupFilter;
+    for (const g of groups) {
+      if (groupFilter && g.id !== groupFilter) continue;
+      const members = channels.filter((c) => c.groupId === g.id);
+      if (!members.length && q) continue;
+      items.push({ type: "header", g, count: members.length });
+      if (!(collapsed.has(g.id) && !searching)) {
+        for (const c of members) items.push({ type: "ch", c });
+      }
+    }
+    return items;
+  }
+
+  function DialRow({ ch, selected, bulkMode, checked, hasDraft, groupsById, onSelect, onCheck }) {
+    return h("div", {
+      className: "jw-dial-row" + (selected ? " jw-dial-row-selected" : "") + (ch.paused || ch.archived ? " jw-dial-row-muted" : ""),
+      style: selected ? { boxShadow: "inset 3px 0 0 " + (ch.color || "#455A64") } : null,
+      role: "option", "aria-selected": selected ? "true" : "false", tabIndex: 0,
+      onClick: () => onSelect(ch.id),
+      onKeyDown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(ch.id); } },
+    },
+      bulkMode ? h("input", {
+        type: "checkbox", "aria-label": "Select " + ch.name, checked,
+        onClick: (e) => e.stopPropagation(),
+        onChange: (e) => onCheck(ch.id, e.target.checked),
+      }) : null,
+      h("div", { className: "jw-dial-number" }, ch.number != null ? String(ch.number) : "—"),
+      h(GlyphTile, { codepoint: ch.glyph, color: ch.color, size: 30, fallback: ch.number }),
+      h("div", { className: "jw-dial-meta" },
+        h("div", { className: "jw-dial-name" }, ch.number != null ? ch.number + " · " + ch.name : ch.name),
+        h("div", { className: "jw-dial-sub" }, describeRow(ch, groupsById)),
+      ),
+      h("div", { className: "jw-dial-badges" },
+        hasDraft ? h(StatusChip, { kind: "warn" }, "draft") : null,
+        ch.archived ? h(StatusChip, { kind: "dim" }, "archived") : null,
+        !ch.archived && ch.paused ? h(StatusChip, { kind: "dim" }, "paused") : null,
+        ch.temp ? h(StatusChip, { kind: "accent" }, "new") : null,
+      ),
+    );
+  }
+
+  // ------------------------------------------------------------------
+  // App
+  // ------------------------------------------------------------------
 
   function App() {
-    const [catalog, setCatalog] = useState(null);
-    const [fullDir, setFullDir] = useState(null);
+    const [lib, setLib] = useState(null);
+    const [bootError, setBootError] = useState(null);
     const [selectedId, setSelectedId] = useState(null);
-    const [sheet, setSheet] = useState(null); // null | {mode: 'new'|'source'|'settings'}
-    const [saveState, setSaveState] = useState({ state: "idle" });
-    const [toast, setToast] = useState(null);
+    const [query, setQuery] = useState("");
+    const [queryLive, setQueryLive] = useState("");
+    const [groupFilter, setGroupFilter] = useState("");
+    const [collapsed, setCollapsed] = useState(() => new Set());
+    const [bulkMode, setBulkMode] = useState(false);
+    const [bulkSelected, setBulkSelected] = useState(() => new Set());
+    const [dialog, setDialog] = useState(null); // "groups" | "new"
+    const [confirmSpec, setConfirmSpec] = useState(null);
+    const [toasts, setToasts] = useState([]);
+    const [draftCount, setDraftCount] = useState(0);
+    const [editorKeyBump, setEditorKeyBump] = useState(0);
+    const [reloadTick, setReloadTick] = useState(0);
 
-    // One save coordinator for creation, editing, relinking, renumbering,
-    // deletion, and settings. `draftRef` is the newest working copy (possibly
-    // ahead of the server); `ackRef` is the revision the server last
-    // acknowledged. Saves always submit against ackRef, so edits made while a
-    // save is in flight serialize cleanly instead of conflicting with it.
-    const catalogRef = useRef(null); // mirrors the draft for event handlers
-    const draftRef = useRef(null);
-    const ackRef = useRef(0);
-    const saveTimer = useRef(null);
-    const savingRef = useRef(false);
-    const selectedRef = useRef(null);
-    const settingsDirtyRef = useRef(false);
+    const draftsRef = useRef(null);
+    const libRef = useRef(null);
+    const searchInputRef = useRef(null);
+    const editorPhaseRef = useRef({ phase: "clean", dirty: false });
+    const toastSeq = useRef(0);
 
-    useEffect(() => { resolveGlyphs(); }, []);
+    libRef.current = lib;
 
-    const showToast = useCallback((msg) => {
-      setToast(msg);
-      setTimeout(() => setToast(null), 5000);
+    const toast = useCallback((message, kind) => {
+      const id = ++toastSeq.current;
+      setToasts((cur) => [...cur, { id, message, kind }]);
+      setTimeout(() => setToasts((cur) => cur.filter((t) => t.id !== id)), kind === "err" ? 7000 : 4200);
     }, []);
 
-    const adopt = useCallback((next) => {
-      draftRef.current = next;
-      catalogRef.current = next;
-      setCatalog(next);
+    const confirm = useCallback((spec) => new Promise((resolve) => {
+      setConfirmSpec(Object.assign({}, spec, { resolve: (ok) => { setConfirmSpec(null); resolve(ok); } }));
+    }), []);
+
+    const fetchLibrary = useCallback(async () => {
+      let out = await runOp("GetChannelLibrary", { limit: 1000 });
+      const channels = (out.channels || []).slice();
+      while (channels.length < out.total && channels.length < 6000) {
+        const more = await runOp("GetChannelLibrary", { limit: 1000, offset: channels.length });
+        if (!more.channels || !more.channels.length) break;
+        channels.push(...more.channels);
+      }
+      out = Object.assign({}, out, { channels });
+      return out;
     }, []);
 
-    // ---- initial load
+    // ---- boot ----
     useEffect(() => {
+      resolveGlyphs();
       let alive = true;
       (async () => {
         try {
-          const c = await loadCatalog();
+          const data = await fetchLibrary();
           if (!alive) return;
-          adopt(c);
-          ackRef.current = c.revision || 0;
-          if (c.channels && c.channels.length) setSelectedId(c.channels[0].id);
+          draftsRef.current = makeDraftStore(data.libraryId || "default");
+          draftsRef.current.subscribe(() => setDraftCount(draftsRef.current.count()));
+          setDraftCount(draftsRef.current.count());
+          setLib(data);
+          const first = (data.channels || [])[0];
+          if (first) setSelectedId(first.id);
         } catch (e) {
-          if (!alive) return;
-          showToast("Could not reach the Just Watch plugin: " + ((e && e.message) || e));
-          adopt({ revision: 0, settings: {}, channels: [] });
+          if (alive) setBootError(String((e && e.message) || e));
         }
-        // The full lineup (auto channels) is an enhancement; its absence
-        // must never block editing.
-        try {
-          const fd = await loadFullDirectory();
-          if (alive) setFullDir(fd);
-        } catch (e) { /* rail shows custom channels only */ }
       })();
       return () => { alive = false; };
-    }, [showToast, adopt]);
+    }, [fetchLibrary]);
 
-    const flushSave = useCallback(async () => {
-      if (savingRef.current) return;
-      const toSave = draftRef.current;
-      if (!toSave) return;
-      savingRef.current = true;
-      setSaveState((s) => (s.state === "conflict" ? s : { state: "saving" }));
-      let dirty = false;
-      try {
-        const { result, fresh } = await commitAndReload(toSave, ackRef.current);
-        const latest = draftRef.current;
-        if (result.saved) {
-          ackRef.current = result.revision;
-          if (latest === toSave) {
-            // Nothing moved during the save: adopt the server's copy wholesale.
-            adopt(fresh || Object.assign({}, toSave, { revision: result.revision }));
-            setSaveState({ state: "saved" });
-          } else {
-            // Edits arrived while saving: keep them, acknowledge under them,
-            // and save the newer draft right after.
-            adopt(rebaseAcknowledged(latest, toSave, fresh, result.revision));
-            setSaveState({ state: "saving" });
-            dirty = true;
-          }
-          if (settingsDirtyRef.current) {
-            settingsDirtyRef.current = false;
-            loadFullDirectory().then((fd) => setFullDir(fd)).catch(() => {});
-          }
-        } else if (result.error === "revision_conflict") {
-          // Real external change (another tab, a task). The local draft is
-          // preserved; the user chooses reload vs deliberate overwrite.
-          setSaveState({ state: "conflict", serverRevision: result.currentRevision });
-        } else {
-          const first = (result.errors && result.errors[0]) || {};
-          showToast(first.message || "The server rejected that change.");
-          setSaveState({ state: "error" });
-        }
-      } catch (e) {
-        setSaveState({ state: "error" });
-      } finally {
-        savingRef.current = false;
-        if (dirty) scheduleSave();
-      }
-      // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [adopt, showToast]);
-
-    const scheduleSave = useCallback((working) => {
-      if (working) adopt(working);
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-      saveTimer.current = setTimeout(() => { flushSave(); }, AUTOSAVE_DEBOUNCE_MS);
-    }, [adopt, flushSave]);
-
-    const retrySave = useCallback(() => {
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-      flushSave();
-    }, [flushSave]);
-
-    const discardDraftAndReload = useCallback(async () => {
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-      try {
-        const fresh = await loadCatalog();
-        ackRef.current = fresh.revision || 0;
-        adopt(fresh);
-        setSaveState({ state: "idle" });
-      } catch (e) {
-        showToast("Could not reload: " + ((e && e.message) || e));
-      }
-    }, [adopt, showToast]);
-
-    const overwriteWithDraft = useCallback(() => {
-      // Deliberate overwrite: acknowledge the server's current revision and
-      // resubmit the preserved draft against it.
-      ackRef.current = saveState.serverRevision || ackRef.current;
-      setSaveState({ state: "saving" });
-      flushSave();
-      // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [flushSave, saveState.serverRevision]);
-
-    const mutate = useCallback((fn) => {
-      const next = fn(JSON.parse(JSON.stringify(draftRef.current || { revision: 0, settings: {}, channels: [] })));
-      scheduleSave(next);
-    }, [scheduleSave]);
-
-    const patchChannel = useCallback((channelId, patch) => {
-      mutate((c) => {
-        const ch = c.channels.find((x) => x.id === channelId);
-        if (ch) Object.assign(ch, patch);
-        return c;
-      });
-    }, [mutate]);
-
-    const assignNumber = useCallback((channelId, number, swapWithId) => {
-      mutate((c) => {
-        const ch = c.channels.find((x) => x.id === channelId);
-        if (!ch) return c;
-        if (swapWithId) {
-          const other = c.channels.find((x) => x.id === swapWithId);
-          if (other) other.number = ch.number;
-        }
-        ch.number = number;
-        c.channels.sort((a, b) => a.number - b.number);
-        return c;
-      });
-    }, [mutate]);
-
-    const createChannel = useCallback(({ source, name }) => {
-      const base = draftRef.current;
-      const number = lowestFreeNumber(base.channels || []);
-      if (number == null) throw new Error("All 99 channel numbers are in use.");
-      const channel = {
-        id: newChannelId(),
-        number,
-        name,
-        glyph: pickDefaultGlyph(name),
-        color: PALETTE[(number - 1) % PALETTE.length],
-        source,
-        sourceLabel: name,
-        sort: "shuffle",
-        seed: Math.floor(Math.random() * 2147483647),
-        enabled: true,
+    // "/" focuses search; beforeunload guards drafts
+    useEffect(() => {
+      const onKey = (e) => {
+        if (e.key !== "/" ) return;
+        const tag = document.activeElement && document.activeElement.tagName;
+        if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+        e.preventDefault();
+        if (searchInputRef.current) { searchInputRef.current.focus(); searchInputRef.current.select(); }
       };
-      mutate((c) => {
-        c.channels.push(channel);
-        c.channels.sort((a, b) => a.number - b.number);
-        return c;
-      });
-      setSelectedId(channel.id);
-    }, [mutate]);
-
-    const relinkChannel = useCallback(({ source, name }) => {
-      const target = selectedRef.current;
-      mutate((c) => {
-        const ch = c.channels.find((x) => x.id === target);
-        if (ch) { ch.source = source; ch.sourceLabel = name; ch.sourceMissing = false; }
-        return c;
-      });
-    }, [mutate]);
-
-    const patchSelectedSource = useCallback((source) => {
-      const target = selectedRef.current;
-      mutate((c) => {
-        const ch = c.channels.find((x) => x.id === target);
-        if (ch) {
-          ch.source = source;
-          const names = tagIdsOf(source).map((id) => TAG_NAMES.get(id));
-          // Optimistic rail label from known names; the server re-joins on save.
-          if (names.length && names.every(Boolean)) ch.sourceLabel = joinLabels(names);
+      document.addEventListener("keydown", onKey);
+      const onUnload = (e) => {
+        if (draftsRef.current && draftsRef.current.count() > 0) {
+          e.preventDefault();
+          e.returnValue = "";
         }
-        return c;
+      };
+      window.addEventListener("beforeunload", onUnload);
+      return () => {
+        document.removeEventListener("keydown", onKey);
+        window.removeEventListener("beforeunload", onUnload);
+      };
+    }, []);
+
+    const refreshLibrary = useCallback(async () => {
+      try {
+        const data = await fetchLibrary();
+        setLib(data);
+        return data;
+      } catch (e) {
+        toast("Could not reload the library: " + String((e && e.message) || e), "err");
+        return null;
+      }
+    }, [fetchLibrary, toast]);
+
+    // ---- shared submit for NON-editor applies (bulk, groups, patches) ----
+    const submitOps = useCallback(async (ops, opts) => {
+      const options = opts || {};
+      const requestId = newRequestId();
+      const expected = libRef.current ? libRef.current.revision : 0;
+      let receipt;
+      try {
+        receipt = await applyChannelChanges(requestId, expected, ops);
+      } catch (e) {
+        toast("Apply failed to reach the server (" + String((e && e.message) || e) + "). Nothing changed.", "err");
+        return { status: "transport", error: "transport" };
+      }
+      if (receipt.status === "committed") {
+        const affected = countAffected(ops);
+        toast((options.label || "Applied") + (affected ? " (" + affected + " channel" + (affected === 1 ? "" : "s") + ")" : "")
+          + " — committed at r" + receipt.revision + ".", "ok");
+        await refreshLibrary();
+      } else if (receipt.error === "revision_conflict") {
+        toast("Revision conflict — the library moved to r" + receipt.currentRevision + ". Nothing changed; try again.", "err");
+      } else if (receipt.error === "validation_failed" && receipt.errors && receipt.errors.length) {
+        toast("Rejected: " + receipt.errors[0].message, "err");
+      } else {
+        toast("Rejected: " + (receipt.message || receipt.error || "unknown error"), "err");
+      }
+      return receipt;
+    }, [refreshLibrary, toast]);
+
+    function countAffected(ops) {
+      let n = 0;
+      for (const op of ops) {
+        if (op.op === "channels.move" || op.op === "channels.patch") n += (op.channelIds || []).length;
+        else if (op.op === "channel.put" || op.op === "channel.create" || op.op === "channel.swap") n += 1;
+      }
+      return n;
+    }
+
+    // ---- editor callbacks ----
+    const handleApplied = useCallback(async (receipt, info) => {
+      await refreshLibrary();
+      if (info && info.isTemp && receipt.idMap && receipt.idMap[info.channelId]) {
+        const finalId = receipt.idMap[info.channelId];
+        draftsRef.current.drop(info.channelId);
+        setSelectedId(finalId);
+        toast("Channel created as " + finalId + " at r" + receipt.revision + ".", "ok");
+      }
+    }, [refreshLibrary, toast]);
+
+    const handleCreated = useCallback((tempId, discardedId) => {
+      if (tempId) setSelectedId(tempId);
+      else if (discardedId) {
+        // temp draft discarded: select the first real channel
+        const first = (libRef.current && libRef.current.channels || [])[0];
+        setSelectedId(first ? first.id : null);
+      }
+    }, []);
+
+    const reportPhase = useCallback((state) => { editorPhaseRef.current = state; }, []);
+
+    const selectChannel = useCallback(async (id) => {
+      if (id === selectedId) return;
+      const ep = editorPhaseRef.current;
+      if (ep.phase === "applying" || ep.phase === "validating") {
+        const ok = await confirm({
+          title: "An apply is in flight",
+          message: "The current channel is being applied. Leaving now is safe — the receipt is polled in the background and your draft survives either way.",
+          confirmLabel: "Leave now",
+        });
+        if (!ok) return;
+      }
+      setSelectedId(id);
+    }, [selectedId, confirm]);
+
+    // ---- dial data ----
+    const applyQuery = useMemo(() => debounce((v) => setQuery(v), 140), []);
+    const groupsSorted = lib ? (lib.groups || []).slice().sort((a, b) => a.position - b.position) : [];
+    const groupsById = useMemo(() => new Map(groupsSorted.map((g) => [g.id, g])), [lib]);
+
+    const visibleChannels = useMemo(() => {
+      if (!lib) return [];
+      const q = query.trim().toLowerCase();
+      let list = (lib.channels || []);
+      if (groupFilter) list = list.filter((c) => c.groupId === groupFilter);
+      if (q) {
+        list = list.filter((c) => c.name.toLowerCase().includes(q) || String(c.number).includes(q)
+          || (c.sourceLabel || "").toLowerCase().includes(q));
+      }
+      return list.slice().sort((a, b) => a.number - b.number);
+    }, [lib, query, groupFilter]);
+
+    // temp (draft) channels appear too
+    const tempChannels = useMemo(() => {
+      if (!draftsRef.current) return [];
+      return draftsRef.current.ids()
+        .filter((id) => String(id).startsWith("temp-"))
+        .map((id) => {
+          const entry = draftsRef.current.get(id);
+          const d = entry.draft;
+          return {
+            id, temp: true, kind: d.kind, number: d.number, name: d.name || "(unnamed draft)",
+            glyph: d.glyph, color: d.color, groupId: d.groupId, sort: d.sort,
+            enabled: true, archived: false, paused: false,
+            sourceType: d.source && d.source.type, sourceLabel: d.sourceLabel || "",
+          };
+        });
+      // recompute on draft count changes
+    }, [draftCount, lib]);
+
+    const allRows = useMemo(() => {
+      const seen = new Set();
+      const rows = [];
+      for (const c of visibleChannels) { rows.push(c); seen.add(c.id); }
+      for (const t of tempChannels) {
+        if (!seen.has(t.id) && (!groupFilter || t.groupId === groupFilter)) {
+          const q = query.trim().toLowerCase();
+          if (!q || t.name.toLowerCase().includes(q) || String(t.number).includes(q)) rows.push(t);
+        }
+      }
+      return rows;
+    }, [visibleChannels, tempChannels, groupFilter, query]);
+
+    const dialItems = useMemo(() => buildDialItems({
+      channels: allRows, groups: groupsSorted, query, groupFilter, collapsed,
+    }), [allRows, groupsSorted, query, groupFilter, collapsed]);
+
+    const hasDraft = (id) => !!(draftsRef.current && draftsRef.current.get(id));
+
+    // ---- bulk actions ----
+    const bulkIds = [...bulkSelected];
+    const bulkAction = async (makeOps, title, line, skipConfirm) => {
+      if (!bulkIds.length) return;
+      if (!skipConfirm) {
+        const ok = await confirm({
+          title,
+          message: bulkIds.length + (bulkIds.length === 1 ? " channel" : " channels") + " " + line,
+          confirmLabel: "Apply",
+        });
+        if (!ok) return;
+      }
+      const ops = makeOps(bulkIds);
+      const receipt = await submitOps(ops, { label: title });
+      if (receipt.status === "committed") {
+        // writes land in stored drafts of moved channels too (they stay draft)
+        if (ops[0] && ops[0].op === "channels.move" && draftsRef.current) {
+          const target = ops[0].groupId;
+          for (const id of ops[0].channelIds) {
+            const entry = draftsRef.current.get(id);
+            if (entry) draftsRef.current.put(id, Object.assign({}, entry.draft, { groupId: target }));
+          }
+        }
+        setBulkSelected(new Set());
+      }
+    };
+
+    const moveDialog = async () => {
+      if (!bulkIds.length) return;
+      let target = groupsSorted[0] ? groupsSorted[0].id : null;
+      let createName = "";
+      const ok = await new Promise((resolve) => {
+        setConfirmSpec({
+          title: "Move " + bulkIds.length + (bulkIds.length === 1 ? " channel" : " channels"),
+          message: bulkIds.length + (bulkIds.length === 1 ? " channel moves" : " channels move") + " in one Apply.",
+          confirmLabel: "Apply move",
+          resolve: (v) => { setConfirmSpec(null); resolve(v); },
+          detail: h("div", null,
+            h("div", { className: "jw-field" },
+              h("label", { className: "jw-field-label", htmlFor: "jw-bulk-dest" }, "Move to existing group"),
+              h("select", {
+                id: "jw-bulk-dest", className: "jw-input", defaultValue: target,
+                onChange: (e) => { target = e.target.value; },
+              }, groupsSorted.map((g) => h("option", { key: g.id, value: g.id }, g.name))),
+            ),
+            h("div", { className: "jw-field" },
+              h("label", { className: "jw-field-label", htmlFor: "jw-bulk-newgroup" }, "…or create a new group and move there"),
+              h("input", {
+                id: "jw-bulk-newgroup", className: "jw-input", placeholder: "New group name",
+                onChange: (e) => { createName = e.target.value.trim(); },
+              }),
+            ),
+          ),
+        });
       });
-    }, [mutate]);
+      if (!ok) return;
+      if (createName) {
+        // The server validates channels.move against EXISTING groups only, so
+        // a new destination takes two applies: create the group, then move.
+        const gid = newGroupId();
+        const maxPos = Math.max(0, ...groupsSorted.map((g) => g.position));
+        const first = await submitOps(
+          [{ op: "group.put", group: { id: gid, name: createName, position: maxPos + 1 } }],
+          { label: "Group created", silent: true },
+        );
+        if (first.status !== "committed") return;
+        target = gid;
+        await refreshLibrary();
+      }
+      await bulkAction((ids) => [{ op: "channels.move", channelIds: ids, groupId: target }],
+        "Move to group", "will move", true);
+    };
 
-    const removeTagFromSelected = useCallback((tagId) => {
-      const ch = (draftRef.current.channels || []).find((x) => x.id === selectedRef.current);
-      if (!ch) return;
-      const remaining = tagIdsOf(ch.source).filter((x) => x !== tagId);
-      if (remaining.length) patchSelectedSource(tagSource(remaining));
-    }, [patchSelectedSource]);
+    // ---- export CSV ----
+    const exportCsv = () => {
+      const rows = [["number", "id", "kind", "name", "group", "sourceType", "sourceLabel", "sort", "programmingMode", "enabled", "paused", "archived"]];
+      for (const c of allRows) {
+        const g = groupsById.get(c.groupId);
+        rows.push([
+          c.number, c.id, c.kind || "", c.name, g ? g.name : "",
+          c.sourceType || "", c.sourceLabel || "", c.sort || "",
+          c.programmingMode || "", c.enabled ? "true" : "false",
+          c.paused ? "true" : "false", c.archived ? "true" : "false",
+        ]);
+      }
+      const esc = (v) => {
+        const s = String(v == null ? "" : v);
+        return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+      };
+      const csv = rows.map((r) => r.map(esc).join(",")).join("\r\n");
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "channel-library-r" + (lib ? lib.revision : 0) + ".csv";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    };
 
-    const removeChannel = useCallback(() => {
-      const target = selectedRef.current;
-      const remaining = (draftRef.current.channels || []).filter((x) => x.id !== target);
-      mutate((c) => {
-        c.channels = c.channels.filter((x) => x.id !== target);
-        return c;
-      });
-      setSelectedId(remaining.length ? remaining[0].id : null);
-    }, [mutate]);
+    // ---- render ----
 
-    const patchSettings = useCallback((patch) => {
-      settingsDirtyRef.current = true;
-      mutate((c) => { Object.assign(c.settings, patch); return c; });
-    }, [mutate]);
+    if (bootError) {
+      return h("div", { className: "jw-page" },
+        h("h1", { className: "jw-title" }, "Channel Studio"),
+        h("div", { className: "jw-missing-note", role: "alert" },
+          "The channel library is not available on this deployment: " + bootError),
+      );
+    }
 
-    useEffect(() => { selectedRef.current = selectedId; }, [selectedId]);
-
-    if (!catalog) {
+    if (!lib) {
       return h("div", { className: "jw-page" }, h("div", { className: "jw-loading" }, "Tuning the dial…"));
     }
 
-    const selected = (catalog.channels || []).find((c) => c.id === selectedId) || null;
-    const railSections = buildRailSections(catalog, fullDir);
-    const selectedRailRow = railSections
-      .flatMap((s) => s.rows)
-      .find((r) => r.sel === selectedId) || null;
+    const dirtyPill = draftCount > 0
+      ? h("span", { className: "jw-pill jw-pill-dirty", title: "Drafts persist for this browser session until applied or discarded" },
+          draftCount + " unsaved draft" + (draftCount === 1 ? "" : "s"))
+      : h("span", { className: "jw-pill jw-pill-clean" }, "no drafts");
 
-    return h("div", { className: "jw-page" },
-      h("div", { className: "jw-header" },
-        h("div", null,
-          h("h1", { className: "jw-title" }, "Channel Studio"),
-          h("div", { className: "jw-tagline" },
-            "Your library, on the air. Channels you create here air on numbers 1–99, ahead of the built-in dial on your TV."),
-        ),
-        h("div", { className: "jw-header-actions" },
-          h(SaveIndicator, {
-            state: saveState.state,
-            onRetry: retrySave,
+    const reload = async () => {
+      const ep = editorPhaseRef.current;
+      if (ep.phase === "applying" || ep.phase === "validating") {
+        toast("An apply is in flight — Reload is disabled until its receipt lands.", "err");
+        return;
+      }
+      const data = await refreshLibrary();
+      if (!data) return;
+      if (editorPhaseRef.current.dirty) {
+        toast("Library reloaded (r" + data.revision + "). Your draft was kept.", "");
+      } else {
+        setEditorKeyBump((x) => x + 1); // remount a clean editor on fresh data
+        toast("Library reloaded at r" + data.revision + ".", "ok");
+      }
+      setReloadTick((x) => x + 1);
+    };
+
+    const dialList = h(WindowedList, {
+      items: dialItems,
+      itemHeight: DIAL_ITEM_HEIGHT,
+      resetKey: query + "|" + groupFilter + "|" + reloadTick,
+      ariaLabel: "Channel dial",
+      className: "jw-dial-list",
+      render: (item) => {
+        if (item.type === "header") {
+          const isCollapsed = collapsed.has(item.g.id) && !query && !groupFilter;
+          return h("div", {
+            key: "h-" + item.g.id,
+            className: "jw-group-header", role: "button", tabIndex: 0,
+            "aria-expanded": isCollapsed ? "false" : "true",
+            onClick: () => setCollapsed((cur) => {
+              const next = new Set(cur);
+              if (next.has(item.g.id)) next.delete(item.g.id);
+              else next.add(item.g.id);
+              return next;
+            }),
+            onKeyDown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.currentTarget.click(); } },
+          },
+            h("span", null, item.g.name),
+            h("span", { className: "jw-group-count" }, String(item.count)),
+          );
+        }
+        const ch = item.c;
+        return h(DialRow, {
+          key: ch.id, ch,
+          selected: ch.id === selectedId,
+          bulkMode,
+          checked: bulkSelected.has(ch.id),
+          hasDraft: hasDraft(ch.id),
+          groupsById,
+          onSelect: (id) => { void selectChannel(id); },
+          onCheck: (id, checked) => setBulkSelected((cur) => {
+            const next = new Set(cur);
+            if (checked) next.add(id);
+            else next.delete(id);
+            return next;
           }),
-          h("button", { className: "jw-btn jw-btn-ghost", title: "Tuning", onClick: () => setSheet({ mode: "settings" }) }, "⚙"),
+        });
+      },
+    });
+
+    const selected = selectedId || "";
+    const editor = selected
+      ? h(EditorPane, {
+          key: selected + ":" + editorKeyBump,
+          channelId: selected,
+          lib,
+          getRevision: () => (libRef.current ? libRef.current.revision : 0),
+          drafts: draftsRef.current,
+          confirm,
+          toast,
+          submitOps,
+          onApplied: handleApplied,
+          onCreated: handleCreated,
+          reportPhase,
+        })
+      : null;
+
+    return h("div", { className: "jw-page jw-studio" },
+      h("header", { className: "jw-topbar" },
+        h("div", { className: "jw-topbar-title" },
+          h("h1", { className: "jw-title" }, "Channel Studio"),
+          h("span", { className: "jw-tagline" }, "Your library, on the air — edits apply when you say so.")),
+        h("div", { className: "jw-searchbox" },
+          h("span", { className: "jw-search-icon", "aria-hidden": "true" }, "⌕"),
+          h("input", {
+            ref: searchInputRef, type: "search", className: "jw-input jw-search-input",
+            placeholder: "Search " + ((lib.channels || []).length + tempChannels.length) + " channels… (press /)",
+            "aria-label": "Search channels",
+            onChange: (e) => applyQuery(e.target.value),
+          }),
+        ),
+        h("select", {
+          className: "jw-input jw-group-filter", "aria-label": "Filter by group",
+          value: groupFilter, onChange: (e) => setGroupFilter(e.target.value),
+        },
+          h("option", { value: "" }, "All groups"),
+          groupsSorted.map((g) => h("option", { key: g.id, value: g.id }, g.name))),
+        h("button", { className: "jw-btn", onClick: () => setDialog("groups") }, "Groups…"),
+        h("button", {
+          className: "jw-btn" + (bulkMode ? " jw-btn-primary" : ""),
+          "aria-pressed": bulkMode ? "true" : "false",
+          onClick: () => { setBulkMode((v) => !v); setBulkSelected(new Set()); },
+        }, bulkMode ? "Selecting… done" : "Select…"),
+        h("button", { className: "jw-btn", onClick: exportCsv }, "Export CSV"),
+        h("button", { className: "jw-btn", onClick: () => void reload(), title: "Refetch the library and revision" }, "Reload"),
+        h("span", { className: "jw-revision-chip" }, "r" + lib.revision),
+        dirtyPill,
+      ),
+      bulkMode ? h("div", { className: "jw-bulk-bar", role: "toolbar", "aria-label": "Bulk actions" },
+        h("strong", null, bulkSelected.size + " selected"),
+        h("button", { className: "jw-btn jw-btn-small", disabled: !bulkSelected.size, onClick: () => void moveDialog() }, "Move to group…"),
+        h("button", {
+          className: "jw-btn jw-btn-small", disabled: !bulkSelected.size,
+          onClick: () => void bulkAction((ids) => [{ op: "channels.patch", channelIds: ids, patch: { paused: true } }], "Pause", "will pause"),
+        }, "Pause"),
+        h("button", {
+          className: "jw-btn jw-btn-small", disabled: !bulkSelected.size,
+          onClick: () => void bulkAction((ids) => [{ op: "channels.patch", channelIds: ids, patch: { paused: false } }], "Resume", "will resume"),
+        }, "Resume"),
+        h("button", {
+          className: "jw-btn jw-btn-small", disabled: !bulkSelected.size,
+          onClick: () => void bulkAction((ids) => [{ op: "channels.patch", channelIds: ids, patch: { archived: true } }], "Archive", "will be archived"),
+        }, "Archive"),
+        h("button", {
+          className: "jw-btn jw-btn-small", disabled: !bulkSelected.size,
+          onClick: () => void bulkAction((ids) => [{ op: "channels.patch", channelIds: ids, patch: { archived: false } }], "Restore", "will be restored"),
+        }, "Restore"),
+        h("button", { className: "jw-btn jw-btn-ghost jw-btn-small", onClick: () => setBulkSelected(new Set()) }, "Clear"),
+      ) : null,
+      h("main", { className: "jw-columns" },
+        h("section", { className: "jw-dial", "aria-label": "Channel dial" },
+          h("div", { className: "jw-dial-tools" },
+            h("button", { className: "jw-btn jw-btn-primary jw-new-channel", onClick: () => setDialog("new") }, "+ New channel…"),
+          ),
+          dialItems.length === 0
+            ? h("div", { className: "jw-empty" },
+                h("div", { className: "jw-empty-title" }, "Nothing matches"),
+                h("div", { className: "jw-empty-sub" }, "Adjust the search, or create a channel."))
+            : dialList,
+        ),
+        editor || h("div", { className: "jw-editor jw-editor-empty" },
+          h("div", { className: "jw-empty-title" }, "Nothing selected"),
+          h("div", { className: "jw-empty-sub" }, "Pick a channel on the dial."),
         ),
       ),
-      saveState.state === "conflict"
-        ? h("div", { className: "jw-conflict-banner" },
-            h("span", null,
-              "Your lineup changed in another session. Keep this page's changes, or reload the saved lineup?"),
-            h("button", { className: "jw-btn jw-btn-primary", onClick: overwriteWithDraft }, "Keep my changes"),
-            h("button", { className: "jw-btn jw-btn-ghost", onClick: discardDraftAndReload }, "Reload saved lineup"),
-          )
+      dialog === "groups"
+        ? h(GroupsManagerDialog, { lib, drafts: draftsRef.current, onClose: () => setDialog(null), submitOps })
         : null,
-      h("div", { className: "jw-columns" },
-        h(DialRail, {
-          railSections, selectedId,
-          onSelect: setSelectedId, onNew: () => setSheet({ mode: "new" }),
-          channelCount: (catalog.channels || []).length,
-        }),
-        selected
-          ? h(EditorPane, {
-              channel: selected, channels: catalog.channels || [],
-              onPatch: (patch) => patchChannel(selected.id, patch),
-              onAssignNumber: (number, swapId) => assignNumber(selected.id, number, swapId),
-              onChangeSource: () => setSheet({ mode: "source" }),
-              onRemoveTag: removeTagFromSelected,
-              onAddTags: () => setSheet({ mode: "tags" }),
-              onRemove: removeChannel,
-            })
-          : selectedRailRow && selectedRailRow.auto
-            ? h(AutoChannelPane, { row: selectedRailRow })
-            : h("div", { className: "jw-editor jw-editor-empty" },
-                h("div", { className: "jw-empty-title" }, "Nothing selected"),
-                h("div", { className: "jw-empty-sub" }, "Pick a channel on the left, or create your first one."),
-              ),
-      ),
-      sheet && sheet.mode === "new"
-        ? h(CreateChannelSheet, { onClose: () => setSheet(null), onCreate: createChannel })
+      dialog === "new"
+        ? h(NewChannelDialog, {
+            lib, drafts: draftsRef.current, onClose: () => setDialog(null),
+            onCreate: (tempId) => { setDialog(null); handleCreated(tempId); },
+          })
         : null,
-      sheet && sheet.mode === "source"
-        ? h(CreateChannelSheet, { onClose: () => setSheet(null), onCreate: relinkChannel, editingChannel: selected })
-        : null,
-      sheet && sheet.mode === "tags"
-        ? h(TagPickSheet, { channel: selected, onClose: () => setSheet(null), onDone: (ids) => patchSelectedSource(tagSource(ids)) })
-        : null,
-      sheet && sheet.mode === "settings"
-        ? h(SettingsSheet, { catalog, onClose: () => setSheet(null), onPatchSettings: patchSettings })
-        : null,
-      toast ? h("div", { className: "jw-toast" }, toast) : null,
+      h(ConfirmDialog, { spec: confirmSpec }),
+      h(Toasts, { items: toasts, onDismiss: (id) => setToasts((cur) => cur.filter((t) => t.id !== id)) }),
     );
   }
 
