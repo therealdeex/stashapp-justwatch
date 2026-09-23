@@ -10,23 +10,40 @@ wall-clock schedule. This plugin owns two tiers of the dial:
 - **My Channels** (1–99): channels you name, number, and program yourself —
   edited comfortably from a desktop browser in the **Channel Studio** page
   this plugin injects into Stash's web UI (`/plugins/stash-justwatch`).
-- **Networks** (100+): the owner's curated channel list, compiled from the
-  authoring CSV (`data/proposed_channels_scene_validated.csv`) into
-  `justwatch/networks.json` by `tools/import_channels.py`. The networks
-  REPLACE the TV app's client-generated General/Studios/Performers sections —
-  the dial becomes 1–99 custom channels plus 100–899 owner-curated networks,
-  covering performer/studio/tag spotlights and their intersections
-  (ALL-of tag pairs and triples, tag exclusions, performer pairs). Network
-  ids are database ids of the Stash the CSV was validated against; against a
-  different library the tier simply airs empty.
+- **Networks** (100+): owner-curated channels covering performer/studio/tag
+  spotlights and their intersections.
+
+## The channel library (v0.8.0): everything is editable
+
+Run the migration once (`docs/CHANNEL-CURATION-MIGRATION.md`) and the whole
+dial becomes an **owner-editable library** at
+`<stash data dir>/channel-library.json` — seeded from the v4-final
+513-network proposal plus your existing customs, then yours to edit:
+
+- rename, renumber/swap, re-brand, duplicate, pause, archive, restore;
+- edit **content rules** visually (tag/performer/studio ANY-or-ALL groups,
+  explicit exclusions, date ranges, duration, "added within", text search)
+  with a plain-language summary and an honest pool-vs-rotation preview;
+- organize channels into **groups** (exactly one group per channel) that
+  order both this browser UI and the TV guide — groups never change content;
+- every change commits only when you press **Apply**: drafts survive
+  navigation and errors, the receipt (`GetChannelApplyResult`) is the truth,
+  and renamed/regrouped channels never reset what's playing;
+- rule changes re-prepare just that channel; aired history is preserved;
+- full definition history with restore-as-a-new-edit, plus migration backup/
+  restore tooling for the whole deployment.
+
+Pre-migration deployments keep the previous behavior: a read-only compiled
+network tier (below) and autosave customs. Continuing activation stays
+rollout-gated either way; the GUI can never flip it on.
 
 ## How it works
 
 - **Catalog** (channels + tuning settings) lives in
-  `<stash config dir>/stash-justwatch-data/catalog.json`. The network tier is
-  compiled into the plugin (`networks.json`) and is read-only — it never
-  enters the catalog and needs no snapshots (its CSV-validated counts ARE the
-  health data).
+  `<stash config dir>/stash-justwatch-data/catalog.json`. The compiled
+  network tier (`networks.json`) is read-only until the library migration;
+  after it, `<stash data dir>/channel-library.json` is the one authoritative
+  store and the compiled file becomes a backed-up seed/provenance input.
 - The **TV app** pulls `Directory` (custom channels + the `networks` block)
   and `Lineup` through Stash's `runPluginOperation` GraphQL mutation (sync,
   API-key authenticated) and runs its broadcast schedule exactly as for
@@ -138,10 +155,15 @@ Sync ops (`runPluginOperation`): `Capabilities`, `Directory` (custom channels
 + the `networks` block), `FullDirectory`, `Lineup` (also serves `net_`
 channels), `PreviewLineup`, `GetCatalog`, `ValidateCatalog`, `Schedule`
 (custom and activated network ids), `PreviewProgramming`, `ProgrammingDesk`,
-`ProgrammingStatus`.
-Task ops (`runPluginTask`): `SaveCatalog`, `RefreshData`, `PrepareProgramming`
-— writes run as tasks so snapshot regeneration never blocks a GraphQL
-connection.
+`ProgrammingStatus` — plus, when `features.channelLibrary` is advertised,
+the editing surface: `GetChannelLibrary`, `GetChannelDirectory`,
+`GetChannelDefinition`, `ValidateChannelChanges`, `PreviewChannelPool`,
+`GetChannelApplyResult`, `GetChannelHistory` (see
+docs/CHANNEL-CURATION-API.md).
+Task ops (`runPluginTask`): `SaveCatalog`, `RefreshData`, `PrepareProgramming`,
+and now `ApplyChannelChanges` (the only library write path) — writes run as
+tasks so nothing slow blocks a GraphQL connection, and a queued task id is
+never mistaken for success: clients correlate the durable receipt.
 
 Determinism note: seeded shuffle relies on Stash's `random_<seed>` sort being
 stable for a given seed — the same assumption the TV app makes for its own
