@@ -264,14 +264,16 @@ def op_preview_channel_pool(ctx) -> dict:
                     "rotationSize": 0, "sample": []}
     scene_filter = criteria.build_scene_filter(source, object_filter)
     find_filter = lineup.build_find_filter(sort, seed, 1, 50, text_query)
+    include_paths = bool(ctx.args.get("includePaths"))
     data = ctx.client.submit(lineup.FIND_SCENES, {
-        "filter": find_filter, "scene_filter": scene_filter, "include_paths": False,
+        "filter": find_filter, "scene_filter": scene_filter,
+        "include_paths": include_paths,
     })
     node = (data or {}).get("findScenes") or {}
     pool_count = int(node.get("count") or 0)
     sample = []
     for scene in node.get("scenes") or []:
-        item = lineup._scene_item(scene, include_paths=False)
+        item = lineup._scene_item(scene, include_paths=include_paths)
         if item is not None:
             sample.append(item)
         if len(sample) >= sample_limit:

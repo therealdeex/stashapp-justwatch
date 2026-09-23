@@ -154,6 +154,13 @@ def effective_epoch(source: dict, today: _dt.date | None = None) -> str:
         days = created.get("withinDays")
         if isinstance(days, int) and not isinstance(days, bool) and days >= 1:
             return created_cutoff(days, today)
+    # Scene-count predicates (studios/performers by activity) also move with
+    # the library; a day-granular epoch keeps client caches honest.
+    for facet in ("studioSceneCount", "performerSceneCount"):
+        spec = source.get(facet)
+        if isinstance(spec, dict) and (spec.get("min") or spec.get("max")):
+            today = today or _dt.datetime.now(_dt.timezone.utc).date()
+            return today.isoformat()
     return ""
 
 

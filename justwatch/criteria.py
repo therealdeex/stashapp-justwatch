@@ -106,11 +106,27 @@ def normalize(source: dict) -> dict:
                 and not isinstance(created.get("withinDays"), bool) \
                 and created["withinDays"] > 0:
             out["createdAt"] = {"withinDays": created["withinDays"]}
+        for facet in ("studioSceneCount", "performerSceneCount"):
+            spec = source.get(facet)
+            if isinstance(spec, dict):
+                kept = _kept_count_range(spec)
+                if kept:
+                    out[facet] = kept
         q = source.get("q")
         if isinstance(q, str) and q.strip():
             out["q"] = q.strip()
         return out
     return {"type": str(kind or "")}
+
+
+def _kept_count_range(spec: dict) -> dict:
+    """Canonical {min, max} scene-count thresholds (ints kept, noise dropped)."""
+    kept: dict[str, int] = {}
+    for half in ("min", "max"):
+        v = spec.get(half)
+        if isinstance(v, int) and not isinstance(v, bool):
+            kept[half] = v
+    return kept
 
 
 def validate(source: Any) -> list[dict]:
@@ -149,7 +165,9 @@ def validate(source: Any) -> list[dict]:
                 "a tag source needs at least one numeric tag id")
         return errors
     # filter / criteria
-    unknown = sorted(set(source) - {"type", *_ID_FACETS, "date", "duration", "createdAt", "q"})
+    unknown = sorted(set(source) - {"type", *_ID_FACETS, "date", "duration",
+                                    "createdAt", "q", "studioSceneCount",
+                                    "performerSceneCount"})
     if unknown:
         err("source", "unknown_fields",
             f"unknown source fields: {', '.join(unknown)}")
@@ -196,12 +214,30 @@ def validate(source: Any) -> list[dict]:
         if isinstance(days, bool) or not isinstance(days, int) or days < 1:
             err("source.createdAt", "bad_created_at",
                 "createdAt needs {withinDays: >= 1}")
+    for facet in ("studioSceneCount", "performerSceneCount"):
+        spec = source.get(facet)
+        if spec is None:
+            continue
+        if not isinstance(spec, dict) or not spec:
+            err(f"source.{facet}", "bad_scene_count",
+                f"{facet} needs {{min and/or max: scenes}}")
+            continue
+        lo = spec.get("min")
+        hi = spec.get("max")
+        if "min" in spec and (isinstance(lo, bool) or not isinstance(lo, int) or lo < 0):
+            err(f"source.{facet}.min", "bad_scene_count", "min must be a non-negative integer")
+        if "max" in spec and (isinstance(hi, bool) or not isinstance(hi, int) or hi < 1):
+            err(f"source.{facet}.max", "bad_scene_count", "max must be a positive integer")
+        if isinstance(lo, int) and isinstance(hi, int) and not isinstance(lo, bool) \
+                and not isinstance(hi, bool) and hi <= lo:
+            err(f"source.{facet}", "bad_scene_count", "max must exceed min")
     q = source.get("q")
     if q is not None and (not isinstance(q, str) or not q.strip()):
         err("source.q", "bad_query", "q must be a non-empty text query")
     if kind == "criteria":
         has_any = any(ids(source.get(f)) for f in _ID_FACETS)
-        has_meta = any(source.get(k) for k in ("date", "duration", "createdAt")) \
+        has_meta = any(source.get(k) for k in ("date", "duration", "createdAt",
+                                               "studioSceneCount", "performerSceneCount")) \
             or bool((source.get("q") or "").strip() if isinstance(source.get("q"), str) else False)
         if not has_any and not has_meta:
             err("source", "empty_rules",
@@ -288,6 +324,21 @@ def build_scene_filter(source: dict, object_filter: dict | None = None) -> dict:
                 "value": created_cutoff(int(created["withinDays"])),
                 "modifier": "GREATER_THAN",
             }
+        for facet, filter_key in (("studioSceneCount", "studios_filter"),
+                                  ("performerSceneCount", "performers_filter")):
+            spec = source.get(facet)
+            if isinstance(spec, dict) and (spec.get("min") or spec.get("max")):
+                lo, hi = spec.get("min"), spec.get("max")
+                if lo and hi:
+                    count = {"value": lo, "value2": hi, "modifier": "BETWEEN"}
+                elif hi:
+                    # "fewer than N scenes" — the owner's dynamic ask
+                    count = {"value": hi, "value2": None, "modifier": "LESS_THAN"}
+                else:
+                    # "N or more scenes": BETWEEN with an open upper bound is
+                    # unambiguous where GREATER_THAN's inclusivity is not
+                    count = {"value": lo, "value2": INT_MAX, "modifier": "BETWEEN"}
+                out[filter_key] = {"scene_count": count}
         q = source.get("q")
         return out
     if kind == "filter":
@@ -393,6 +444,18 @@ def summarize(source: dict, resolve_name=None) -> list[str]:
     if isinstance(created, dict) and created.get("withinDays"):
         rows += 1
         lines.append(f"{rows}. Added to the library within the last {created['withinDays']} days (moves with the calendar).")
+    for facet, noun in (("studioSceneCount", "studios"), ("performerSceneCount", "performers")):
+        spec = source.get(facet)
+        if isinstance(spec, dict) and (spec.get("min") or spec.get("max")):
+            rows += 1
+            lo, hi = spec.get("min"), spec.get("max")
+            if lo and hi:
+                cond = f"with {lo}–{hi} scenes"
+            elif hi:
+                cond = f"with fewer than {hi} scenes"
+            else:
+                cond = f"with {lo} or more scenes"
+            lines.append(f"{rows}. Dynamically: any {noun} {cond} — membership updates itself as the library grows.")
     if isinstance(source.get("q"), str) and source.get("q", "").strip():
         rows += 1
         lines.append(f"{rows}. Matching the text search “{source['q'].strip()}”.")
