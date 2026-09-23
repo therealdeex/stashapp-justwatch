@@ -7,7 +7,7 @@ description: >-
   deterministic. Ships the owner's curated network tier (channels 100+, from
   the channel CSV) which replaces the TV app's generated sections, and the
   Channel Studio editor page. Targets Stash v0.31.1.
-version: 0.6.0
+version: 0.8.0
 url: https://example.invalid/stash-justwatch
 
 exec:
@@ -51,3 +51,12 @@ tasks:
     description: Publish the next 72 hours for continuing channels. Run hourly using the supplied scheduler.
     defaultArgs:
       mode: PrepareProgramming
+
+  - name: Apply Channel Changes
+    description: >-
+      Commit one channel-library transaction (expectedRevision + requestId +
+      ops). Dispatched by the Channel Studio's Apply button; running it from
+      the Tasks page without arguments is a safe no-op that returns an error
+      receipt field instead of touching the library.
+    defaultArgs:
+      mode: ApplyChannelChanges

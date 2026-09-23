@@ -292,7 +292,8 @@ def _library_networks_block(ctx, view: dict, schedule_status: dict) -> dict | No
                 resolved[channel["id"]] = continuing.resolved_mode(
                     channel_service.as_legacy_network_channel(channel), rollout)
     rows = [channel_service.as_legacy_network_channel(c)
-            for c in view["channels"] if c["kind"] == "net"]
+            for c in view["channels"] if c["kind"] == "net"
+            and c.get("enabled", True) and not c.get("archived") and not c.get("paused")]
     if not rows:
         # An intentionally empty owner tier is AUTHORITATIVE: the block stays
         # present but empty so an old client never resurrects its generated
@@ -768,6 +769,8 @@ def _op_full_directory(ctx: TaskContext) -> dict:
                     row["count"] = count
                     row["offAir"] = count <= 0
                     row["poolFreshness"] = "current"
+            if not channel.get("enabled", True) or channel.get("archived") or channel.get("paused"):
+                continue
             if (channel.get("programming") or {}).get("mode") == "continuing":
                 row["programmingMode"] = continuing.resolved_mode(
                     channel_service.as_legacy_network_channel(channel),
