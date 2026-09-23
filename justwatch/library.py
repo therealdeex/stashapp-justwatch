@@ -552,7 +552,7 @@ def _check_ops(library: dict, ops: list[dict]) -> list[dict]:
             else:
                 norm = name.strip().casefold()
                 clash = any(
-                    existing.strip().casefold() == norm
+                    existing["name"].strip().casefold() == norm
                     for existing_id, existing in groups.items()
                     if existing_id != gid
                 ) or any(

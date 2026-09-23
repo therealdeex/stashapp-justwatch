@@ -162,16 +162,6 @@ def validate(source: Any) -> list[dict]:
             err("source", "conflicting_rows",
                 f"one facet cannot be both ANY and ALL: {a} and {b} are both set; "
                 "Stash cannot express (ANY row) AND (ALL row) for the same facet")
-    # An exclusion rides its facet's include criterion; an orphan exclusion has
-    # nowhere to project and would silently do nothing.
-    for exclude_facet, include_facets in (
-        ("excludeTags", ("tags", "tagsAny")),
-        ("excludePerformers", ("performers", "performersAny")),
-        ("excludeStudios", ("studios", "studiosAny")),
-    ):
-        if ids(source.get(exclude_facet)) and not any(ids(source.get(f)) for f in include_facets):
-            err("source", "orphan_exclusion",
-                f"{exclude_facet} needs an include rule on the same facet to apply to")
     date = source.get("date")
     if date is not None:
         if not isinstance(date, dict) or not (date.get("from") or date.get("to")):
@@ -210,21 +200,13 @@ def validate(source: Any) -> list[dict]:
     if q is not None and (not isinstance(q, str) or not q.strip()):
         err("source.q", "bad_query", "q must be a non-empty text query")
     if kind == "criteria":
-        has_include = any(ids(source.get(f)) for f in
-                          ("tags", "tagsAny", "performers", "performersAny",
-                           "studios", "studiosAny"))
+        has_any = any(ids(source.get(f)) for f in _ID_FACETS)
         has_meta = any(source.get(k) for k in ("date", "duration", "createdAt")) \
             or bool((source.get("q") or "").strip() if isinstance(source.get("q"), str) else False)
-        has_exclude_only = any(ids(source.get(f)) for f in
-                               ("excludeTags", "excludePerformers", "excludeStudios"))
-        if not has_include and not has_meta:
-            if has_exclude_only:
-                err("source", "empty_rules",
-                    "only exclusions are set — nothing would ever match; "
-                    "add at least one include rule or metadata rule")
-            else:
-                err("source", "empty_rules",
-                    "no rules set — add at least one rule for this pool")
+        if not has_any and not has_meta:
+            err("source", "empty_rules",
+                "no rules set — add at least one rule for this pool "
+                "(an exclude-only pool like “everything without JAV” is valid)")
     return errors
 
 
@@ -254,7 +236,11 @@ def build_scene_filter(source: dict, object_filter: dict | None = None) -> dict:
         out: dict[str, Any] = {}
         tags_all, tags_any = ids(source.get("tags")), ids(source.get("tagsAny"))
         exclude_tags = ids(source.get("excludeTags"))
-        if tags_all or tags_any:
+        if tags_all and tags_any:
+            tags_any = []  # historical ALL-precedence for tolerant reads
+        if tags_all or tags_any or exclude_tags:
+            # An exclude-only tags criterion (empty value + excludes) is the
+            # compiled tier's historical "everything except" shape.
             criterion: dict[str, Any] = {
                 "value": tags_all or tags_any,
                 "modifier": "INCLUDES_ALL" if tags_all else "INCLUDES",
@@ -269,8 +255,9 @@ def build_scene_filter(source: dict, object_filter: dict | None = None) -> dict:
         ):
             all_ids, any_ids = ids(source.get(facet)), ids(source.get(any_facet))
             if all_ids and any_ids:
-                raise ValueError(f"criteria source cannot set both {facet} and {any_facet}")
-            if not (all_ids or any_ids):
+                any_ids = []  # historical ALL-precedence for tolerant reads
+            excludes = ids(source.get(exclude_key))
+            if not (all_ids or any_ids or excludes):
                 continue
             criterion = {
                 "value": all_ids or any_ids,
@@ -278,7 +265,6 @@ def build_scene_filter(source: dict, object_filter: dict | None = None) -> dict:
             }
             if depth is not None:
                 criterion["depth"] = depth
-            excludes = ids(source.get(exclude_key))
             if excludes:
                 criterion["excludes"] = excludes
             out[modifier_key] = criterion

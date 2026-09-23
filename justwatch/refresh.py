@@ -72,16 +72,21 @@ def affected_channels(before: dict[str, dict], after: dict[str, dict]) -> tuple[
     """
     affected: list[str] = []
     signatures: dict[str, str] = {}
+    from justwatch.programming import policy as policy_shape
     for cid, channel in after.items():
         before_channel = before.get(cid)
         before_sig = criteria.source_signature(before_channel["source"]) if before_channel else None
         after_sig = criteria.source_signature(channel["source"])
+        # programming is compared in its CLAMPED form: the transaction
+        # normalizes the policy (defaults filled), which alone is cosmetic.
+        before_policy = policy_shape(before_channel.get("programming")) if before_channel else None
+        after_policy = policy_shape(channel.get("programming"))
         pool_changed = (
             before_channel is None
             or before_sig != after_sig
             or before_channel.get("sort") != channel.get("sort")
             or int(before_channel.get("seed") or 0) != int(channel.get("seed") or 0)
-            or (before_channel.get("programming") or {}) != (channel.get("programming") or {})
+            or before_policy != after_policy
             or bool(before_channel.get("archived")) != bool(channel.get("archived"))
             or bool(before_channel.get("paused")) != bool(channel.get("paused"))
             or bool(before_channel.get("enabled", True)) != bool(channel.get("enabled", True))
