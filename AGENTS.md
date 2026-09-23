@@ -42,7 +42,12 @@ beyond stdlib (+ optional PyYAML for the API-key fallback). Data flow:
   snapshots, process-safe `.library.lock`.
 - `justwatch/criteria.py` — the canonical rule model: legacy shapes pass
   through verbatim; the composite `filter` shape; the new `criteria` shape
-  (per-facet ANY/ALL + explicit exclusions + date/duration/recency/text).
+  (per-facet ANY/ALL + explicit exclusions + date/duration/recency/text +
+  DYNAMIC entity selection: `studioSceneCount`/`performerSceneCount`
+  thresholds — "studios with fewer than 2 scenes" — projected to Stash's
+  nested `studios_filter`/`performers_filter` so membership resolves
+  server-side per query and never goes stale; needs a Stash with the nested
+  `*_filter` fields).
   A facet set to both ANY and ALL is a validation error; exclude-only pools
   are the historical "everything except" shape and stay valid. Projection
   reuses the tested Stash criterion shapes (exclusions ride their facet
