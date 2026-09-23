@@ -118,7 +118,7 @@ def build_target(data_dir: Path, seed: dict) -> tuple[dict, dict]:
     catalog_doc = json.loads((data_dir / "catalog.json").read_text(encoding="utf-8")) \
         if (data_dir / "catalog.json").exists() else {"channels": []}
     rollout = continuing.try_load_rollout(data_dir)
-    rollout_ids = {e.get("id") for e in rollout.get("channels", []) if isinstance(e, dict)}
+    rollout_ids = {str(x) for x in (rollout.get("networkIds") or [])}
 
     groups = [
         {"id": "grp_my", "name": "My Channels", "position": 1, "legacySection": None},

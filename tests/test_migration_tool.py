@@ -167,3 +167,26 @@ def test_restore_brings_back_the_legacy_deployment(deployment):
     assert (data / "catalog.json").exists()
     catalog = json.loads((data / "catalog.json").read_text())
     assert catalog["revision"] == 21
+
+def test_rollout_preserved_for_survivors_and_recorded_for_retired(tmp_path):
+    """The rollout file's networkIds (NOT 'channels') drive activation
+    preservation; retired ids are recorded explicitly, never re-numbered."""
+    data = tmp_path / "data"
+    data.mkdir()
+    shutil.copy2(ROOT / "justwatch/networks.json", data / "networks.json")
+    (data / "catalog.json").write_text(json.dumps(
+        {"schemaVersion": 1, "revision": 21, "settings": {}, "channels": []}))
+    preview = json.loads(
+        (ROOT / "analysis/just-watch-final/networks.preview.json").read_text())
+    survivor = preview["channels"][0]["id"]
+    (data / "continuing-networks.json").write_text(json.dumps({
+        "enabled": True, "stage": "active",
+        "networkIds": [survivor, "net_8091d3ea"]}))
+    result = run_tool(data, "--staging-dir", str(tmp_path / "staging"), "--apply")
+    assert result.returncode == 0, result.stderr
+    doc = json.loads((data / "channel-library.json").read_text())
+    assert doc["migration"]["retiredRolloutIds"] == ["net_8091d3ea"]
+    # the rollout file itself is preserved verbatim in the backup
+    backups = sorted(tmp_path.glob("migration-backup-*"))
+    assert json.loads((backups[-1] / "continuing-networks.json").read_text())[
+        "networkIds"] == [survivor, "net_8091d3ea"]
