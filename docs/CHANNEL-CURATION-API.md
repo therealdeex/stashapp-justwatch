@@ -84,8 +84,21 @@ versions are hard errors (`LibraryError`) — never normalized away.
   "performers": ["157"], "performersAny": ["1","2"], "excludePerformers": ["9"],
   "studios": ["819"], "studiosAny": ["3"], "excludeStudios": ["4"],
   "date": {"from": "2020-01-01", "to": ""}, "duration": {"min": 600, "max": 7200},
-  "createdAt": {"withinDays": 180}, "q": "text" }
+  "createdAt": {"withinDays": 180}, "q": "text",
+  "studioSceneCount": {"max": 2}, "performerSceneCount": {"min": 100, "max": 500} }
 ```
+
+**Dynamic entity selection (owner decision 2026-09-23):** `studioSceneCount`
+and `performerSceneCount` select performers/studios by ACTIVITY instead of by
+id list — `{max: 2}` means "studios (or performers) with fewer than 2
+scenes", `{min, max}` a range. They project to Stash's nested relational
+filters (`studios_filter`/`performers_filter` with a `scene_count` criterion),
+so membership resolves server-side on every query and never goes stale — no
+materialized id lists. They compose with every other row (AND) and with
+id-based includes/excludes, and add a day-granular epoch to rotation
+versions so client caches stay honest. Requires a Stash version with the
+nested `*_filter` fields (present on dev since 2026-09; check before
+production release).
 
 Rows combine with AND; the ANY/ALL toggle picks the storage field per facet.
 Stash cannot express (ANY row) AND (ALL row) inside one facet criterion, so a

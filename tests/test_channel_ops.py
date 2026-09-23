@@ -260,3 +260,44 @@ def test_preview_reports_missing_saved_search_without_raising(tmp_path):
     ctx = Ctx(tmp_path, MissingClient(), {"source": {"type": "savedFilter", "id": "404"}})
     result = channel_ops.op_preview_channel_pool(ctx)
     assert result["status"] == "missing_source"
+
+
+def test_dynamic_scene_count_rows_project_to_nested_filters():
+    f = criteria.build_scene_filter({"type": "criteria", "studioSceneCount": {"max": 2}})
+    assert f["studios_filter"] == {"scene_count": {"value": 2, "value2": None,
+                                                   "modifier": "LESS_THAN"}}
+    f = criteria.build_scene_filter({"type": "criteria", "performerSceneCount": {"min": 100}})
+    assert f["performers_filter"]["scene_count"]["modifier"] == "BETWEEN"
+    assert f["performers_filter"]["scene_count"]["value"] == 100
+
+
+def test_dynamic_rows_combine_with_exclusions_and_ids():
+    s = {"type": "criteria", "studioSceneCount": {"max": 2}, "excludeTags": ["9320"],
+         "performers": ["7"]}
+    assert criteria.validate(s) == []
+    f = criteria.build_scene_filter(s)
+    assert f["tags"]["excludes"] == ["9320"]
+    assert f["performers"]["value"] == ["7"]
+    assert f["studios_filter"]["scene_count"]["modifier"] == "LESS_THAN"
+
+
+def test_dynamic_rows_validation_and_membership():
+    assert criteria.validate({"type": "criteria", "studioSceneCount": {}})[0][
+        "code"] == "bad_scene_count"
+    assert criteria.validate({"type": "criteria", "performerSceneCount": {"min": "x"}})[0][
+        "code"] == "bad_scene_count"
+    assert criteria.validate({"type": "criteria", "performerSceneCount": {"min": 5, "max": 2}})[0][
+        "code"] == "bad_scene_count"
+    # a dynamic row alone is a valid pool (not "empty rules")
+    assert criteria.validate({"type": "criteria", "studioSceneCount": {"max": 2}}) == []
+    # unknown fields near the dynamic rows are still caught
+    result = criteria.validate({"type": "criteria", "studioSceneCount": {"max": 2}, "wut": 1})
+    assert any(e["code"] == "unknown_fields" for e in result)
+
+
+def test_dynamic_rows_summary_and_signature():
+    lines = criteria.summarize({"type": "criteria", "studioSceneCount": {"max": 2}})
+    assert "fewer than 2 scenes" in lines[-1]
+    a = criteria.source_signature({"type": "criteria", "studioSceneCount": {"max": 2}})
+    b = criteria.source_signature({"type": "criteria", "studioSceneCount": {"max": 3}})
+    assert a != b

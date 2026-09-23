@@ -6,6 +6,14 @@ unvalidated-here steps are marked ⚠.
 
 ## Prerequisites
 
+* Stash version with nested relational scene filters
+  (`SceneFilterType.studios_filter` / `performers_filter`) — required by the
+  dynamic "studios/performers with fewer than N scenes" rules. Verify:
+  `findScenes` accepting `studios_filter` (introspection one-liner in
+  docs/CHANNEL-CURATION-DESIGN-DECISION.md). Older servers: every other
+  feature works; the dynamic rows report a clear validation error at
+  preview/apply time.
+
 * Owner approval of the frontend (recorded in
   `docs/CHANNEL-CURATION-DESIGN-DECISION.md`) and of production rollout.
 * Production Stash `192.168.8.40` (systemd `stash.service`), plugin install
