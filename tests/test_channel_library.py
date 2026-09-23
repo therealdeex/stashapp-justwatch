@@ -236,3 +236,14 @@ def test_intentionally_empty_library_is_distinct_from_absent(tmp_path):
     assert library.exists(tmp_path), "present-but-empty is authoritative"
     view_channels = library.load(tmp_path)["channels"]
     assert view_channels == []
+
+
+def test_put_onto_taken_number_is_a_typed_error_not_a_crash(data_dir):
+    """Regression: a put targeting another channel's number used to crash the
+    validator (NameError on the swap-pair lookup) instead of reporting."""
+    result = library.apply_transaction(
+        data_dir, expected_revision=1, request_id="taken",
+        ops=[{"op": "channel.put", "channel": {**json.loads(json.dumps(
+            library.load(data_dir)["channels"][0])), "number": 2}}])
+    assert result["status"] == "rejected"
+    assert result["errors"][0]["code"] == "duplicate_number"

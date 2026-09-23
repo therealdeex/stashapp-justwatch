@@ -520,7 +520,8 @@ def _check_ops(library: dict, ops: list[dict]) -> list[dict]:
                 if channel.get("kind") is not None and channel["kind"] != existing["kind"]:
                     err(i, "channel.kind", "identity_change",
                         f"kind is immutable for {channel['id']}")
-            _check_channel_draft(i, channel, by_id, groups, new_groups, err, creating=False)
+            _check_channel_draft(i, channel, by_id, groups, new_groups, err,
+                                 swap_pairs=swap_pairs, creating=False)
         elif kind == "channel.create":
             channel = op.get("channel") or {}
             temp_id = op.get("tempId")
@@ -529,7 +530,8 @@ def _check_ops(library: dict, ops: list[dict]) -> list[dict]:
             if channel.get("id") not in (None, ""):
                 err(i, "channel.id", "identity_change",
                     "created channels must not carry an id (the server assigns it)")
-            _check_channel_draft(i, channel, by_id, groups, new_groups, err, creating=True)
+            _check_channel_draft(i, channel, by_id, groups, new_groups, err,
+                                 swap_pairs=swap_pairs, creating=True)
         elif kind == "channel.swap":
             a, b = by_id.get(op.get("a")), by_id.get(op.get("b"))
             if a is None or b is None:
@@ -609,7 +611,8 @@ def _check_ops(library: dict, ops: list[dict]) -> list[dict]:
     return errors
 
 
-def _check_channel_draft(i, channel, by_id, groups, new_groups, err, *, creating: bool) -> None:
+def _check_channel_draft(i, channel, by_id, groups, new_groups, err, *,
+                         creating: bool, swap_pairs=frozenset()) -> None:
     if creating:
         channel = dict(channel)
         channel.setdefault("kind", "net")
