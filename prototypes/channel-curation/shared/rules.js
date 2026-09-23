@@ -94,6 +94,16 @@ export function summarizeLines(source) {
   if (s.duration?.min) active.push(`running at least ${Math.round(s.duration.min / 60)} minutes`);
   if (s.duration?.max) active.push(`running at most ${Math.round(s.duration.max / 60)} minutes`);
   if (s.createdAt?.withinDays) active.push(`added to the library within the last ${s.createdAt.withinDays} days (moves with the calendar)`);
+  if (s.studioSceneCount && (s.studioSceneCount.min || s.studioSceneCount.max)) {
+    const {min, max} = s.studioSceneCount;
+    const c = min && max ? `with ${min}–${max} scenes` : max ? `with fewer than ${max} scenes` : `with ${min} or more scenes`;
+    active.push(`dynamically: studios ${c} (membership updates itself)`);
+  }
+  if (s.performerSceneCount && (s.performerSceneCount.min || s.performerSceneCount.max)) {
+    const {min, max} = s.performerSceneCount;
+    const c = min && max ? `with ${min}–${max} scenes` : max ? `with fewer than ${max} scenes` : `with ${min} or more scenes`;
+    active.push(`dynamically: performers ${c} (membership updates itself)`);
+  }
   if (s.q) active.push(`matching the text search “${s.q}”`);
   if (!active.length) return ["No rules yet — this pool would be empty until at least one rule is on."];
   return [`${active.length} rule${active.length === 1 ? "" : "s"}, combined with AND${active.length > 1 ? joiner : ":"}`, ...active.map((a, i) => `${i + 1}. ${a}`)];
@@ -200,6 +210,7 @@ export function ruleEditor(sourceDraft, onDraftChange) {
           otherSet([]);
           for (const b of wrap.querySelectorAll("button")) b.setAttribute("aria-pressed", "false");
           e.currentTarget.setAttribute("aria-pressed", "true");
+          changed();
           rerender();
         },
       }, mode === "all" ? labelAll : labelAny);
@@ -213,7 +224,7 @@ export function ruleEditor(sourceDraft, onDraftChange) {
       class: "btn small",
       onclick: () => entityPicker({
         title, entities: ENT[kind], selected: new Set(getIds()),
-        onDone: (set) => { setIds(sortedIds(set)); rerender(); },
+        onDone: (set) => { setIds(sortedIds(set)); changed(); rerender(); },
       }),
     }, `Choose (${getIds().length ? getIds().length.toLocaleString() : "none"})`);
   }
@@ -224,10 +235,39 @@ export function ruleEditor(sourceDraft, onDraftChange) {
     for (const id of list.slice(0, 100)) {
       line.append(el("span", { class: "entity-chip" },
         entityName(kind, id),
-        el("button", { "aria-label": `Remove ${entityName(kind, id)}`, onclick: () => { onRemove(id); rerender(); } }, "✕")));
+        el("button", { "aria-label": `Remove ${entityName(kind, id)}`, onclick: () => { onRemove(id); changed(); rerender(); } }, "✕")));
     }
     if (list.length > 100) line.append(el("span", { class: "entity-chip" }, `+ ${list.length - 100} more`));
     return line;
+  }
+
+  function dynamicCountRow(facetKey, noun) {
+    // "match by activity": fewer than N / N or more scenes (dynamic, server-resolved)
+    const spec = sourceDraft[facetKey] || {};
+    const maxIn = el("input", {
+      type: "number", min: "1", style: "width:80px", placeholder: "N",
+      value: spec.max ?? "", "aria-label": `${noun}: fewer than N scenes`,
+      onchange: () => {
+        const v = maxIn.value === "" ? undefined : parseInt(maxIn.value, 10);
+        sourceDraft[facetKey] = {...(sourceDraft[facetKey] || {}), ...(v ? {max: v} : {max: undefined})};
+        if (!sourceDraft[facetKey].min && !sourceDraft[facetKey].max) delete sourceDraft[facetKey];
+        changed();
+      },
+    });
+    const minIn = el("input", {
+      type: "number", min: "0", style: "width:80px", placeholder: "N",
+      value: spec.min ?? "", "aria-label": `${noun}: N or more scenes`,
+      onchange: () => {
+        const v = minIn.value === "" ? undefined : parseInt(minIn.value, 10);
+        sourceDraft[facetKey] = {...(sourceDraft[facetKey] || {}), ...(v !== undefined ? {min: v} : {min: undefined})};
+        if (!sourceDraft[facetKey].min && !sourceDraft[facetKey].max) delete sourceDraft[facetKey];
+        changed();
+      },
+    });
+    return el("div", {class: "rule-dates", style: "margin-top:8px"},
+      el("span", {class: "pill sim"}, "or dynamic:"), el("span", {style:"color:var(--text-faint)"}, `${noun} with fewer than`), maxIn,
+      el("span", {style:"color:var(--text-faint)"}, "or more than"), minIn, el("span", {style:"color:var(--text-faint)"}, "scenes"),
+      el("span", {class: "pill sim", title: "Resolved by Stash on every query — no id list to maintain"}, "updates itself"));
   }
 
   function build() {
@@ -281,6 +321,7 @@ export function ruleEditor(sourceDraft, onDraftChange) {
         s.performersAny = s.performersAny.filter((x) => x !== id);
       }),
       s.excludePerformers?.length ? chipsLine("performers", s.excludePerformers, (id) => { s.excludePerformers = s.excludePerformers.filter((x) => x !== id); }, "") : null,
+      dynamicCountRow("performerSceneCount", "performers"),
     ));
 
     // -- studios row --
@@ -299,14 +340,15 @@ export function ruleEditor(sourceDraft, onDraftChange) {
         s.studiosAny = s.studiosAny.filter((x) => x !== id);
       }),
       s.excludeStudios?.length ? chipsLine("studios", s.excludeStudios, (id) => { s.excludeStudios = s.excludeStudios.filter((x) => x !== id); }, "") : null,
+      dynamicCountRow("studioSceneCount", "studios"),
       el("div", { class: "hint", style: "color:var(--text-faint);font-size:12px;margin-top:4px" }, "Sub-studios count (hierarchy included)."),
     ));
 
     // -- metadata row --
     const dateFrom = el("input", { type: "date", value: s.date?.from || "", "aria-label": "Scene date from",
-      onchange: () => { s.date = { from: dateFrom.value || "", to: dateTo.value || "" }; if (!dateFrom.value && !dateTo.value) s.date = undefined; rerender(); } });
+      onchange: () => { s.date = { from: dateFrom.value || "", to: dateTo.value || "" }; if (!dateFrom.value && !dateTo.value) s.date = undefined; changed(); rerender(); } });
     const dateTo = el("input", { type: "date", value: s.date?.to || "", "aria-label": "Scene date to",
-      onchange: () => { s.date = { from: dateFrom.value || "", to: dateTo.value || "" }; if (!dateFrom.value && !dateTo.value) s.date = undefined; rerender(); } });
+      onchange: () => { s.date = { from: dateFrom.value || "", to: dateTo.value || "" }; if (!dateFrom.value && !dateTo.value) s.date = undefined; changed(); rerender(); } });
     const durMin = el("input", { type: "number", min: 0, style: "width:90px", value: s.duration?.min ? Math.round(s.duration.min / 60) : "", "aria-label": "Minimum duration in minutes",
       placeholder: "min",
       onchange: () => { setDuration(); } });
@@ -317,11 +359,12 @@ export function ruleEditor(sourceDraft, onDraftChange) {
       const lo = parseInt(durMin.value, 10), hi = parseInt(durMax.value, 10);
       if (Number.isNaN(lo) && Number.isNaN(hi)) s.duration = undefined;
       else s.duration = { min: Number.isNaN(lo) ? 0 : lo * 60, ...(Number.isNaN(hi) ? {} : { max: hi * 60 }) };
+      changed();
       rerender();
     }
     const created = el("input", { type: "number", min: 1, style: "width:80px", value: s.createdAt?.withinDays || "", "aria-label": "Added within days",
       placeholder: "days",
-      onchange: () => { s.createdAt = created.value ? { withinDays: parseInt(created.value, 10) } : undefined; rerender(); } });
+      onchange: () => { s.createdAt = created.value ? { withinDays: parseInt(created.value, 10) } : undefined; changed(); rerender(); } });
     const q = el("input", { type: "text", value: s.q || "", placeholder: "text search…", style: "flex:1", "aria-label": "Text search",
       oninput: debounce(() => { s.q = q.value.trim() || undefined; changed(); }, 300) });
 
