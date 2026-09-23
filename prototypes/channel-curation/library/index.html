@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prototype C — Channel Library</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 16 16%27%3E%3Crect width=%2716%27 height=%2716%27 rx=%273%27 fill=%27%234fc3f7%27/%3E%3C/svg%3E">
+<link rel="stylesheet" href="../shared/styles.css">
+<style>
+  /* C — Channel Library: dense, filterable table + bulk operations. */
+  .lib-main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  .filters { display: flex; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--line); flex-wrap: wrap; align-items: center; }
+  .filters select, .filters input[type="search"] {
+    background: var(--bg); border: 1px solid var(--line-strong); border-radius: var(--radius); padding: 5px 9px;
+  }
+  .table-wrap { flex: 1; min-height: 0; display: flex; }
+  table { border-collapse: collapse; width: 100%; table-layout: fixed; }
+  thead th {
+    position: sticky; top: 0; z-index: 2; background: var(--bg-raise);
+    text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .07em;
+    color: var(--text-dim); padding: 7px 10px; border-bottom: 1px solid var(--line-strong);
+    cursor: pointer; user-select: none; white-space: nowrap;
+  }
+  thead th:hover { color: var(--text); }
+  tbody tr td { padding: 4px 10px; border-bottom: 1px solid var(--line); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  tbody tr:hover td { background: var(--bg-raise); }
+  tbody tr.cursor td { cursor: pointer; }
+  td.num, th.num { width: 74px; font-family: var(--mono); font-size: 12.5px; }
+  td.sel, th.sel { width: 34px; text-align: center; }
+  td.grp { width: 120px; color: var(--text-dim); }
+  td.cnt { width: 90px; text-align: right; font-family: var(--mono); font-size: 12.5px; }
+  td.st { width: 100px; }
+  tr[aria-selected="true"] td { background: var(--bg-panel); }
+  .bulk-bar {
+    display: flex; gap: 10px; align-items: center; padding: 8px 14px;
+    background: var(--bg-panel); border-top: 1px solid var(--line-strong); min-height: 46px;
+  }
+  .count-note { color: var(--text-faint); font-size: 12px; }
+  @media (max-width: 760px) { td.grp, th.grp, td.src, th.src { display: none; } }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script type="module" src="./main.js"></script>
+</body>
+</html>

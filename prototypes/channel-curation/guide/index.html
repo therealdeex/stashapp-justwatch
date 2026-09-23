@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prototype D — Visual Guide</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 16 16%27%3E%3Crect width=%2716%27 height=%2716%27 rx=%273%27 fill=%27%234fc3f7%27/%3E%3C/svg%3E">
+<link rel="stylesheet" href="../shared/styles.css">
+<style>
+  /* D — Visual Guide: guide-shaped browsing, edit in context. */
+  .gd-main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  .gd-tools { display: flex; gap: 8px; padding: 8px 14px; border-bottom: 1px solid var(--line); align-items: center; flex-wrap: wrap; }
+  .gd-tools .tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+  .gd-tools .tabs button {
+    background: transparent; border: 1px solid var(--line-strong); border-radius: 14px;
+    padding: 3px 12px; font-size: 12.5px; color: var(--text-dim);
+  }
+  .gd-tools .tabs button[aria-pressed="true"] { background: var(--accent-dim); color: var(--text); border-color: var(--accent); font-weight: 700; }
+  .grid-host { flex: 1; min-height: 0; display: flex; }
+  .group-band {
+    display: flex; align-items: center; gap: 10px; padding: 5px 10px;
+    background: var(--bg-raise); color: var(--text-dim); font-size: 11.5px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: .07em;
+  }
+  .chan-row { display: flex; border-bottom: 1px solid var(--line); position: relative; }
+  .chan-cell {
+    position: sticky; left: 0; z-index: 2; width: 210px; flex: none;
+    background: var(--bg); display: flex; gap: 8px; align-items: center; padding: 4px 8px;
+    border-right: 1px solid var(--line); cursor: pointer; overflow: hidden;
+  }
+  .chan-cell:hover, .chan-cell:focus-visible { background: var(--bg-raise); }
+  .chan-cell .cname { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chan-cell .cnum { color: var(--text-dim); font-family: var(--mono); font-size: 11px; }
+  .prog {
+    position: absolute; top: 3px; bottom: 3px; border-radius: 6px;
+    background: var(--bg-panel); border: 1px solid var(--line-strong);
+    padding: 4px 8px; font-size: 12px; overflow: hidden; cursor: pointer;
+    display: flex; flex-direction: column; justify-content: center; min-width: 0;
+  }
+  .prog:hover, .prog:focus-visible { border-color: var(--accent); z-index: 1; }
+  .prog.onair { background: var(--accent-dim); border-color: var(--accent); }
+  .prog .pt { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .prog .pm { color: var(--text-dim); font-size: 10.5px; white-space: nowrap; }
+  .ctx-panel {
+    width: min(480px, 94vw); flex: none; border-left: 1px solid var(--line-strong);
+    background: var(--bg-raise); display: none; flex-direction: column; min-height: 0;
+  }
+  .ctx-panel.open { display: flex; }
+  .ctx-panel .ctx-head { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+  .popover { position: fixed; z-index: 70; width: 320px; background: var(--bg-panel); border: 1px solid var(--line-strong); border-radius: 10px; box-shadow: 0 12px 48px rgba(0,0,0,.55); }
+  .popover .pop-body { padding: 12px 14px; }
+  @media (max-width: 760px) {
+    .chan-cell { width: 140px; }
+    .ctx-panel { position: fixed; right: 0; top: 0; bottom: 0; z-index: 55; box-shadow: -12px 0 48px rgba(0,0,0,.5); }
+  }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script type="module" src="./main.js"></script>
+</body>
+</html>

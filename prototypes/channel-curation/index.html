@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Channel curation — five prototypes</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 16 16%27%3E%3Crect width=%2716%27 height=%2716%27 rx=%273%27 fill=%27%234fc3f7%27/%3E%3C/svg%3E">
+<link rel="stylesheet" href="./shared/styles.css">
+<style>
+  body { overflow: auto; }
+  .landing { max-width: 1080px; margin: 0 auto; padding: 28px 20px 60px; }
+  .landing h1 { font-size: 24px; margin-bottom: 4px; }
+  .landing .lede { color: var(--text-dim); margin: 6px 0 24px; max-width: 72ch; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+  .opt {
+    display: flex; flex-direction: column; gap: 8px;
+    background: var(--bg-raise); border: 1px solid var(--line); border-radius: 10px;
+    padding: 16px; text-decoration: none; color: var(--text); transition: border-color .12s;
+  }
+  .opt:hover { border-color: var(--accent); }
+  .opt .letter { font-size: 12px; font-weight: 800; letter-spacing: .14em; color: var(--accent); }
+  .opt h2 { font-size: 17px; }
+  .opt p { margin: 0; color: var(--text-dim); font-size: 13.5px; }
+  .opt .go { margin-top: 6px; color: var(--accent); font-weight: 600; font-size: 13px; }
+  .notes {
+    margin-top: 26px; border: 1px dashed var(--line-strong); border-radius: 10px;
+    padding: 14px 18px; color: var(--text-dim); font-size: 13.5px; max-width: none;
+  }
+  .notes h3 { color: var(--text); font-size: 14px; margin: 10px 0 4px; }
+  .notes ul { margin: 4px 0; padding-left: 20px; }
+  .notes code { background: var(--bg-panel); border: 1px solid var(--line); border-radius: 4px; padding: 1px 6px; font-family: var(--mono); font-size: 12.5px; }
+  .kbd { border: 1px solid var(--line-strong); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; font-family: var(--mono); font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="landing">
+  <h1>Channel curation — five working prototypes</h1>
+  <p class="lede">
+    The same library — the real 513-network v4-final proposal plus synthetic custom
+    channels and fixture states — driven by five genuinely different workflows.
+    Every variant supports the full review script: search, rename, one-group
+    assignment, rule editing with a plain-language summary, simulated
+    pool/rotation preview, Apply/Discard with durable drafts, bulk moves into new
+    groups, recoverable errors, keyboard operation, and a narrow layout.
+    <strong>All counts, previews, schedules and artwork are simulated</strong>; no
+    production media or live server calls.
+  </p>
+  <div class="grid">
+    <a class="opt" href="./studio/">
+      <span class="letter">OPTION A</span>
+      <h2>Channel Studio</h2>
+      <p>A searchable dial on the left, a focused editor on the right. Find a channel the way you'd find it on the TV, edit in place, Apply. The classic curation surface — fastest path from "this channel" to "changed".</p>
+      <span class="go">Open ›</span>
+    </a>
+    <a class="opt" href="./organizer/">
+      <span class="letter">OPTION B</span>
+      <h2>Group Organizer</h2>
+      <p>Groups first. Pick a group, see its channels as cards, drag or bulk-move between groups, manage the group set itself. Channel editing opens in a drawer so organizing never loses its place. Best for reshaping the lineup's structure.</p>
+      <span class="go">Open ›</span>
+    </a>
+    <a class="opt" href="./library/">
+      <span class="letter">OPTION C</span>
+      <h2>Channel Library</h2>
+      <p>A dense, sortable, filterable table over all 519 channels with cross-filter multi-select and bulk actions (move / pause / archive) plus CSV definition export. Power-tool territory: maintenance at scale.</p>
+      <span class="go">Open ›</span>
+    </a>
+    <a class="opt" href="./guide/">
+      <span class="letter">OPTION D</span>
+      <h2>Visual Guide</h2>
+      <p>The lineup as it airs: a guide grid with group bands and simulated programs. Click a program for context, edit the channel in a side panel without losing your place. Best for thinking in schedules, not lists.</p>
+      <span class="go">Open ›</span>
+    </a>
+    <a class="opt" href="./curator/">
+      <span class="letter">OPTION E</span>
+      <h2>Guided Curator</h2>
+      <p>One decision at a time: choose a channel, then identity → group → rules → programming, ending in a review that shows the exact before/after before the single Apply. Best for careful edits and creating channels from scratch.</p>
+      <span class="go">Open ›</span>
+    </a>
+  </div>
+
+  <div class="notes">
+    <h3>Running the prototypes</h3>
+    <ul>
+      <li>Start: <code>python3 tools/serve_prototypes.py</code> (repo root) — serves <code>http://localhost:8462/</code>, also published over tailscale at <code>https://dev-lab2.manx-teeth.ts.net:8462/</code>.</li>
+      <li>Restart after reboot: same command. To stop tailscale publishing: <code>tailscale serve --https=8462 off</code>.</li>
+      <li>No build step, no dependencies, no network calls — plain files.</li>
+    </ul>
+    <h3>Things to try in every variant</h3>
+    <ul>
+      <li>Search for a known channel (try <span class="kbd">/</span> to focus search), then browse by group.</li>
+      <li>Rename it, change its group — watch the unsaved-draft indicator; nothing saves until <strong>Apply</strong>.</li>
+      <li>Edit rules: ANY/ALL toggles, exclusions, date/duration/recency rows — read the plain-language summary.</li>
+      <li>Compare <em>source pool</em> vs <em>on-air rotation (≤ 50)</em> in the preview — both simulated.</li>
+      <li>Apply (watch progress + acknowledgment) and Discard; switch channels or views with a dirty draft and come back — it's still there.</li>
+      <li>Use <em>Select…</em> / <em>Manage</em> to multi-select channels and move them into a <em>new</em> group with one Apply.</li>
+      <li>Open the <em>Scenario</em> menu (top bar) and try <em>Conflict on Apply</em>, <em>Lost response → retry</em> (retry with Apply — the same request id is reused, nothing duplicates), <em>Validation error</em>, <em>Slow Apply</em>. The draft always survives.</li>
+      <li>Fixture channels: <em>Empty Pool Experiment</em> (#7), <em>Deleted Entity Detector</em> (#8 — edit its source to see the honest error), <em>After Hours</em> (paused), <em>Archive: Late Night Marathons</em> (archived), one 60-char name, and channels with 3,569-performer rule rows (search "Rare Performers" → edit rules → choose performers).</li>
+      <li>Keyboard: <span class="kbd">Tab</span>/<span class="kbd">Shift-Tab</span>, <span class="kbd">Enter</span>/<span class="kbd">Space</span> to activate, <span class="kbd">Esc</span> closes dialogs/drawers, arrows move in the guide grid (D).</li>
+      <li>Narrow the window below ~760px — every variant restacks for a small screen.</li>
+    </ul>
+    <h3>Reset</h3>
+    <ul>
+      <li>The <strong>Reset</strong> button (top bar, every variant) restores the same starting fixture and clears drafts for that variant.</li>
+    </ul>
+  </div>
+</div>
+</body>
+</html>
