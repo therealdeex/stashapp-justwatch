@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import time
 import traceback
 from pathlib import Path
 from typing import Any
@@ -33,20 +34,26 @@ if _PLUGIN_ROOT not in sys.path:
     sys.path.insert(0, _PLUGIN_ROOT)
 
 from justwatch import catalog, contract, continuing, lineup, networks, snapshots, programming  # noqa: E402
+from justwatch import channel_ops, channel_service, library, refresh  # noqa: E402
 from justwatch.stash_client import (  # noqa: E402
     GraphQLAuthError,
     GraphQLClientError,
     StashClient,
 )
 
-PLUGIN_VERSION = "0.7.0"
+PLUGIN_VERSION = "0.8.0"
 
 SYNC_MODES = frozenset({
     "capabilities", "directory", "full_directory", "lineup", "preview_lineup",
     "get_catalog", "validate_catalog", "schedule", "programming_desk", "preview_programming",
     "programming_status",
+    "get_channel_library", "get_channel_directory", "get_channel_definition",
+    "validate_channel_changes", "preview_channel_pool", "get_channel_apply_result",
+    "get_channel_history",
 })
-TASK_MODES = frozenset({"save_catalog", "refresh_data", "prepare_programming"})
+TASK_MODES = frozenset({
+    "save_catalog", "refresh_data", "prepare_programming", "apply_channel_changes",
+})
 ALL_MODES = SYNC_MODES | TASK_MODES
 
 _CAMEL_RE_1 = re.compile(r"([A-Z]+)([A-Z][a-z])")
@@ -107,6 +114,44 @@ def _op_capabilities(ctx: TaskContext) -> dict:
 
 
 def _op_get_catalog(ctx: TaskContext) -> dict:
+    """The legacy editor's read view (custom channels only). After migration
+    this is a read-only compatibility projection of the library's ``ch_``
+    namespace — editing goes through the channel-library operations."""
+    if channel_service.library_active(ctx.data_dir):
+        view = channel_service.load_view(ctx.data_dir)
+        snapshot = snapshots.read_snapshot(ctx.data_dir, ctx.assets_dir)
+        health = snapshot.get("channels", {}) if snapshot.get("revision") == view["revision"] else {}
+        channels = []
+        for channel in view["channels"]:
+            if channel["kind"] != "ch":
+                continue
+            enriched = channel_service.as_legacy_catalog_channel(channel)
+            enriched["groupId"] = channel["groupId"]
+            enriched["archived"] = channel.get("archived", False)
+            enriched["paused"] = channel.get("paused", False)
+            try:
+                published = programming.read(ctx.data_dir, channel["id"])
+            except (OSError, ValueError):
+                published = None
+            enriched["programmingVersion"] = published.get("version") if published else None
+            entry = health.get(channel["id"], {})
+            enriched["sceneCount"] = entry.get("sceneCount")
+            enriched["loopSeconds"] = entry.get("loopSeconds")
+            enriched["loopCapped"] = entry.get("loopCapped", False)
+            enriched["sourceMissing"] = entry.get("sourceMissing", False)
+            enriched["healthStatus"] = entry.get("healthStatus", "ok")
+            channels.append(enriched)
+        return {
+            "pluginId": contract.PLUGIN_ID,
+            "contractVersion": contract.CONTRACT_VERSION,
+            "schemaVersion": contract.SCHEMA_VERSION,
+            "revision": view["revision"],
+            "libraryBacked": True,
+            "settings": catalog.load(ctx.data_dir).get("settings", {}),
+            "channels": channels,
+            "note": "This deployment is library-backed: apply edits through "
+                    "ApplyChannelChanges. SaveCatalog maps onto it for customs only.",
+        }
     current = catalog.load(ctx.data_dir)
     snapshot = snapshots.read_snapshot(ctx.data_dir, ctx.assets_dir)
     health = snapshot.get("channels", {}) if snapshot.get("revision") == current.get("revision") else {}
@@ -139,17 +184,56 @@ def _op_get_catalog(ctx: TaskContext) -> dict:
 def _op_directory(ctx: TaskContext) -> dict:
     """The TV app's view: enabled channels only, no catalog internals.
 
-    The ``networks`` block carries the owner's curated tier (channels 100+)
-    which replaces the TV's client-generated sections; it is absent entirely
-    when this deployment has no networks file, so older clients keep their
-    fallback path. Continuing-activated networks overlay their resolved mode
-    and a lightweight schedule status (from the status manifest — reading
-    every schedule JSON per directory request would be unbounded).
+    After the library migration the payload is projected from the ONE
+    authoritative library through the resolved channel service (same shapes:
+    legacy ``channels`` plus the ``networks`` block with legal legacy section
+    names — an owner group never leaks into ``section``). Pre-migration
+    deployments read the legacy stores exactly as before.
     """
+    schedule_status = continuing.read_status(ctx.data_dir).get("channels", {})
+    if channel_service.library_active(ctx.data_dir):
+        view = channel_service.load_view(ctx.data_dir)
+        snapshot = snapshots.read_snapshot(ctx.data_dir, ctx.assets_dir)
+        health = snapshot.get("channels", {}) if snapshot.get("revision") == view["revision"] else {}
+        channels = []
+        for channel in view["channels"]:
+            if channel["kind"] != "ch" or not channel.get("enabled", True) \
+                    or channel.get("archived") or channel.get("paused"):
+                continue
+            row = {
+                "id": channel["id"],
+                "number": channel["number"],
+                "name": channel["name"],
+                "glyph": channel.get("glyph"),
+                "color": channel.get("color", "#455A64"),
+                "sort": channel.get("sort", "shuffle"),
+                "seed": channel["seed"],
+                "sourceType": (channel.get("source") or {}).get("type"),
+                "programmingMode": (channel.get("programming") or {}).get("mode", "fixed"),
+                "sceneCount": health.get(channel["id"], {}).get("sceneCount"),
+            }
+            entry = schedule_status.get(channel["id"])
+            if entry and entry.get("ready"):
+                row["programming"] = {
+                    key: entry[key]
+                    for key in ("version", "generatedAt", "preparedThrough", "coverageHours", "degraded", "expiring")
+                    if key in entry
+                }
+            channels.append(row)
+        result = {
+            "pluginId": contract.PLUGIN_ID,
+            "contractVersion": contract.CONTRACT_VERSION,
+            "revision": view["revision"],
+            "channels": channels,
+            "networks": _library_networks_block(ctx, view, schedule_status),
+        }
+        if result["networks"] is None:
+            del result["networks"]
+        return result
+
     current = catalog.load(ctx.data_dir)
     snapshot = snapshots.read_snapshot(ctx.data_dir, ctx.assets_dir)
     health = snapshot.get("channels", {}) if snapshot.get("revision") == current.get("revision") else {}
-    schedule_status = continuing.read_status(ctx.data_dir).get("channels", {})
     channels = []
     for channel in current["channels"]:
         if not channel.get("enabled", True):
@@ -178,7 +262,7 @@ def _op_directory(ctx: TaskContext) -> dict:
     rollout = continuing.try_load_rollout(ctx.data_dir)
     resolved = {}
     if rollout["enabled"]:
-        for network in networks.load()["channels"]:
+        for network in continuing.network_rows(ctx.data_dir):
             resolved[network["id"]] = continuing.resolved_mode(network, rollout)
     result = {
         "pluginId": contract.PLUGIN_ID,
@@ -195,6 +279,38 @@ def _op_directory(ctx: TaskContext) -> dict:
     return result
 
 
+def _library_networks_block(ctx, view: dict, schedule_status: dict) -> dict | None:
+    """The legacy ``networks`` block projected from the library: legal legacy
+    section names via the group fallback, historical seed counts, resolved
+    continuing modes. Absent when the library has no ``net_`` channels — an
+    intentionally empty tier must NOT resurrect the compiled artifact."""
+    rollout = continuing.try_load_rollout(ctx.data_dir)
+    resolved = {}
+    if rollout["enabled"]:
+        for channel in view["channels"]:
+            if channel["kind"] == "net":
+                resolved[channel["id"]] = continuing.resolved_mode(
+                    channel_service.as_legacy_network_channel(channel), rollout)
+    rows = [channel_service.as_legacy_network_channel(c)
+            for c in view["channels"] if c["kind"] == "net"]
+    if not rows:
+        return None
+    channels = []
+    for row in rows:
+        if row["id"] in resolved:
+            row["programmingMode"] = resolved[row["id"]]
+        entry = schedule_status.get(row["id"])
+        if entry and entry.get("ready"):
+            row["schedule"] = {
+                key: entry[key]
+                for key in ("version", "generatedAt", "preparedThrough", "coverageHours", "degraded", "expiring")
+                if key in entry
+            }
+        channels.append(row)
+    revision = networks.revision(channels)
+    return {"revision": revision, "channels": channels}
+
+
 def _find_channel(current: dict, channel_id: str) -> dict | None:
     for channel in current.get("channels", []):
         if channel.get("id") == channel_id:
@@ -207,6 +323,22 @@ def _op_lineup(ctx: TaskContext) -> dict:
     per_page = min(100, max(1, _as_int(ctx.args.get("perPage"), contract.ROTATION_SIZE)))
     if not channel_id:
         raise ValueError("channelId is required")
+    if channel_service.library_active(ctx.data_dir):
+        channel = channel_service.get_channel(ctx.data_dir, channel_id)
+        if channel is None or not channel.get("enabled", True) \
+                or channel.get("archived") or channel.get("paused"):
+            raise LookupError(f"no enabled channel {channel_id!r}")
+        result = _lineup_for_channel(ctx, channel, per_page, include_paths=False)
+        revision = channel_service.directory_revision(ctx.data_dir)
+        result.update({
+            "channelId": channel_id,
+            "revision": revision,
+            "sort": channel.get("sort"),
+            # Rotation identity: ordering hash + the revision that published
+            # it. Clients compare this to drop stale cached lineups.
+            "rotationVersion": f"r{revision}-{result['rotationVersion']}",
+        })
+        return result
     network = networks.get(channel_id)
     if network is not None:
         return _network_lineup(ctx, network, per_page)
@@ -327,6 +459,11 @@ def _op_save_catalog(ctx: TaskContext) -> dict:
     cannot both pass the check. Every outcome — success, handled rejection,
     or internal failure — is mirrored per ``requestId`` to the save_result
     store, so the editor can always correlate an outcome with its own save.
+
+    On a library-backed deployment the draft maps onto ONE Apply transaction
+    touching only the ``ch_`` namespace: networks, groups and other channels'
+    drafts are never published by a legacy save, and a source shape the old
+    editor cannot represent is reported per-channel instead of truncated.
     """
     request_id = str(ctx.args.get("requestId") or "").strip()
 
@@ -336,7 +473,10 @@ def _op_save_catalog(ctx: TaskContext) -> dict:
         )
 
     try:
-        result = _save_catalog_inner(ctx)
+        if channel_service.library_active(ctx.data_dir):
+            result = _save_catalog_via_library(ctx)
+        else:
+            result = _save_catalog_inner(ctx)
     except catalog.CatalogError as exc:
         # A corrupt stored catalog must never be overwritten by a save.
         result = {
@@ -344,11 +484,99 @@ def _op_save_catalog(ctx: TaskContext) -> dict:
             "error": "catalog_corrupt",
             "message": str(exc),
         }
+    except library.LibraryError as exc:
+        result = {"saved": False, "error": "library_corrupt", "message": str(exc)}
     except Exception as exc:  # every handled failure publishes its result
         _log(f"save failed: {exc}")
         result = {"saved": False, "error": "internal_error", "message": str(exc)}
     mirror(result)
     return result
+
+
+def _save_catalog_via_library(ctx: TaskContext) -> dict:
+    """Legacy SaveCatalog draft -> one touched-records Apply (customs only)."""
+    if ctx.args.get("catalog") is None or (
+        isinstance(ctx.args.get("catalog"), str) and not ctx.args["catalog"].strip()
+    ):
+        return {"saved": False, "message": "no draft to save (Tasks-page runs are a no-op)"}
+    draft = _parse_catalog_arg(ctx)
+    doc = library.load(ctx.data_dir)
+    stored_custom = {c["id"]: c for c in doc["channels"] if c["kind"] == "ch"}
+    ops = []
+    unsupported = []
+    seen_ids = set()
+    for i, raw_channel in enumerate(draft.get("channels") or []):
+        if not isinstance(raw_channel, dict):
+            continue
+        ch_id = raw_channel.get("id")
+        if not isinstance(ch_id, str) or ch_id not in stored_custom:
+            unsupported.append({
+                "path": f"channels[{i}]", "code": "unknown_channel",
+                "message": f"{ch_id!r} is not a custom channel in the library",
+            })
+            continue
+        seen_ids.add(ch_id)
+        source_type = (raw_channel.get("source") or {}).get("type")
+        if source_type not in ("savedFilter", "tag", "performer", "studio"):
+            unsupported.append({
+                "path": f"channels[{i}].source", "code": "unsupported_edit",
+                "message": "this client cannot represent this channel's rules; "
+                           "edit it in the Channel Studio instead",
+            })
+            continue
+        stored = stored_custom[ch_id]
+        normalized = catalog.normalize({"channels": [raw_channel]})["channels"]
+        if not normalized:
+            continue
+        row = normalized[0]
+        ops.append({"op": "channel.put", "channel": {
+            "id": stored["id"], "kind": stored["kind"], "seed": stored["seed"],
+            "number": row.get("number") if row.get("number") is not None else stored["number"],
+            "name": row.get("name") or stored["name"],
+            "glyph": row.get("glyph") if row.get("glyph") in contract.GLYPHS else stored.get("glyph"),
+            "color": row.get("color") or stored.get("color"),
+            "groupId": stored["groupId"],
+            "sort": row.get("sort") if row.get("sort") in contract.SORTS else stored.get("sort"),
+            "enabled": bool(row.get("enabled", True)),
+            "archived": stored.get("archived", False),
+            "paused": stored.get("paused", False),
+            "source": row.get("source") or stored["source"],
+            "sourceLabel": row.get("sourceLabel") or stored.get("sourceLabel", ""),
+            "programming": row.get("programming") or stored.get("programming"),
+        }})
+    if unsupported:
+        return {"saved": False, "error": "unsupported_edit",
+                "errors": unsupported,
+                "message": "nothing was written; the library keeps channels this "
+                           "client cannot represent intact"}
+    if not ops:
+        return {"saved": False, "message": "no custom channels in the draft"}
+    expected = _as_int(ctx.args.get("expectedRevision"), -1)
+    errors = library._check_ops(doc, ops)
+    if errors:
+        return {"saved": False, "error": "validation_failed", "errors": errors}
+    receipt = library.apply_transaction(
+        ctx.data_dir, expected_revision=expected, request_id=request_id or f"save-{int(time.time()*1000)}",
+        ops=ops, actor="legacy-save-catalog",
+    )
+    if receipt.get("status") != "committed":
+        payload = {"saved": False, "error": receipt.get("error"), "message": receipt.get("message", "")}
+        if receipt.get("errors"):
+            payload["errors"] = receipt["errors"]
+        if receipt.get("currentRevision") is not None:
+            payload["currentRevision"] = receipt["currentRevision"]
+        return payload
+    affected, signatures = [], {}
+    before = {c["id"]: c for c in doc["channels"]}
+    after = {c["id"]: c for c in library.load(ctx.data_dir)["channels"]}
+    affected, signatures = refresh.affected_channels(before, after)
+    if affected:
+        refresh.enqueue(ctx.data_dir, affected, receipt["revision"], signatures)
+        try:
+            refresh.process_pending(ctx.client, ctx.data_dir, ctx.assets_dir)
+        except Exception as exc:
+            _log(f"refresh skipped (scheduler will retry): {exc}")
+    return {"saved": True, "revision": receipt["revision"]}
 
 
 def _save_catalog_inner(ctx: TaskContext) -> dict:
@@ -448,6 +676,21 @@ def _preserve_existing_seeds(stored: dict, draft: dict) -> None:
 
 
 def _op_refresh_data(ctx: TaskContext) -> dict:
+    if channel_service.library_active(ctx.data_dir):
+        view = channel_service.load_view(ctx.data_dir)
+        legacy_channels = [channel_service.as_legacy_catalog_channel(c)
+                           for c in view["channels"]
+                           if c["enabled"] and not c["archived"] and not c["paused"]]
+        previous = snapshots.read_snapshot(ctx.data_dir, ctx.assets_dir)
+        snapshot = snapshots.build_directory_snapshot(
+            ctx.client, {"revision": view["revision"], "channels": legacy_channels}, previous)
+        snapshots.write_snapshot(ctx.data_dir, ctx.assets_dir, snapshot)
+        return {
+            "mode": "refresh_data",
+            "revision": view["revision"],
+            "channels": len(snapshot.get("channels", {})),
+            "computedAt": snapshot.get("computedAt"),
+        }
     current = catalog.load(ctx.data_dir)
     previous = snapshots.read_snapshot(ctx.data_dir, ctx.assets_dir)
     snapshot = snapshots.build_directory_snapshot(ctx.client, current, previous)
@@ -462,11 +705,84 @@ def _op_refresh_data(ctx: TaskContext) -> dict:
 
 def _op_full_directory(ctx: TaskContext) -> dict:
     """The complete lineup for the Channel Studio: custom channels PLUS the
-    owner's curated networks, which replaced the General/Studios/Performers
-    tiering the TV app used to generate client-side. Pure file reads — no
-    Stash queries; network health is the CSV-validated count. Continuing
-    networks carry their lightweight schedule status so the editor can say
-    "advancing, Xh ahead" instead of loop language."""
+    owner's networks. Pure file reads — no Stash queries. Library-backed
+    deployments project the resolved view: the three legacy buckets come from
+    each group's ``legacySection`` fallback, and channels in owner-defined
+    groups (no legacy mapping) surface in the General bucket so nothing
+    disappears for an old client."""
+    if channel_service.library_active(ctx.data_dir):
+        view = channel_service.load_view(ctx.data_dir)
+        groups = {g["id"]: g for g in view["groups"]}
+        snapshot = snapshots.read_snapshot(ctx.data_dir, ctx.assets_dir)
+        health = snapshot.get("channels", {}) if snapshot.get("revision") == view["revision"] else {}
+        schedule_status = continuing.read_status(ctx.data_dir).get("channels", {})
+        buckets: dict[str, list[dict]] = {"general": [], "studios": [], "performers": []}
+
+        def bucket_of(group_id: str) -> str:
+            legacy = (groups.get(group_id) or {}).get("legacySection")
+            return legacy if legacy in buckets else "general"
+
+        custom_rows = []
+        for channel in view["channels"]:
+            if channel["kind"] == "ch":
+                if not channel.get("enabled", True) or channel.get("archived") or channel.get("paused"):
+                    continue
+                custom_rows.append({
+                    "id": channel["id"], "number": channel["number"],
+                    "name": channel["name"], "glyph": channel.get("glyph"),
+                    "color": channel.get("color", "#455A64"),
+                    "sort": channel.get("sort", "shuffle"), "seed": channel["seed"],
+                    "sourceType": (channel.get("source") or {}).get("type"),
+                    "programmingMode": (channel.get("programming") or {}).get("mode", "fixed"),
+                    "groupId": channel["groupId"],
+                    "sceneCount": health.get(channel["id"], {}).get("sceneCount"),
+                })
+                continue
+            row = {
+                "id": channel["id"], "number": channel["number"],
+                "name": channel["name"], "glyph": channel.get("glyph"),
+                "color": channel.get("color", "#455A64"),
+                "kind": (channel.get("provenance") or {}).get("family", "channel"),
+                "count": (channel.get("provenance") or {}).get("seedCount") or 0,
+                "offAir": False,
+                "origin": "network",
+                "sourceLabel": channel.get("sourceLabel", ""),
+                "groupId": channel["groupId"],
+                "groupName": (groups.get(channel["groupId"]) or {}).get("name"),
+                "poolFreshness": "historical",
+            }
+            if channel["id"] in health:
+                count = health[channel["id"]].get("sceneCount")
+                if count is not None:
+                    row["count"] = count
+                    row["offAir"] = count <= 0
+                    row["poolFreshness"] = "current"
+            if (channel.get("programming") or {}).get("mode") == "continuing":
+                row["programmingMode"] = continuing.resolved_mode(
+                    channel_service.as_legacy_network_channel(channel),
+                    continuing.try_load_rollout(ctx.data_dir))
+            entry = schedule_status.get(channel["id"])
+            if entry and entry.get("ready"):
+                row["schedule"] = {
+                    key: entry[key]
+                    for key in ("coverageHours", "degraded", "expiring", "generatedAt")
+                    if key in entry
+                }
+            buckets[bucket_of(channel["groupId"])].append(row)
+        for bucket in buckets.values():
+            bucket.sort(key=lambda r: r["number"])
+        return {
+            "pluginId": contract.PLUGIN_ID,
+            "contractVersion": contract.CONTRACT_VERSION,
+            "revision": view["revision"],
+            "libraryId": view["libraryId"],
+            "groups": view["groups"],
+            "custom": custom_rows,
+            "general": {"tagChannels": buckets["general"]},
+            "studios": {"channels": buckets["studios"]},
+            "performers": {"channels": buckets["performers"]},
+            "networksNote": "Channels 100+ come from the owner's editable library.",
+        }
     current = catalog.load(ctx.data_dir)
     grouped = networks.sections()
     schedule_status = continuing.read_status(ctx.data_dir).get("channels", {})
@@ -518,11 +834,28 @@ def _op_full_directory(ctx: TaskContext) -> dict:
 
 def _op_schedule(ctx):
     channel_id = str(ctx.args.get("channelId") or "")
+    rollout = continuing.try_load_rollout(ctx.data_dir)
+    if channel_service.library_active(ctx.data_dir):
+        channel = channel_service.get_channel(ctx.data_dir, channel_id)
+        if channel is None or not channel.get("enabled", True) \
+                or channel.get("archived") or channel.get("paused"):
+            raise LookupError("channel is unavailable")
+        if channel["kind"] == "net":
+            # The rollout gate + authored pin decide; the GUI never bypasses.
+            mode = continuing.resolved_mode(
+                channel_service.as_legacy_network_channel(channel), rollout)
+        else:
+            mode = programming.policy(channel.get("programming"))["mode"]
+        if mode == "fixed":
+            return {"status": "fixed", "programs": []}
+        return programming.schedule(ctx.data_dir, channel_id,
+            _as_int(ctx.args.get("at"), int(__import__("time").time() * 1000)),
+            _as_int(ctx.args.get("limit"), 50))
     if channel_id.startswith("net_"):
         network = networks.get(channel_id)
         if network is None:
             raise LookupError("channel is unavailable")
-        mode = continuing.resolved_mode(network, continuing.try_load_rollout(ctx.data_dir))
+        mode = continuing.resolved_mode(network, rollout)
         if mode != continuing.MODE:
             return {"status": "fixed", "programs": []}
         return programming.schedule(ctx.data_dir, channel_id,
@@ -572,13 +905,40 @@ def _op_programming_status(ctx):
     return continuing.read_status(ctx.data_dir)
 
 
+def _outcome_class(key: str, value) -> str:
+    """One explicit outcome vocabulary for BOTH channel groups. Custom-channel
+    outcomes are plain strings ("ready" or an error message); network outcomes
+    classify through continuing's table. (Fixes the review's S3: the old
+    predicate compared a boolean to the string "failure", so custom errors and
+    rollout errors never failed the task.)"""
+    if key.startswith("net_"):
+        return continuing.outcome_class(value)
+    if value == "ready":
+        return "ready"
+    if value in ("changed_during_build", "deferred_index_budget", "backoff",
+                 "programming_current"):
+        return "deferred"
+    return "failure"
+
+
 def _op_prepare_programming(ctx):
     # The run id correlates the queued task with the durable status entry (R7):
     # ops tooling matches on THIS id — an unrelated older successful run can
     # never be mistaken for this one. startedAt precedes the work; finishedAt
     # and the per-channel outcomes are recorded even when channels fail.
-    run_id = str(ctx.args.get("runId") or "").strip() or f"task-{int(__import__('time').time() * 1000)}"
-    started_at = int(__import__("time").time() * 1000)
+    run_id = str(ctx.args.get("runId") or "").strip() or f"task-{int(time.time() * 1000)}"
+    started_at = int(time.time() * 1000)
+
+    # Library deployments first drain the durable pending-refresh journal
+    # (Apply commits may have crashed before their inline refresh ran).
+    pending_result = None
+    if channel_service.library_active(ctx.data_dir):
+        try:
+            pending_result = refresh.process_pending(
+                ctx.client, ctx.data_dir, ctx.assets_dir)
+        except Exception as exc:
+            pending_result = {"error": str(exc)}
+
     result = programming.prepare(ctx.client, ctx.data_dir, ctx.args.get("channelId"))
     try:
         network_result = continuing.prepare(ctx.client, ctx.data_dir, ctx.args.get("channelId"))
@@ -587,22 +947,25 @@ def _op_prepare_programming(ctx):
     run = {
         "runId": run_id,
         "startedAt": started_at,
-        "finishedAt": int(__import__("time").time() * 1000),
+        "finishedAt": int(time.time() * 1000),
         "customChannels": result["channels"],
         "networkChannels": network_result["channels"],
     }
     continuing.write_status(ctx.data_dir, run)
     failures = {key: value for group in ("customChannels", "networkChannels")
                 for key, value in run[group].items()
-                if (continuing.outcome_class(value) if key.startswith("net_") else value != "ready") == "failure"}
+                if _outcome_class(key, value) == "failure"}
     deferred = {key: value for key, value in network_result["channels"].items()
                 if continuing.outcome_class(value) == "deferred"}
     if failures:
         raise GraphQLClientError("Some programming could not be prepared: " + json.dumps(failures))
-    return {"channels": {**result["channels"], **network_result["channels"]},
-            "networks": network_result["channels"],
-            "runId": run_id,
-            "deferred": deferred}
+    response = {"channels": {**result["channels"], **network_result["channels"]},
+                "networks": network_result["channels"],
+                "runId": run_id,
+                "deferred": deferred}
+    if pending_result is not None:
+        response["libraryRefresh"] = pending_result
+    return response
 
 
 _HANDLERS = {
@@ -620,6 +983,15 @@ _HANDLERS = {
     "validate_catalog": _op_validate_catalog,
     "save_catalog": _op_save_catalog,
     "refresh_data": _op_refresh_data,
+    # channel library (editing surface)
+    "get_channel_library": channel_ops.op_get_channel_library,
+    "get_channel_directory": channel_ops.op_get_channel_directory,
+    "get_channel_definition": channel_ops.op_get_channel_definition,
+    "validate_channel_changes": channel_ops.op_validate_channel_changes,
+    "preview_channel_pool": channel_ops.op_preview_channel_pool,
+    "apply_channel_changes": channel_ops.op_apply_channel_changes,
+    "get_channel_apply_result": channel_ops.op_get_channel_apply_result,
+    "get_channel_history": channel_ops.op_get_channel_history,
 }
 
 

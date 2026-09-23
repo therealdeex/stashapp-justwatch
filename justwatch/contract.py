@@ -94,13 +94,26 @@ OPERATIONS: dict[str, str] = {
     "validateCatalog": "ValidateCatalog",
     "saveCatalog": "SaveCatalog",
     "refreshData": "RefreshData",
+    # --- channel library (additive v1: editing + dynamic groups) ---
+    "getChannelLibrary": "GetChannelLibrary",
+    "getChannelDirectory": "GetChannelDirectory",
+    "getChannelDefinition": "GetChannelDefinition",
+    "validateChannelChanges": "ValidateChannelChanges",
+    "previewChannelPool": "PreviewChannelPool",
+    "applyChannelChanges": "ApplyChannelChanges",
+    "getChannelApplyResult": "GetChannelApplyResult",
+    "getChannelHistory": "GetChannelHistory",
 }
 
 #: Operations a sync ``runPluginOperation`` may address (fast, bounded). The
-#: async write ops (``saveCatalog``/``refreshData``) are task-only so a slow
-#: snapshot regeneration never blocks a GraphQL connection.
+#: async write ops (``saveCatalog``/``refreshData``/``applyChannelChanges``)
+#: are task-only so slow work never blocks a GraphQL connection.
 SYNC_OPERATIONS = ("capabilities", "directory", "lineup", "previewLineup",
-                   "getCatalog", "validateCatalog")
+                   "getCatalog", "validateCatalog", "schedule", "fullDirectory",
+                   "programmingDesk", "previewProgramming", "programmingStatus",
+                   "getChannelLibrary", "getChannelDirectory", "getChannelDefinition",
+                   "validateChannelChanges", "previewChannelPool",
+                   "getChannelApplyResult", "getChannelHistory")
 
 
 def capabilities(plugin_version: str) -> dict:
@@ -130,6 +143,28 @@ def capabilities(plugin_version: str) -> dict:
             # The owner's curated network tier (Directory.networks): replaces
             # the TV app's client-generated General/Studios/Performers.
             "networks": {"version": 1, "minNumber": MIN_NETWORK_NUMBER},
+            # The owner-editable channel library + explicit Apply (additive
+            # v1): present only on deployments whose migration created the
+            # authoritative library document. Old clients never read these.
+            "channelLibrary": {
+                "version": 1,
+                "directoryOperation": "GetChannelDirectory",
+                "libraryOperation": "GetChannelLibrary",
+                "definitionOperation": "GetChannelDefinition",
+                "historyOperation": "GetChannelHistory",
+            },
+            "channelGroups": {
+                "version": 1,
+                "singleMembership": True,
+                "legacySectionFallback": True,
+            },
+            "explicitApply": {
+                "version": 1,
+                "applyOperation": "ApplyChannelChanges",
+                "validateOperation": "ValidateChannelChanges",
+                "resultOperation": "GetChannelApplyResult",
+            },
+            "poolPreview": {"version": 1, "operation": "PreviewChannelPool"},
             # The plugin exposes tuning settings, but they govern its own
             # computed directory, not the TV app's generated channels.
             "globalSettings": True,
@@ -144,5 +179,9 @@ def capabilities(plugin_version: str) -> dict:
             "maxChannels": MAX_CHANNEL_NUMBER,
             "lineupPerPage": 50,
             "lineupPerPageMax": 100,
+            # The editable library's number space (My Channels 1-99 + networks
+            # 100-899). Legacy clients keep reading maxChannels, which
+            # continues to describe the custom-channel limit only.
+            "libraryChannels": 899,
         },
     }

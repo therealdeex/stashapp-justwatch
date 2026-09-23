@@ -209,7 +209,16 @@ def prepare(client, data_dir, channel_id=None, only_changed=False):
     outcomes = {}
     # Separate lock keeps readers and catalog autosaves responsive during indexing.
     with catalog.catalog_lock(Path(data_dir) / "programming", timeout=1):
-        current = catalog.load(data_dir)
+        # One resolved channel view: pre-migration this is the catalog; after
+        # the library migration it is the owner's authoritative library, so a
+        # GUI edit and the scheduler can never disagree.
+        from justwatch import channel_service
+        if channel_service.library_active(data_dir):
+            custom = channel_service.custom_channels_legacy(data_dir)
+            current = {"revision": channel_service.directory_revision(data_dir),
+                       "channels": custom}
+        else:
+            current = catalog.load(data_dir)
         for channel in current["channels"]:
             if channel_id and channel_id != channel["id"]:
                 continue
@@ -227,7 +236,11 @@ def prepare(client, data_dir, channel_id=None, only_changed=False):
                 publication["indexedAt"] = prior["indexedAt"] if reusable else now
                 # A concurrent editor may have changed membership during indexing.
                 with catalog.catalog_lock(data_dir):
-                    latest = next((c for c in catalog.load(data_dir)["channels"] if c["id"] == channel["id"]), None)
+                    if channel_service.library_active(data_dir):
+                        latest_row = channel_service.get_channel(data_dir, channel["id"])
+                        latest = channel_service.as_legacy_catalog_channel(latest_row) if latest_row else None
+                    else:
+                        latest = next((c for c in catalog.load(data_dir)["channels"] if c["id"] == channel["id"]), None)
                     if latest != channel:
                         outcomes[channel["id"]] = "changed_during_build"
                         continue

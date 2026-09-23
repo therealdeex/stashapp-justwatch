@@ -227,13 +227,23 @@ def resolved_mode(channel: dict, rollout: dict) -> str:
     return MODE if rollout.get("stage", "active") == "active" else "fixed"
 
 
+def network_rows(data_dir: str | Path) -> list[dict]:
+    """The network tier's rows in the compiled shape. After the library
+    migration the authoritative store is the channel library; pre-migration
+    deployments keep reading the compiled artifact."""
+    from justwatch import channel_service
+    if channel_service.library_active(data_dir):
+        return channel_service.network_channels_legacy(data_dir)
+    return networks.load()["channels"]
+
+
 def scheduled_channels(data_dir: str | Path) -> list[dict]:
     """Network rows with publications prepared under the rollout (both stages)."""
     rollout = load_rollout(data_dir)
     if not rollout["enabled"]:
         return []
     return [
-        ch for ch in networks.load()["channels"]
+        ch for ch in network_rows(data_dir)
         if scheduled_mode(ch, rollout) == MODE
     ]
 
@@ -542,6 +552,7 @@ def pick_next(working: dict, index: dict, aired: dict, cursor: int, tz, cfg: dic
     cooldown_ms = cfg["repeatHours"] * HOUR
     window_index = _tod_window(cursor, tz)
     neighbors = working["recent"][-cfg["spacing"]:] if cfg["spacing"] else []
+    most_recent = max(last.values(), default=None)
 
     def key(position_and_id):
         position, sid = position_and_id
@@ -555,7 +566,14 @@ def pick_next(working: dict, index: dict, aired: dict, cursor: int, tz, cfg: dic
             age = cursor - rec
             just_aired = 1 if age < REPEAT_GUARD else 0
             if just_aired:
-                freshness = (2, age)  # most recent last, even past tod/spacing
+                # most recent LAST (S2): within the guard, the one video that
+                # aired MOST recently ranks after every other guard candidate,
+                # so the scene that just ended never replays while an
+                # alternative exists. The rest of the guard tier follows the
+                # CURRENT pass's deck order — not last pass's order and not a
+                # strict-LRU ranking (uniform-length libraries would otherwise
+                # replay one permutation forever or run it backwards).
+                freshness = (2, 1) if rec == most_recent else (2, 0)
             else:
                 # stale: coarse buckets, staler first — bucketed so that the
                 # within-bucket order is the per-pass shuffle, not last pass.
@@ -713,10 +731,16 @@ def build(channel: dict, entries: list[dict], previous: dict | None, now: int, t
                 offset = end
 
     # --- durable state = checkpoint + committed reservations, replayed
-    # through the one transition (exactly-once, both directions) ---
+    # through the one transition (exactly-once, both directions). The replay
+    # starts at the actual-history cursor: airings the checkpoint already
+    # consumed (end <= aired_through) must NOT be applied a second time. ---
+    def _unconsumed(row):
+        return row["endEpochMs"] > aired_through
+
     working = copy.deepcopy(checkpoint)
     for airing in programs[:committed]:
-        apply_airing(working, airing, channel, index, cfg)
+        if _unconsumed(airing):
+            apply_airing(working, airing, channel, index, cfg)
 
     # --- arrival-driven flexible rebuild: when unplaced arrivals wait and a
     # credit is due, regenerate the flexible future so they land inside the
@@ -727,7 +751,8 @@ def build(channel: dict, entries: list[dict], previous: dict | None, now: int, t
             programs = programs[:committed]
             working = copy.deepcopy(checkpoint)
             for airing in programs[:committed]:
-                apply_airing(working, airing, channel, index, cfg)
+                if _unconsumed(airing):
+                    apply_airing(working, airing, channel, index, cfg)
 
     for airing in programs[committed:]:
         apply_airing(working, airing, channel, index, cfg)
@@ -974,8 +999,11 @@ def prepare(client, data_dir, channel_id: str | None = None, now: int | None = N
             else:
                 entries = prior["index"]
                 indexed_at = int(prior.get("indexedAt", now))
+            # Pass the real prior at ANY schema: build()'s migration branch
+            # reconstructs from the client-visible timeline, so a schema-2
+            # file's still-airing program survives instead of being reset.
             publication = build(channel, entries,
-                                prior if isinstance(prior, dict) and prior.get("schema") == SCHEMA else None,
+                                prior if isinstance(prior, dict) else None,
                                 now)
             publication["indexedAt"] = indexed_at
             outcomes[cid] = "indexed_empty" if not publication["programs"] else (
@@ -987,7 +1015,8 @@ def prepare(client, data_dir, channel_id: str | None = None, now: int | None = N
             prior_generation = prior.get("generation") if isinstance(prior, dict) else None
             with catalog_lock_for(data_dir):
                 rollout = try_load_rollout(data_dir)
-                latest = networks.get(cid)
+                latest = next(
+                    (row for row in network_rows(data_dir) if row["id"] == cid), None)
                 if latest is None or scheduled_mode(latest, rollout) != MODE \
                         or source_signature_of(latest) != signature:
                     outcomes[cid] = "deactivated_during_build"
