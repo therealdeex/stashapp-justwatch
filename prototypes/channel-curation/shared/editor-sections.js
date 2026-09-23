@@ -458,7 +458,6 @@ export function createEditorPane({ api, drafts, channelId, onChanged, compact = 
       programmingSection(),
       previewSection(),
     );
-    rules?.setOnChange?.(() => {});
     renderPreview();
     if (focusField) body.querySelector(`#f-${focusField}`)?.focus();
   }
