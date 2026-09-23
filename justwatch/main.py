@@ -294,7 +294,11 @@ def _library_networks_block(ctx, view: dict, schedule_status: dict) -> dict | No
     rows = [channel_service.as_legacy_network_channel(c)
             for c in view["channels"] if c["kind"] == "net"]
     if not rows:
-        return None
+        # An intentionally empty owner tier is AUTHORITATIVE: the block stays
+        # present but empty so an old client never resurrects its generated
+        # channels (an ABSENT block is the pre-networks "keep your fallback"
+        # signal, which a library deployment must never emit).
+        return {"revision": f"lib-{view['revision']}", "channels": []}
     channels = []
     for row in rows:
         if row["id"] in resolved:
@@ -516,8 +520,14 @@ def _save_catalog_via_library(ctx: TaskContext) -> dict:
             })
             continue
         seen_ids.add(ch_id)
+        stored_source = stored_custom[ch_id].get("source") or {}
         source_type = (raw_channel.get("source") or {}).get("type")
-        if source_type not in ("savedFilter", "tag", "performer", "studio"):
+        if source_type not in ("savedFilter", "tag", "performer", "studio") \
+                or (stored_source.get("type") in ("filter", "criteria")
+                    and raw_channel.get("source") != stored_source):
+            # A legacy client cannot author or round-trip composite rules:
+            # its normalizer would truncate them. Refuse the edit loudly; the
+            # stored rules survive untouched.
             unsupported.append({
                 "path": f"channels[{i}].source", "code": "unsupported_edit",
                 "message": "this client cannot represent this channel's rules; "
@@ -555,8 +565,9 @@ def _save_catalog_via_library(ctx: TaskContext) -> dict:
     errors = library._check_ops(doc, ops)
     if errors:
         return {"saved": False, "error": "validation_failed", "errors": errors}
+    rid = str(ctx.args.get("requestId") or "").strip() or f"save-{int(time.time() * 1000)}"
     receipt = library.apply_transaction(
-        ctx.data_dir, expected_revision=expected, request_id=request_id or f"save-{int(time.time()*1000)}",
+        ctx.data_dir, expected_revision=expected, request_id=rid,
         ops=ops, actor="legacy-save-catalog",
     )
     if receipt.get("status") != "committed":
