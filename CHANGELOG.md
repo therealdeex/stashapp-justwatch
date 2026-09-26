@@ -1,5 +1,51 @@
 # Changelog
 
+## Unreleased (Channel Studio UX pass, 2026-09-26)
+
+Quality-and-experience pass over the Studio UI. No protocol, schema or
+draft/apply-semantics changes — every behavior the audits pinned (explicit
+Apply, receipts, free navigation, idempotent retry) is untouched.
+
+- **Ctrl/Cmd+Enter commits the draft** when Apply is enabled (mirrors the
+  button exactly through a per-render freshness ref); silent while any dialog
+  owns Enter. Shortcut advertised as a kbd chip in the dirty bar state and in
+  the Apply button's tooltip. The enabled Apply button also stands out more
+  (larger, accent halo ring).
+- **Tags picker title bug**: the Tags facet config had no `noun`, so the
+  entity picker opened as "Choose undefined" — now "Choose tags".
+- **Search/filter feedback**: the dial shows "Showing N of M" with a
+  "Clear search & filter" link while a search or group filter is active
+  (also in the nothing-matches empty state). Dead `queryLive` state removed.
+- **Bulk**: a "Select all" button selects the filtered set (server-backed
+  channels only — temp drafts can never enter a bulk op), and the toggle
+  reads "Done" instead of "Selecting… done".
+- **Entity picker**: a result count above the list; checked rows get a
+  subtle accent tint instead of text-color-only feedback.
+- **Facet icons**: Tags/Performers/Studios rule rows carry a small FA icon
+  (via Stash's bundled set, with graceful absence fallback), as does the
+  Groups delete action — replacing the 🗑 emoji, which rendered
+  platform-dependently. Staged group deletions now read as such
+  (strikethrough + danger tint).
+- **Toasts**: kind icon (✓ / !), slide-in animation, and the zone moved to
+  the bottom-right so notifications never cover the Apply bar.
+- **Visual polish**: dialogs center vertically and fade/scale in; buttons,
+  rows, chips, swatches and inputs get hover/focus transitions (all disabled
+  under prefers-reduced-motion); inputs take an accent border on focus;
+  pills and status chips are rounded with tinted backgrounds; group headers
+  show a collapse chevron; the action bar sits on a solid background instead
+  of a gradient; entity-chip remove buttons get a real hit area; thin
+  scrollbars on the panes that scroll; tabular numerals in the preview
+  counts. The a11y live region no longer swallows the refresh pill's Retry
+  control.
+- Verification: full before/after screenshot sweep of every surface (main,
+  rules, dirty, applied, away-toast, picker, groups incl. staged delete, new
+  channel, history, bulk, search states, collapsed groups, off-air pill,
+  narrow viewport) via `analysis/studio-ux-pass-2026-09-26/screenshot-sweep.cjs`
+  (mocked GraphQL; also exercises the Apply shortcut and prints the
+  away-apply toast); the async-Apply browser probe, the E1–E9 fix-verify
+  probes and the E6 reproduce probe all stay green; the full Python suite
+  (382) passes.
+
 ## Unreleased (async Apply, 2026-09-26)
 
 Apply was always a durable background transaction server-side; the UI just

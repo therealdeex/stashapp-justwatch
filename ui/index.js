@@ -99,9 +99,16 @@
   const DIAL_ITEM_HEIGHT = 44;
   const PICKER_ITEM_HEIGHT = 34;
 
+  // The one editor power shortcut, advertised next to the Apply button.
+  const APPLY_SHORTCUT = (() => {
+    try { return /mac/i.test(navigator.platform) ? "⌘⏎" : "Ctrl+Enter"; } catch (e) { return "Ctrl+Enter"; }
+  })();
+
   const TERMINAL_STATUSES = new Set([
     "FINISHED", "COMPLETE", "COMPLETED", "FAILED", "CANCELLED", "CANCELED", "REMOVED", "ABORTED",
   ]);
+
+  const TOAST_ICONS = { ok: "✓", err: "!" };
 
   // ------------------------------------------------------------------
   // Browser diagnostics: a bounded, structured event buffer.
@@ -413,6 +420,23 @@
 
   function isComponent(x) {
     return !!x && (typeof x === "function" || typeof x === "object" && !!x.$$typeof);
+  }
+
+  // UI-chrome icons (NOT channel glyphs): render Stash's bundled FA when both
+  // the key and the Icon component exist, else `fallback` (default nothing) —
+  // every use site must stay complete without an icon.
+  function FaIcon({ name, size, className, fallback }) {
+    const IconCmp = api.components && api.components.Icon;
+    const FAS = (api.libraries && api.libraries.FontAwesomeSolid) || {};
+    const def = FAS[name];
+    if (!def || !isComponent(IconCmp)) {
+      return fallback ? h("span", { className: className || "" }, fallback) : null;
+    }
+    return h(IconCmp, {
+      icon: def,
+      className: "jw-fa " + (className || ""),
+      style: { fontSize: (size || 13) + "px" },
+    });
   }
 
   function Glyph({ codepoint, size, color, className }) {
@@ -1091,7 +1115,11 @@
         key: t.id,
         className: "jw-toast" + (t.kind ? " jw-toast-" + t.kind : ""),
         onClick: () => onDismiss(t.id),
-      }, t.message)),
+      },
+        TOAST_ICONS[t.kind]
+          ? h("span", { className: "jw-toast-icon", "aria-hidden": "true" }, TOAST_ICONS[t.kind])
+          : null,
+        h("span", null, t.message))),
     );
   }
 
@@ -1166,11 +1194,13 @@
       error ? h("p", { className: "jw-error-text", role: "alert" }, error) : null,
       rows == null
         ? h("p", { className: "jw-hint" }, "Searching…")
-        : h(WindowedList, {
-            items: rows, itemHeight: PICKER_ITEM_HEIGHT, render: rowRender,
-            resetKey: query + ":" + kind, ariaLabel: "Search results",
-            className: "jw-pick-list",
-          }),
+        : h("div", null,
+            h("p", { className: "jw-pick-meta" }, rows.length.toLocaleString() + (rows.length === 1 ? " result" : " results")),
+            h(WindowedList, {
+              items: rows, itemHeight: PICKER_ITEM_HEIGHT, render: rowRender,
+              resetKey: query + ":" + kind, ariaLabel: "Search results",
+              className: "jw-pick-list",
+            })),
       h("div", { className: "jw-picked-pane" },
         h("div", { className: "jw-picked-head" },
           h("span", null, pickedList.length.toLocaleString() + " selected"),
@@ -1348,9 +1378,9 @@
           h("button", {
             className: "jw-btn jw-btn-ghost jw-btn-small", "aria-label": "Delete group " + g.name,
             disabled: busy || rows.length - Object.keys(deletes).length <= 1,
-            title: rows.length - Object.keys(deletes).length <= 1 ? "Cannot remove the last group." : null,
+            title: rows.length - Object.keys(deletes).length <= 1 ? "Cannot remove the last group." : "Delete group",
             onClick: () => stageDelete(g.id),
-          }, "🗑"),
+          }, h(FaIcon, { name: "faTrashAlt", size: 13, fallback: "Delete" })),
         )),
         Object.entries(deletes).map(([gid, moveTo]) => {
           const g = rows.find((x) => x.id === gid);
@@ -1358,7 +1388,7 @@
           const members = memberCount(gid);
           const others = rows.filter((x) => x.id !== gid && !deletes[x.id]);
           return h("div", { key: "del-" + gid, className: "jw-groups-row jw-groups-row-deleting", role: "listitem" },
-            h("span", { className: "jw-groups-pos" }, "🗑"),
+            h("span", { className: "jw-groups-pos" }, "—"),
             h("span", { className: "jw-groups-name" }, g.name),
             members
               ? h("select", {
@@ -1610,6 +1640,7 @@
     const storedRef = useRef(null);
     const phaseRef = useRef("clean");
     const inFlightRef = useRef(false);
+    const applyEnabledRef = useRef(false); // fresh every render — the Apply chord reads this
     const pendingRef = useRef(null);   // {requestId, snapshot, expected} — kept on transport failure
     const previewSeqRef = useRef(0);
     const aliveRef = useRef(true);
@@ -1629,6 +1660,23 @@
         aliveRef.current = false;
         if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
       };
+    }, []);
+
+    // Ctrl/Cmd+Enter commits the draft when Apply is enabled; the ref is
+    // refreshed on every render so the chord always sees current validity.
+    // While any dialog overlay is open the chord stays silent — Enter belongs
+    // to the dialog.
+    useEffect(() => {
+      const onKey = (e) => {
+        if (e.key !== "Enter" || (!e.ctrlKey && !e.metaKey)) return;
+        if (!applyEnabledRef.current) return;
+        if (typeof document.querySelector === "function" && document.querySelector(".jw-overlay")) return;
+        e.preventDefault();
+        void doApply();
+      };
+      document.addEventListener("keydown", onKey);
+      return () => document.removeEventListener("keydown", onKey);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     // (navigation is free — no phase reporting to the app; an in-flight
@@ -2350,7 +2398,8 @@
     }
 
     if (!draft) {
-      return h("div", { className: "jw-editor" }, h("div", { className: "jw-loading" }, "Loading definition…"));
+      return h("div", { className: "jw-editor" },
+        h("div", { className: "jw-loading", role: "status" }, "Loading definition…"));
     }
 
     const groups = (lib.groups || []).slice().sort((a, b) => a.position - b.position);
@@ -2464,9 +2513,9 @@
 
     const facetRow = (facet) => {
       const cfg = {
-        tags: { kind: "tag", allKey: "tags", anyKey: "tagsAny", exclKey: "excludeTags", note: "Sub-tags always count (hierarchy included). ALL = a scene must carry every tag; ANY = at least one." },
-        performers: { kind: "performer", allKey: "performers", anyKey: "performersAny", exclKey: "excludePerformers", sceneKey: "performerSceneCount", noun: "performers" },
-        studios: { kind: "studio", allKey: "studios", anyKey: "studiosAny", exclKey: "excludeStudios", sceneKey: "studioSceneCount", noun: "studios", note: "Sub-studios count (hierarchy included)." },
+        tags: { kind: "tag", allKey: "tags", anyKey: "tagsAny", exclKey: "excludeTags", noun: "tags", icon: "faTags", note: "Sub-tags always count (hierarchy included). ALL = a scene must carry every tag; ANY = at least one." },
+        performers: { kind: "performer", allKey: "performers", anyKey: "performersAny", exclKey: "excludePerformers", sceneKey: "performerSceneCount", noun: "performers", icon: "faUser" },
+        studios: { kind: "studio", allKey: "studios", anyKey: "studiosAny", exclKey: "excludeStudios", sceneKey: "studioSceneCount", noun: "studios", icon: "faBuilding", note: "Sub-studios count (hierarchy included)." },
       }[facet];
       const src = draft.source;
       const all = idsOf(src[cfg.allKey]);
@@ -2526,7 +2575,9 @@
 
       return h("div", { key: facet, className: "jw-rule-row" + (facetErr ? " jw-rule-row-invalid" : "") },
         h("div", { className: "jw-rule-head" },
-          h("span", { className: "jw-rule-name" }, facet.charAt(0).toUpperCase() + facet.slice(1)),
+          h("span", { className: "jw-rule-name" },
+            h(FaIcon, { name: cfg.icon, size: 13, className: "jw-facet-icon" }),
+            facet.charAt(0).toUpperCase() + facet.slice(1)),
           h("span", { className: "jw-logic", role: "group", "aria-label": facet + " match logic" },
             h("button", {
               "aria-pressed": pressedAll ? "true" : "false",
@@ -2860,6 +2911,9 @@
     // ---------- action bar ----------
 
     const dirty = isDirty();
+    const applyEnabled = dirty && invalid.length === 0 && phase !== "applying"
+      && phase !== "validating" && !inFlightRef.current;
+    applyEnabledRef.current = applyEnabled;
     const barState = (() => {
       if (phase === "applying") {
         return h("span", { className: "jw-apply-state" },
@@ -2886,7 +2940,11 @@
         return h("span", { className: "jw-apply-state jw-apply-state-ok" }, "Applied at r" + lastAppliedRev + ".");
       }
       if (invalid.length) return h("span", { className: "jw-apply-state jw-apply-state-err" }, invalid[0].message);
-      if (dirty) return h("span", { className: "jw-apply-state" }, "Unsaved draft — Apply to commit.");
+      if (dirty) {
+        return h("span", { className: "jw-apply-state" },
+          "Unsaved draft — Apply to commit.",
+          h("kbd", { className: "jw-kbd", title: "Commit this draft" }, APPLY_SHORTCUT));
+      }
       return h("span", { className: "jw-apply-state" }, "All changes applied.");
     })();
 
@@ -2945,8 +3003,8 @@
           preflightNote ? h("span", {
             className: "jw-apply-state",
             title: preflightNote,
-          }, "Pre-check unavailable — Apply validates on commit.") : null,
-          refreshPill),
+          }, "Pre-check unavailable — Apply validates on commit.") : null),
+        refreshPill,
         applyError ? h("button", {
           className: "jw-link", onClick: copyErrorDetails, title: "Copy a redacted, correlated event bundle for reporting",
         }, "Copy error details") : null,
@@ -2954,7 +3012,8 @@
         h("button", { className: "jw-btn", onClick: discardDraft, disabled: !dirty && !isTemp || phase === "applying" }, "Discard"),
         h("button", {
           className: "jw-btn jw-btn-primary", id: "apply-btn",
-          disabled: !dirty || invalid.length > 0 || phase === "applying" || phase === "validating",
+          disabled: !applyEnabled,
+          title: "Commit this draft to the library" + (applyEnabled ? " (" + APPLY_SHORTCUT + ")" : ""),
           onClick: () => void doApply(),
         }, phase === "applying" ? "Applying…" : phase === "validating" ? "Validating…" : "Apply"),
       ),
@@ -3098,7 +3157,6 @@
     const [bootError, setBootError] = useState(null);
     const [selectedId, setSelectedId] = useState(null);
     const [query, setQuery] = useState("");
-    const [queryLive, setQueryLive] = useState("");
     const [groupFilter, setGroupFilter] = useState("");
     const [collapsed, setCollapsed] = useState(() => new Set());
     const [bulkMode, setBulkMode] = useState(false);
@@ -3285,6 +3343,13 @@
 
     // ---- dial data ----
     const applyQuery = useMemo(() => debounce((v) => setQuery(v), 140), []);
+    const filtering = !!(query.trim() || groupFilter);
+    const clearFilters = useCallback(() => {
+      if (searchInputRef.current) searchInputRef.current.value = "";
+      applyQuery.cancel();
+      setQuery("");
+      setGroupFilter("");
+    }, [applyQuery]);
     const groupsSorted = lib ? (lib.groups || []).slice().sort((a, b) => a.position - b.position) : [];
     const groupsById = useMemo(() => new Map(groupsSorted.map((g) => [g.id, g])), [lib]);
 
@@ -3574,7 +3639,7 @@
           className: "jw-btn" + (bulkMode ? " jw-btn-primary" : ""),
           "aria-pressed": bulkMode ? "true" : "false",
           onClick: () => { setBulkMode((v) => !v); setBulkSelected(new Set()); },
-        }, bulkMode ? "Selecting… done" : "Select…"),
+        }, bulkMode ? "Done" : "Select…"),
         h("button", { className: "jw-btn", onClick: exportCsv }, "Export CSV"),
         h("button", {
           className: "jw-btn", onClick: downloadDiagnostics,
@@ -3587,6 +3652,11 @@
       ),
       bulkMode ? h("div", { className: "jw-bulk-bar", role: "toolbar", "aria-label": "Bulk actions" },
         h("strong", null, bulkSelected.size + " selected"),
+        h("button", {
+          className: "jw-btn jw-btn-small", disabled: !allRows.length,
+          title: "Select every channel in the current search/filter",
+          onClick: () => setBulkSelected(new Set(allRows.filter((c) => !c.temp).map((c) => c.id))),
+        }, "Select all"),
         h("button", { className: "jw-btn jw-btn-small", disabled: !bulkSelected.size, onClick: () => void moveDialog() }, "Move to group…"),
         h("button", {
           className: "jw-btn jw-btn-small", disabled: !bulkSelected.size,
@@ -3610,11 +3680,22 @@
         h("section", { className: "jw-dial", "aria-label": "Channel dial" },
           h("div", { className: "jw-dial-tools" },
             h("button", { className: "jw-btn jw-btn-primary jw-new-channel", onClick: () => setDialog("new") }, "+ New channel…"),
+            filtering
+              ? h("div", { className: "jw-dial-count" },
+                  "Showing " + allRows.length + " of " + ((lib.channels || []).length + tempChannels.length),
+                  h("button", { className: "jw-link jw-dial-clear", onClick: clearFilters }, "Clear search & filter"))
+              : null,
           ),
           dialItems.length === 0
             ? h("div", { className: "jw-empty" },
                 h("div", { className: "jw-empty-title" }, "Nothing matches"),
-                h("div", { className: "jw-empty-sub" }, "Adjust the search, or create a channel."))
+                h("div", { className: "jw-empty-sub" }, "Adjust the search, or create a channel."),
+                filtering
+                  ? h("button", {
+                      className: "jw-btn jw-btn-small", style: { marginTop: "10px" },
+                      onClick: clearFilters,
+                    }, "Clear search & filter")
+                  : null)
             : dialList,
         ),
         editor || h("div", { className: "jw-editor jw-editor-empty" },
