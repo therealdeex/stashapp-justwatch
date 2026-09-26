@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased (async Apply, 2026-09-26)
+
+Apply was always a durable background transaction server-side; the UI just
+didn't act like it. Navigation and Reload are now free while an apply is in
+flight — the protocol guarantees (immutable snapshot, durable receipt,
+idempotent requestId replay) already made leaving safe.
+
+- **Free navigation during Apply**: the confirm dialog on channel switch and
+  the hard Reload block are gone. Switching channels never interrupts an
+  apply — the receipt poll outlives the editor through the module-level
+  in-flight registry plus the durable pending draft (sessionStorage), and a
+  remounted editor resumes polling the same receipt.
+- **Applying pill**: a top-bar pill ("Applying “Name”…") fed by an in-flight
+  pub/sub shows which channel is committing, from any channel; it clears only
+  when the receipt (or a resolved failure) lands.
+- **Named, deduped settlement feedback**: completion/failure toasts name the
+  channel, and they fire even when the receipt lands after the user navigated
+  away. A receipt observed by two finalize paths (stale closure + remount
+  re-attach) toasts exactly once (dedup per requestId); UI state updates still
+  run in both. A user who stays on the channel keeps the bar-state feedback
+  (no duplicate toast).
+- **Creation no longer yanks selection**: a temp channel whose receipt lands
+  while the user edits elsewhere no longer force-switches the editor to the
+  new id; it follows only if the user is still on the temp channel.
+- Verification: `analysis/async-apply-ui-2026-09-26/browser-async-apply.cjs`
+  drives the real bundle with a gated mock task — free navigation (no dialog,
+  pill persists, named background toast, pill clears), Reload mid-apply, and
+  remount dedup (exactly one toast) all assert; prior E1–E9 browser probes and
+  the full Python suite (382) stay green.
+
 ## Unreleased (channel-edit follow-up, 2026-09-25)
 
 Channel Studio honesty pass from the 2026-09-24 channel-edit audit — the

@@ -1,0 +1,26 @@
+{
+  "free_navigation": {
+    "barApplying": 1,
+    "pillApplying": 1,
+    "dialogs": 0,
+    "ch2Name": "Channel 2",
+    "pillWhileAway": 1,
+    "landedToast": 1,
+    "pillAfter": 0,
+    "committedName": "Renamed One",
+    "errors": []
+  },
+  "reload_mid_apply": {
+    "libsBefore": 1,
+    "libsAfter": 2,
+    "blockedToast": 0,
+    "landedBar": 1,
+    "committed": true,
+    "errors": []
+  },
+  "remount_dedup": {
+    "appliedToasts": 1,
+    "errors": []
+  },
+  "failures": []
+}

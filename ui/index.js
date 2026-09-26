@@ -912,10 +912,38 @@
   // ------------------------------------------------------------------
   // In-flight applies: a channel's apply survives the editor being navigated
   // away (poll continues; the receipt lands; drafts/library update).
-  // channelId -> { requestId, snapshot, expected, promise }
+  // channelId -> { requestId, snapshot, expected, promise, name }
+  //
+  // Free navigation is the design (async Apply): the app subscribes via
+  // onInflightChange to show a top-bar pill, and the receipt resolves in a
+  // stale editor closure just as well as in a mounted one. A receipt can be
+  // observed by TWO finalize calls (the stale closure and a remount that
+  // re-attached to the same promise), so settlement toasts are deduped per
+  // requestId through settledApplies — UI state updates still run twice.
   // ------------------------------------------------------------------
 
   const inflightApplies = new Map();
+  const inflightListeners = new Set();
+  const settledApplies = new Map(); // requestId -> settled-at ms (bounded)
+
+  function inflightNotify() {
+    for (const cb of inflightListeners) cb(inflightSnapshot());
+  }
+  function onInflightChange(cb) {
+    inflightListeners.add(cb);
+    return () => inflightListeners.delete(cb);
+  }
+  function inflightSnapshot() {
+    return [...inflightApplies.entries()].map(([channelId, v]) => ({ channelId, name: v.name || channelId }));
+  }
+  function markSettled(requestId) {
+    const dup = settledApplies.has(requestId);
+    if (!dup) {
+      settledApplies.set(requestId, Date.now());
+      if (settledApplies.size > 200) settledApplies.delete(settledApplies.keys().next().value);
+    }
+    return dup;
+  }
 
   // ------------------------------------------------------------------
   // Small shared UI
@@ -1550,7 +1578,7 @@
 
   function EditorPane({
     channelId, lib, getRevision, drafts, confirm, toast,
-    submitOps, onApplied, onCreated, reportPhase, libraryVersion,
+    submitOps, onApplied, onCreated, libraryVersion,
   }) {
     const isTemp = String(channelId).startsWith("temp-");
 
@@ -1603,10 +1631,8 @@
       };
     }, []);
 
-    // Phase reporting (the app guards channel switches + Reload while applying)
-    useEffect(() => {
-      reportPhase({ phase, dirty: isDirty() });
-    });
+    // (navigation is free — no phase reporting to the app; an in-flight
+    // apply continues in the background and announces itself via toasts)
 
     // Local mirror of the rules text-search input. The DRAFT is written
     // synchronously on every keystroke — only the preview stays debounced —
@@ -1730,7 +1756,9 @@
           inFlightRef.current = true;
           pendingRef.current = { requestId: infl.requestId, snapshot: infl.snapshot, expected: infl.expected };
           setPhase("applying");
-          infl.promise.then((receipt) => { finalize(receipt, infl.snapshot, true); }).catch(() => {});
+          infl.promise.then((receipt) => {
+            finalize(receipt, infl.snapshot, true, { name: infl.name, requestId: infl.requestId });
+          }).catch(() => {});
         }
         void loadPreview();
         resolveNamesFor(working && working.source);
@@ -2051,6 +2079,7 @@
       // preview showed, what Validate checked, and what the idempotent retry
       // replays — one immutable form (audit E1/E6).
       const snapshot = toWireChannel(clone(draftRef.current));
+      const applyName = (String((draftRef.current && draftRef.current.name) || "").trim() || channelId).slice(0, 48);
       const ops = buildOps(snapshot);
       const expected = expectedOverride != null ? expectedOverride : getRevision();
       // Pre-flight against the live document: precise typed errors before the
@@ -2089,7 +2118,8 @@
       inFlightRef.current = true;
 
       const promise = applyChannelChanges(requestId, expected, ops);
-      inflightApplies.set(channelId, { requestId, snapshot, expected, promise });
+      inflightApplies.set(channelId, { requestId, snapshot, expected, promise, name: applyName });
+      inflightNotify();
       let receipt;
       try {
         receipt = await promise;
@@ -2098,19 +2128,26 @@
         // unchanged draft replays or lands the same transaction.
         inFlightRef.current = false;
         inflightApplies.delete(channelId);
+        inflightNotify();
         if (!aliveRef.current) return;
         setPhase("dirty");
         setApplyError({ kind: "transport", message: "Submit failed (" + String((e && e.message) || e) + ")." });
         toast("Apply failed to reach the server — draft kept. Apply again to retry the same request.", "err");
         return;
       }
-      finalize(receipt, snapshot, false);
+      finalize(receipt, snapshot, false, { name: applyName, requestId });
     }
 
-    async function finalize(receipt, snapshot, resumed) {
+    async function finalize(receipt, snapshot, resumed, meta) {
       inFlightRef.current = false;
       inflightApplies.delete(channelId);
+      inflightNotify();
       if (!receipt) return;
+      const name = (meta && meta.name) || channelId;
+      // Two observers can share one receipt (a stale closure plus a remount
+      // that re-attached to the same promise): only the first may toast.
+      const dup = markSettled((meta && meta.requestId) || channelId + ":" + String(receipt.status));
+      const away = !aliveRef.current; // user navigated elsewhere: toast, don't just set bar state
       const transportLike = receipt.status === "unknown";
 
       if (receipt.status === "committed") {
@@ -2145,6 +2182,10 @@
                      { base: freshStored ? clone(freshStored) : null, pending: null });
         }
         onApplied(receipt, { channelId, isTemp, untouched, idMap: receipt.idMap });
+        if (!aliveRef.current && !dup) {
+          toast("Applied “" + name + "” at r" + receipt.revision + ".", "ok");
+          return;
+        }
         if (!aliveRef.current) return; // registry side effects already done
         setStored(freshStored);
         setSummary(freshSummary);
@@ -2165,32 +2206,37 @@
           setDraft(currentDraft);
           setPhase("dirty");
           phaseRef.current = "dirty";
-          toast("Applied your earlier snapshot — newer edits are still draft.", "");
+          if (!dup) toast("Applied your earlier snapshot — newer edits are still draft.", "");
         }
-        if (resumed) toast("Applied at r" + receipt.revision + " (recovered receipt).", "ok");
+        if (resumed && !dup) toast("Applied “" + name + "” at r" + receipt.revision + " (recovered receipt).", "ok");
       } else if (receipt.error === "revision_conflict") {
         if (!transportLike) { pendingRef.current = null; drafts.setExtras(channelId, { pending: null }); }
         setPhase("dirty");
         setApplyError({ kind: "conflict", currentRevision: receipt.currentRevision, message: receipt.message });
         diagEvent("apply_commit", { channelId, outcome: "revision_conflict" });
+        if (away && !dup) toast("Apply for “" + name + "” hit a revision conflict — the library moved to r"
+          + receipt.currentRevision + ". Your draft is intact.", "err");
       } else if (receipt.error === "validation_failed") {
         if (!transportLike) { pendingRef.current = null; drafts.setExtras(channelId, { pending: null }); }
         setPhase("dirty");
         setApplyError({ kind: "validation", errors: receipt.errors || [], message: receipt.message });
         diagEvent("apply_commit", { channelId, outcome: "validation_failed" });
+        if (away && !dup) toast("Apply for “" + name + "” was rejected by server validation — your draft is intact.", "err");
       } else if (transportLike) {
         // unresolved: KEEP the pending requestId — a retry of the unchanged
         // draft is the idempotent path the server documents.
         setPhase("dirty");
         setApplyError({ kind: "transport", message: receipt.message || "the server never reported a result" });
         diagEvent("apply_commit", { channelId, outcome: "unknown" });
-        toast("No receipt yet — draft kept. Apply again to reuse the same requestId.", "err");
+        if (!dup) toast("No receipt yet for “" + name + "” — draft kept. Apply again to reuse the same requestId.", "err");
       } else {
         pendingRef.current = null;
         drafts.setExtras(channelId, { pending: null });
         setPhase("dirty");
         setApplyError({ kind: "rejected", message: receipt.message || receipt.error || "rejected" });
         diagEvent("apply_commit", { channelId, outcome: "rejected" });
+        if (away && !dup) toast("Apply for “" + name + "” was rejected: "
+          + (receipt.message || receipt.error || "rejected") + " — your draft is intact.", "err");
       }
     }
 
@@ -2816,7 +2862,8 @@
     const dirty = isDirty();
     const barState = (() => {
       if (phase === "applying") {
-        return h("span", { className: "jw-apply-state" }, "Applying… (edits you type now stay draft)");
+        return h("span", { className: "jw-apply-state" },
+          "Applying… — you can keep editing or switch channels; we’ll report when it lands.");
       }
       if (phase === "validating") return h("span", { className: "jw-apply-state" }, "Validating…");
       if (applyError && applyError.kind === "conflict") {
@@ -3059,6 +3106,9 @@
     const [dialog, setDialog] = useState(null); // "groups" | "new"
     const [confirmSpec, setConfirmSpec] = useState(null);
     const [toasts, setToasts] = useState([]);
+    const [inflights, setInflights] = useState([]); // [{channelId, name}] — background applies
+
+    useEffect(() => onInflightChange((snap) => setInflights(snap)), []);
     const [draftCount, setDraftCount] = useState(0);
     const [editorKeyBump, setEditorKeyBump] = useState(0);
     const [reloadTick, setReloadTick] = useState(0);
@@ -3066,11 +3116,12 @@
 
     const draftsRef = useRef(null);
     const libRef = useRef(null);
+    const selectedIdRef = useRef(null);
     const searchInputRef = useRef(null);
-    const editorPhaseRef = useRef({ phase: "clean", dirty: false });
     const toastSeq = useRef(0);
 
     libRef.current = lib;
+    selectedIdRef.current = selectedId;
 
     const toast = useCallback((message, kind) => {
       const id = ++toastSeq.current;
@@ -3207,8 +3258,11 @@
       if (info && info.isTemp && receipt.idMap && receipt.idMap[info.channelId]) {
         const finalId = receipt.idMap[info.channelId];
         draftsRef.current.drop(info.channelId);
-        setSelectedId(finalId);
-        toast("Channel created as " + finalId + " at r" + receipt.revision + ".", "ok");
+        // Follow the new id only if the user is still on the temp channel —
+        // async Apply means the receipt can land while they edit elsewhere.
+        const stillThere = selectedIdRef.current === info.channelId;
+        setSelectedId((cur) => (cur === info.channelId ? finalId : cur));
+        if (stillThere) toast("Channel created as " + finalId + " at r" + receipt.revision + ".", "ok");
       }
     }, [refreshLibrary, toast]);
 
@@ -3221,21 +3275,13 @@
       }
     }, []);
 
-    const reportPhase = useCallback((state) => { editorPhaseRef.current = state; }, []);
-
-    const selectChannel = useCallback(async (id) => {
+    const selectChannel = useCallback((id) => {
       if (id === selectedId) return;
-      const ep = editorPhaseRef.current;
-      if (ep.phase === "applying" || ep.phase === "validating") {
-        const ok = await confirm({
-          title: "An apply is in flight",
-          message: "The current channel is being applied. Leaving now is safe — the receipt is polled in the background and your draft survives either way.",
-          confirmLabel: "Leave now",
-        });
-        if (!ok) return;
-      }
+      // Navigation during an apply is free: the receipt poll outlives the
+      // editor (module-level registry + durable pending draft), so switching
+      // channels never interrupts an Apply — a top-bar pill keeps it visible.
       setSelectedId(id);
-    }, [selectedId, confirm]);
+    }, [selectedId]);
 
     // ---- dial data ----
     const applyQuery = useMemo(() => debounce((v) => setQuery(v), 140), []);
@@ -3420,15 +3466,20 @@
           draftCount + " unsaved draft" + (draftCount === 1 ? "" : "s"))
       : h("span", { className: "jw-pill jw-pill-clean" }, "no drafts");
 
+    const applyingPill = inflights.length
+      ? h("span", {
+          className: "jw-pill jw-pill-applying", role: "status",
+          title: "Applies run in the background — their receipts land even if you switch channels or reload",
+        }, "Applying " + inflights.map((i) => "“" + i.name + "”").join(", ") + "…")
+      : null;
+
     const reload = async () => {
-      const ep = editorPhaseRef.current;
-      if (ep.phase === "applying" || ep.phase === "validating") {
-        toast("An apply is in flight — Reload is disabled until its receipt lands.", "err");
-        return;
-      }
+      // Safe even mid-apply: an in-flight receipt is durable server-side and
+      // the pending requestId is re-polled when the editor remounts.
       const data = await refreshLibrary();
       if (!data) return;
-      if (editorPhaseRef.current.dirty) {
+      const keptDraft = selectedId && draftsRef.current ? !!draftsRef.current.get(selectedId) : false;
+      if (keptDraft) {
         toast("Library reloaded (r" + data.revision + "). Your draft was kept.", "");
       } else {
         setEditorKeyBump((x) => x + 1); // remount a clean editor on fresh data
@@ -3494,7 +3545,6 @@
           submitOps,
           onApplied: handleApplied,
           onCreated: handleCreated,
-          reportPhase,
           libraryVersion,
         })
       : null;
@@ -3533,6 +3583,7 @@
         h("button", { className: "jw-btn", onClick: () => void reload(), title: "Refetch the library and revision" }, "Reload"),
         h("span", { className: "jw-revision-chip" }, "r" + lib.revision),
         dirtyPill,
+        applyingPill,
       ),
       bulkMode ? h("div", { className: "jw-bulk-bar", role: "toolbar", "aria-label": "Bulk actions" },
         h("strong", null, bulkSelected.size + " selected"),
