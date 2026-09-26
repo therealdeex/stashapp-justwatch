@@ -1,0 +1,28 @@
+# Implementation handoff prompt
+
+Copy the following prompt into the implementation session:
+
+---
+
+Implement the fixes in `docs/CHANNEL-EDIT-AUDIT-2026-09-24.md` in `/home/shahram/dev/stash-justwatch`. Read this repo's AGENTS.md and the audit before editing. The audit baseline is `6726bc2`; inspect current git state and preserve later/user changes. This is an implementation task: deliver fixes, focused regressions, logging, docs, and verified results. Do not stop at another plan. Do not deploy production or change live owner definitions/rollout/migration data.
+
+The owner saw an error changing the **Movies** channel from 60 to 80 minutes (the error text is not recalled) and explicitly requested logging in this follow-up. The exact incident is not proven: a clean 3600→4800 minimum-duration update works in isolated Python transactions, the production browser bundle with mocked GraphQL, and real dev validation/preview. Do not invent a duration cap or claim the incident is solved solely by that happy path. A related reproduced failure is removing a final tag or toggling ANY/ALL: the browser submits empty arrays that Python rejects. The dev library has no Movies name match; the read-only 80-minute probe used Feature Length (60+ Min), net_4a1078b4, so it is not proof about Movies. Preserve and examine any additional error details supplied by the owner.
+
+Use `analysis/channel-edit-audit-2026-09-24/` as evidence. Its browser harness mocks success and records actual production-bundle payloads; its Python probe tests those payloads and fault cases against temporary storage. Turn these into assertions of the intended behavior, and add a browser-to-real-Python bridge so validation mismatches cannot hide behind mocks.
+
+Complete the audit's four phases, covering all E1–E9:
+
+1. Add structured correlated diagnostics first, and fix the date-dependent test with a deterministic UTC clock. Add persistent, bounded, process-safe JSONL logging under the private data directory plus stderr, request/error/run/channel/revision correlation, and browser diagnostic export. Log caught validation/preview/transport/health/programming errors, not only outer exceptions. Redact secrets, names, search text, media paths and bodies, including values embedded in errors/tracebacks. Never pollute stdout or let logging failures break Apply.
+2. Fix draft-to-wire rule serialization, empty arrays, explicit-zero duration semantics, numeric validation, and immediate text Apply. Preview, Validate and Apply must describe the same authored rules. Keep meaningful invalid values available for typed errors rather than silently normalizing them away. Debounce network work rather than draft truth. Preserve immutable submitted snapshots and byte-identical retries, including reload recovery.
+3. Make authoritative Apply enforce changed-reference/dynamic support checks (including exclusions), with bounded remote validation outside the writer lock and revision recheck inside. Preserve metadata-only edits of unchanged broken sources. Check existing receipts before external work so a committed/rejected request replays even when Stash is down. Validate shapes/id existence/final candidate before the refresh intent hook, and persist deterministic typed rejection receipts without mutation. Keep actual corrupt stores fail-closed. Storage failure cannot be mislabeled as a known rejected or committed transaction.
+4. Fix incremental refresh: unavailable health stays retryable with last-known counts; health-current must not suppress outstanding programming work; identity/commit guards cover source/order/seed/epoch/policy/state as relevant to each stage. Preserve journal generation acknowledgements and sibling merges. Use the locked original document in the pre-commit comparison. Empty valid rule pools are off air, not missing sources. Surface corrupt journals and persist refresh stage errors/readiness separately from immutable commit receipts. Replace the timer-only UI message with honest pending/failed/ready state and an actionable error id.
+
+Follow the audit's acceptance matrix and detailed logging design. Add tests for normal duration min/max 60→80, ANY/ALL and last-row removal, explicit zero/blank/decimal/overflow bounds, missing positives/exclusions and unknown payload shapes, replay while Stash is down, transient errors before/after commit, current health with failed programming, sort/pause/source changes during workers, newer enqueue survival, concurrent log rotation, redaction and log-storage failure. Preserve no-write-before-Apply and edits made after submission.
+
+Use contract-v1-compatible additions and existing schema where possible; do not change stdout envelope types, task/sync split, owner ids/seeds/provenance, source exceptions, or continuing activation policy. Explain any necessary storage compatibility treatment. Do not broadly swallow exceptions to make tests green.
+
+Run focused checks as each phase lands, then the full Python suite and real-bundle browser integration checks. The audit baseline is 360 passing / 1 failing test; the sole baseline failure is `test_recency_is_utc_and_moves_with_the_calendar`, comparing a fixed September 23 date to the live clock on September 24. A passing suite alone does not prove the user incident fixed.
+
+Deliver a concise implementation report stating each E1–E9 outcome, tests and limitations, the exact status of the original duration incident, new log location/retention, how to copy browser error details and correlate them on the server, and how pending refresh failures recover. Keep production deployment separate.
+
+---

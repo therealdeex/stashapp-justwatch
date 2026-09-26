@@ -1,0 +1,21 @@
+{
+  "validation": {
+    "valid": true,
+    "errors": [],
+    "effects": [
+      {
+        "op": "channel.put",
+        "channelId": "net_4a1078b4",
+        "kind": "membership",
+        "reindex": true
+      }
+    ],
+    "revision": 16
+  },
+  "preview": {
+    "status": "ok",
+    "poolCount": 0,
+    "rotationSize": 0,
+    "rotationComplete": true
+  }
+}

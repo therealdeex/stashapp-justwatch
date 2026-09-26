@@ -1,0 +1,361 @@
+{
+  "duration": {
+    "validation": {
+      "valid": true,
+      "errors": [],
+      "effects": [
+        {
+          "op": "channel.put",
+          "channelId": "ch_11111111",
+          "kind": "membership",
+          "reindex": true
+        }
+      ],
+      "revision": 1
+    },
+    "apply": {
+      "requestId": "duration",
+      "status": "committed",
+      "revision": 2,
+      "digest": "9a866e036431b080",
+      "appliedAt": "2026-09-24T17:43:21Z",
+      "actor": "channel-studio",
+      "touched": 1,
+      "refresh": {
+        "ch_11111111": "refreshed"
+      },
+      "note": "Committed. Background programming refresh is pending where membership changed."
+    },
+    "durableReceipt": {
+      "requestId": "duration",
+      "status": "committed",
+      "revision": 2,
+      "digest": "9a866e036431b080",
+      "appliedAt": "2026-09-24T17:43:21Z",
+      "actor": "channel-studio",
+      "touched": 1
+    }
+  },
+  "empty_facets": {
+    "validation": {
+      "valid": false,
+      "errors": [
+        {
+          "path": "ops[0].channel.source.tags",
+          "code": "bad_source_ids",
+          "message": "tags must be a list of numeric ids"
+        },
+        {
+          "path": "ops[0].channel.source.tagsAny",
+          "code": "bad_source_ids",
+          "message": "tagsAny must be a list of numeric ids"
+        }
+      ],
+      "effects": [
+        {
+          "op": "channel.put",
+          "channelId": "ch_11111111",
+          "kind": "membership",
+          "reindex": true
+        }
+      ],
+      "revision": 1
+    },
+    "apply": {
+      "requestId": "empty_facets",
+      "status": "rejected",
+      "error": "validation_failed",
+      "errors": [
+        {
+          "path": "ops[0].channel.source.tags",
+          "code": "bad_source_ids",
+          "message": "tags must be a list of numeric ids"
+        },
+        {
+          "path": "ops[0].channel.source.tagsAny",
+          "code": "bad_source_ids",
+          "message": "tagsAny must be a list of numeric ids"
+        }
+      ],
+      "digest": "fdb1aadbfa538dc3",
+      "revision": 1
+    },
+    "durableReceipt": {
+      "requestId": "empty_facets",
+      "status": "rejected",
+      "error": "validation_failed",
+      "errors": [
+        {
+          "path": "ops[0].channel.source.tags",
+          "code": "bad_source_ids",
+          "message": "tags must be a list of numeric ids"
+        },
+        {
+          "path": "ops[0].channel.source.tagsAny",
+          "code": "bad_source_ids",
+          "message": "tagsAny must be a list of numeric ids"
+        }
+      ],
+      "digest": "fdb1aadbfa538dc3",
+      "revision": 1
+    }
+  },
+  "missing_id": {
+    "validation": {
+      "valid": false,
+      "errors": [
+        {
+          "path": "ops[0].channel.source.tags",
+          "code": "missing_entity",
+          "message": "tag 5 does not exist in Stash"
+        }
+      ],
+      "effects": [],
+      "revision": 1
+    },
+    "apply": {
+      "exception": "KeyError",
+      "message": "'ch_deadbeef'"
+    },
+    "durableReceipt": null
+  },
+  "unknown_field": {
+    "validation": {
+      "valid": true,
+      "errors": [],
+      "effects": [
+        {
+          "op": "channel.put",
+          "channelId": "ch_11111111",
+          "kind": "membership",
+          "reindex": true
+        }
+      ],
+      "revision": 1
+    },
+    "apply": {
+      "exception": "LibraryError",
+      "message": "channel library at /tmp/tmppi301ent/channel-library.json is corrupt: channels[0] has unknown fields: unexpected"
+    },
+    "durableReceipt": null
+  },
+  "zero_max": {
+    "validation": {
+      "valid": true,
+      "errors": [],
+      "effects": [
+        {
+          "op": "channel.put",
+          "channelId": "ch_11111111",
+          "kind": "membership",
+          "reindex": true
+        }
+      ],
+      "revision": 1
+    },
+    "apply": {
+      "requestId": "zero_max",
+      "status": "committed",
+      "revision": 2,
+      "digest": "ced129d831264798",
+      "appliedAt": "2026-09-24T17:43:21Z",
+      "actor": "channel-studio",
+      "touched": 1,
+      "refresh": {
+        "ch_11111111": "refreshed"
+      },
+      "note": "Committed. Background programming refresh is pending where membership changed."
+    },
+    "durableReceipt": {
+      "requestId": "zero_max",
+      "status": "committed",
+      "revision": 2,
+      "digest": "ced129d831264798",
+      "appliedAt": "2026-09-24T17:43:21Z",
+      "actor": "channel-studio",
+      "touched": 1
+    },
+    "draftFilter": {
+      "tags": {
+        "value": [
+          "5"
+        ],
+        "modifier": "INCLUDES_ALL",
+        "depth": -1
+      },
+      "duration": {
+        "value": 0,
+        "value2": 2147483647,
+        "modifier": "BETWEEN"
+      }
+    },
+    "storedFilter": {
+      "tags": {
+        "value": [
+          "5"
+        ],
+        "modifier": "INCLUDES_ALL",
+        "depth": -1
+      }
+    }
+  },
+  "missing_exclusion": {
+    "validation": {
+      "valid": true,
+      "errors": [],
+      "effects": [
+        {
+          "op": "channel.put",
+          "channelId": "ch_11111111",
+          "kind": "membership",
+          "reindex": true
+        }
+      ],
+      "revision": 1
+    },
+    "apply": {
+      "requestId": "missing_exclusion",
+      "status": "committed",
+      "revision": 2,
+      "digest": "45e8baa8f040af10",
+      "appliedAt": "2026-09-24T17:43:21Z",
+      "actor": "channel-studio",
+      "touched": 1,
+      "refresh": {
+        "ch_11111111": "refreshed"
+      },
+      "note": "Committed. Background programming refresh is pending where membership changed."
+    },
+    "durableReceipt": {
+      "requestId": "missing_exclusion",
+      "status": "committed",
+      "revision": 2,
+      "digest": "45e8baa8f040af10",
+      "appliedAt": "2026-09-24T17:43:21Z",
+      "actor": "channel-studio",
+      "touched": 1
+    }
+  },
+  "missing_positive": {
+    "validation": {
+      "valid": false,
+      "errors": [
+        {
+          "path": "ops[0].channel.source.tags",
+          "code": "missing_entity",
+          "message": "tag 99999999 does not exist in Stash"
+        }
+      ],
+      "effects": [
+        {
+          "op": "channel.put",
+          "channelId": "ch_11111111",
+          "kind": "membership",
+          "reindex": true
+        }
+      ],
+      "revision": 1
+    },
+    "apply": {
+      "requestId": "missing_positive",
+      "status": "committed",
+      "revision": 2,
+      "digest": "69f5139d2e75c297",
+      "appliedAt": "2026-09-24T17:43:21Z",
+      "actor": "channel-studio",
+      "touched": 1,
+      "refresh": {
+        "ch_11111111": "refreshed"
+      },
+      "note": "Committed. Background programming refresh is pending where membership changed."
+    },
+    "durableReceipt": {
+      "requestId": "missing_positive",
+      "status": "committed",
+      "revision": 2,
+      "digest": "69f5139d2e75c297",
+      "appliedAt": "2026-09-24T17:43:21Z",
+      "actor": "channel-studio",
+      "touched": 1
+    }
+  },
+  "unavailable_health": {
+    "result": {
+      "processed": {
+        "ch_11111111": "refreshed"
+      },
+      "remaining": 0
+    },
+    "computeCalls": 1,
+    "pending": [],
+    "health": {
+      "healthStatus": "unavailable"
+    }
+  },
+  "sort_health_skip": {
+    "result": {
+      "processed": {
+        "ch_11111111": "current"
+      },
+      "remaining": 0
+    },
+    "computeCalls": 0,
+    "pending": [],
+    "health": {
+      "healthStatus": "ok",
+      "sourceSignature": "3a3a401d0be4",
+      "sceneCount": 1,
+      "loopSeconds": 600,
+      "rotationVersion": "OLD"
+    }
+  },
+  "stale_sort_worker": {
+    "result": {
+      "processed": {
+        "ch_11111111": "refreshed"
+      },
+      "remaining": 0
+    },
+    "computeCalls": 1,
+    "pending": [],
+    "health": {
+      "healthStatus": "ok",
+      "sourceSignature": "3a3a401d0be4",
+      "sceneCount": 1,
+      "loopSeconds": 600,
+      "rotationVersion": "OLD"
+    }
+  },
+  "empty_rule_pool": {
+    "healthStatus": "missingSource",
+    "sourceSignature": "e99329e4c568",
+    "sceneCount": 0,
+    "loopSeconds": 0,
+    "loopCapped": false,
+    "sourceMissing": true,
+    "sourceTotal": 0,
+    "rotationVersion": "empty"
+  },
+  "browser_payload_server_validation": {
+    "source": {
+      "type": "filter",
+      "tags": [],
+      "duration": {
+        "min": 4800
+      },
+      "tagsAny": []
+    },
+    "errors": [
+      {
+        "path": "source.tags",
+        "code": "bad_source_ids",
+        "message": "tags must be a list of numeric ids"
+      },
+      {
+        "path": "source.tagsAny",
+        "code": "bad_source_ids",
+        "message": "tagsAny must be a list of numeric ids"
+      }
+    ]
+  }
+}

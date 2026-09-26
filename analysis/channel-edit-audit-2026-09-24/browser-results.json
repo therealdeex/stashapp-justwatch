@@ -1,0 +1,40 @@
+{
+  "duration_60_to_80": {
+    "source": {
+      "type": "filter",
+      "tags": [
+        "5"
+      ],
+      "duration": {
+        "min": 4800
+      }
+    },
+    "errors": [],
+    "applyState": "Applied at r2."
+  },
+  "remove_tag_then_duration": {
+    "source": {
+      "type": "filter",
+      "tags": [],
+      "duration": {
+        "min": 4800
+      },
+      "tagsAny": []
+    },
+    "errors": []
+  },
+  "immediate_text_apply": {
+    "source": {
+      "type": "filter",
+      "tags": [
+        "5"
+      ],
+      "duration": {
+        "min": 3600
+      }
+    },
+    "errors": [],
+    "displayedQuery": "new query",
+    "applyState": "Unsaved draft — Apply to commit."
+  }
+}

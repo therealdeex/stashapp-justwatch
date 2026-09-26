@@ -1,0 +1,78 @@
+{
+  "any_toggle": {
+    "source": {
+      "type": "filter",
+      "tagsAny": [
+        "5"
+      ],
+      "duration": {
+        "min": 3600
+      }
+    },
+    "errors": []
+  },
+  "remove_last_tag": {
+    "source": {
+      "type": "filter",
+      "duration": {
+        "min": 3600,
+        "max": 4800
+      }
+    },
+    "errors": []
+  },
+  "immediate_text_apply": {
+    "source": {
+      "type": "filter",
+      "tags": [
+        "5"
+      ],
+      "duration": {
+        "min": 3600
+      },
+      "q": "new query"
+    },
+    "errors": [],
+    "displayedQuery": "new query"
+  },
+  "explicit_zero_max": {
+    "source": {
+      "type": "filter",
+      "tags": [
+        "5"
+      ],
+      "duration": {
+        "max": 0
+      }
+    },
+    "errors": []
+  },
+  "decimal_minutes": {
+    "source": {
+      "type": "filter",
+      "tags": [
+        "5"
+      ],
+      "duration": {
+        "min": 90
+      }
+    },
+    "errors": []
+  },
+  "refresh_pill": {
+    "pendingSeen": 1,
+    "readySeen": 1,
+    "errors": []
+  },
+  "refresh_failed": {
+    "failedSeen": 1,
+    "requeues": [
+      {
+        "mode": "RequeueChannelRefresh",
+        "channelId": "ch_00000001"
+      }
+    ],
+    "errors": []
+  },
+  "failures": []
+}
