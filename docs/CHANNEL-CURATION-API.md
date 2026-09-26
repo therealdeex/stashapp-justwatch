@@ -20,6 +20,8 @@ operation or a new optional field, negotiated through `Capabilities`.
   "explicitApply": { "version": 1, "applyOperation": "ApplyChannelChanges",
                      "validateOperation": "ValidateChannelChanges",
                      "resultOperation": "GetChannelApplyResult" },
+  "refreshStatus": { "version": 1, "operation": "GetChannelRefreshStatus",
+                     "requeueOperation": "RequeueChannelRefresh" },
   "poolPreview": { "version": 1, "operation": "PreviewChannelPool" }
 },
 "limits": { "…": "…", "libraryChannels": 899 }   // legacy maxChannels stays 99
@@ -37,6 +39,8 @@ operation or a new optional field, negotiated through `Capabilities`.
 | ApplyChannelChanges | `ApplyChannelChanges` | task | the ONLY write path: touched-record transaction |
 | GetChannelApplyResult | `GetChannelApplyResult` | sync | durable receipt lookup by `requestId` |
 | GetChannelHistory | `GetChannelHistory` | sync | bounded revision archive (restore = a NEW Apply) |
+| GetChannelRefreshStatus | `GetChannelRefreshStatus` | sync | durable post-Apply refresh truth: the pending intent journal + published health per channel (`pending`, `health`, honest `null`s — readiness is never inferred) |
+| RequeueChannelRefresh | `RequeueChannelRefresh` | sync | durably enqueue ONE channel's forced recompute (the UI's Retry); the next refresh pass recomputes it past the health-current short-circuit |
 
 ## The library document (storage schema 1)
 

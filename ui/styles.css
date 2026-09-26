@@ -127,6 +127,8 @@
 }
 .jw-pill-dirty { border-color: var(--jw-warn); color: var(--jw-warn); }
 .jw-pill-clean { color: var(--jw-muted); }
+.jw-pill-err { border-color: var(--jw-danger); color: var(--jw-danger); }
+.jw-pill .jw-link { margin-left: .35rem; }
 
 /* ---------- status chips ---------- */
 
@@ -475,6 +477,7 @@
   flex: none;
 }
 .jw-apply-row { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+.jw-apply-wrap { display: inline-flex; align-items: center; gap: .6rem; flex-wrap: wrap; min-width: 0; }
 .jw-apply-state { font-size: .78rem; color: var(--jw-muted); }
 .jw-apply-state-err { color: var(--jw-danger); }
 .jw-apply-state-ok { color: var(--jw-ok); }

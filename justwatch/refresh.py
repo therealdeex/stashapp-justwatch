@@ -144,10 +144,43 @@ def affected_channels(before: dict[str, dict], after: dict[str, dict]) -> tuple[
 def _health_is_current(data_dir, assets_dir, cid: str, signature: str) -> bool:
     """True when the stored health entry was computed for exactly this
     membership signature (a crashed/retried Apply that changed nothing does
-    no redundant work, and stale entries stay retryable)."""
+    no redundant work, and stale entries stay retryable). Entries written
+    before this check stayed the single authority: an "unavailable" status
+    never matches, so failed work is always retried."""
     entry = (snapshots.read_snapshot(data_dir, assets_dir).get("channels") or {}).get(cid)
     return isinstance(entry, dict) and entry.get("sourceSignature") == signature \
         and entry.get("healthStatus") in ("ok", "offAir", "missingSource")
+
+
+def requeue(data_dir: str | Path, channel: dict, revision: int) -> dict:
+    """Durable ONE-channel recompute request (the UI's "Retry refresh", or an
+    owner's "refresh this now"). ``force`` defeats the health-current
+    short-circuit for exactly one pass, so even a channel whose health looks
+    current is recomputed. Unlike :func:`enqueue` (which runs inside an Apply
+    transaction's lock), this takes the library lock itself; a crash before
+    the next worker pass loses nothing — the intent is already on disk."""
+    import time
+    cid = channel["id"]
+    with library.library_lock(data_dir):
+        existing = {e["channelId"]: e for e in read_pending(data_dir)}
+        prior = existing.get(cid) or {}
+        try:
+            generation = int(prior.get("generation")) + 1
+        except (TypeError, ValueError):
+            generation = 1
+        entry = {
+            "channelId": cid,
+            "signature": criteria.source_signature(channel["source"]),
+            "revision": revision,
+            "generation": generation,
+            "enqueuedAt": library._now_iso(),
+            "stamp": time.time_ns(),
+            "force": True,
+        }
+        existing[cid] = entry
+        write_pending(data_dir, sorted(
+            existing.values(), key=lambda e: (e.get("stamp", 0), e["channelId"])))
+    return entry
 
 
 def process_pending(client: Any, data_dir: str | Path, assets_dir: Path,
@@ -191,7 +224,9 @@ def process_pending(client: Any, data_dir: str | Path, assets_dir: Path,
             keep.add(cid)
             outcomes[cid] = "superseded_requeued"
             continue
-        if _health_is_current(data_dir, assets_dir, cid, current_sig):
+        # A forced requeue (the UI's Retry) recomputes even when health is
+        # current; everything else short-circuits on a current entry.
+        if not entry.get("force") and _health_is_current(data_dir, assets_dir, cid, current_sig):
             outcomes[cid] = "current"
             acknowledged[cid] = generation
             continue
@@ -205,7 +240,12 @@ def process_pending(client: Any, data_dir: str | Path, assets_dir: Path,
             "sort": channel.get("sort", "shuffle"), "seed": channel["seed"],
             "enabled": True, "programming": channel.get("programming"),
         }
-        health = snapshots._channel_health(client, legacy_shape, {})
+        # The CURRENT published snapshot is the stale-fallback basis, so a
+        # failed check keeps the channel's last-known numbers (E2: passing {}
+        # here silently dropped them).
+        previous_snapshot = snapshots.read_snapshot(data_dir, assets_dir)
+        health = snapshots._channel_health(client, legacy_shape, previous_snapshot)
+        unavailable = health.get("healthStatus") == "unavailable"
         # Commit under the writer lock: revalidate the channel, merge into the
         # CURRENT snapshot (never the batch's stale one), acknowledge.
         try:
@@ -237,6 +277,15 @@ def process_pending(client: Any, data_dir: str | Path, assets_dir: Path,
         except Exception as exc:  # per-channel isolation; entry stays queued
             keep.add(cid)
             outcomes[cid] = f"failed: {exc}"
+            continue
+        if unavailable:
+            # E2: a failed check is a RETRYABLE stage failure, not a result —
+            # the stale-flagged entry (last-known counts) is published above,
+            # the journal entry stays queued for the next pass, and the
+            # generation is NOT acknowledged. The failure is never acked and
+            # forgotten.
+            keep.add(cid)
+            outcomes[cid] = "unavailable_retryable"
             continue
         acknowledged[cid] = generation
         # Programming publication (explore/discovery) for the channel.

@@ -1,5 +1,64 @@
 # Changelog
 
+## Unreleased (channel-edit follow-up, 2026-09-25)
+
+Channel Studio honesty pass from the 2026-09-24 channel-edit audit — the
+frontend/UX half plus the backend pieces an honest UI depends on. Contract
+stays v1 (two additive ops); library schema 1 unchanged.
+
+- **One draft→wire serializer** (`toWireSource`, ui/index.js): preview,
+  Validate, Apply and the pending snapshot's retry identity all describe the
+  authored rules through one function. Genuinely empty facet arrays are
+  omitted (the server rejects present-but-empty lists — the ANY/ALL toggle
+  and last-chip removal used to trip this, audit E1); bounds are
+  presence-based; `q` is trimmed/dropped when blank. `canonicalSource` stays
+  comparison-only.
+- **Synchronous draft truth** (E6): the rules text search writes the draft on
+  every keystroke (only the preview stays debounced), so an immediate Apply
+  commits the visible text; debounces are cancelled on channel switch.
+- **Honest duration inputs** (E8): minute fields accept decimals (stored to
+  the nearest second), keep typed text verbatim until blur, and preserve an
+  explicit 0 as a real bound end to end — `criteria.normalize` keeps
+  non-negative ints by presence, projection keeps `max: 0` as a 0..0 BETWEEN
+  (an intentionally empty pool, never widened to INT_MAX), `summarize` keeps
+  sub-minute precision, and negative/overflowing bounds are typed
+  `bad_duration` errors both sides. The recency clock is injectable
+  (`build_scene_filter(today=…)`, E9's date-dependent test fixed).
+- **Honest refresh status**: the 8-second auto-clearing toast is replaced by
+  a durable pill fed by the new sync op `GetChannelRefreshStatus` (pending
+  journal + published health, never inferred) — pending / failed(+Retry) /
+  ready(+off-air,+missing), surviving remounts and clearing only on real
+  state changes. `RequeueChannelRefresh` durably enqueues a one-channel
+  forced recompute behind the Retry.
+- **Retryable refresh failures** (E2 minimal): an `unavailable` health result
+  is a retryable stage failure — the journal entry survives for the next
+  pass, last-known counts stay published stale-flagged (the current snapshot
+  is the stale-fallback basis), and a forced requeue recomputes even
+  health-current channels.
+- **Health outcomes** (E7): a successful empty query for a `filter`/`criteria`
+  source is `offAir`, never `missingSource`; a failed existence lookup for a
+  linked source is `unavailable`, never `missing`.
+- **Preflight honesty**: when the pre-flight check cannot run the UI says so
+  ("Pre-check unavailable — Apply validates on commit") instead of implying a
+  clean check; server typed errors map onto facet rows including exclusions.
+- **Browser diagnostics**: a bounded (250-entry) structured event buffer —
+  whitelisted scalar fields only (op/stage/HTTP status/latency/code/ids; no
+  free text, names, search text, paths or keys) — explicit HTTP/envelope
+  checks in the transport, `error`/`unhandledrejection` listeners, "Copy
+  error details" on failure surfaces and "Download diagnostics" in the
+  toolbar; both work offline.
+- Swap dialog states that a swap commits immediately, separate from a staged
+  draft; the zero-match preview reads as Off Air (a valid rule set), not an
+  error; the action bar is an aria-live region. The channel-curation
+  prototype mirrors the serializer + input policy.
+- Verification: `analysis/channel-edit-audit-2026-09-24/browser-fix-verify.cjs`
+  drives the real bundle with a mock whose Validate/Apply run REAL
+  `criteria.validate` via `bridge_validate.py` — ANY/ALL toggle, the E1
+  remove-final-tag repro, immediate text Apply, explicit zero, decimal
+  minutes, and the refresh pill all assert their wire payloads. 21 new
+  Python regressions in `tests/test_channel_edit_followup.py`; full suite
+  382 passed (the E9 calendar test fixed).
+
 ## 0.6.0 (2026-09-09)
 
 Stable network identities + the source semantics the v4-final catalog needs.

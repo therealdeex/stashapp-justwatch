@@ -51,12 +51,13 @@
   const ROTATION_SIZE = 50; // the on-air loop bound (mirrors the contract)
   const ROTATION_SCAN_LIMIT = 1000;
   const PREVIEW_DEBOUNCE_MS = 350;
-  const TEXT_DEBOUNCE_MS = 300;
   const SEARCH_DEBOUNCE_MS = 250;
   const APPLY_POLL_INTERVAL_MS = 2000;
   const APPLY_POLL_TRIES = 60; // ~2 min: the Apply task refreshes inline
-  const REFRESH_NOTE_MS = 8000;
+  const REFRESH_POLL_MS = 4000;
+  const REFRESH_POLL_MAX = 30; // ~2 min of honest pending state, then rest
   const MAX_NAME_LEN = 60;
+  const GRAPHQL_INT_MAX = 2147483647; // Stash's Int is signed 32-bit
   const BANDS = { ch: [1, 99], net: [100, 899] };
   const DRAFT_COUNT_CAP = 100; // chips shown per facet line
 
@@ -103,6 +104,87 @@
   ]);
 
   // ------------------------------------------------------------------
+  // Browser diagnostics: a bounded, structured event buffer.
+  //
+  // Every entry is whitelisted scalar fields (op/stage/httpStatus/ms/code/
+  // requestId/channelId) — NO free text, names, search text, paths, keys or
+  // bodies — so "Copy error details" / "Download diagnostics" exports are
+  // safe by construction and work fully offline (the buffer is local).
+  // Server-side correlation happens through the requestId + timestamps.
+  // ------------------------------------------------------------------
+
+  const DIAG_LIMIT = 250;
+  const diagBuffer = [];
+
+  function diagEvent(type, fields) {
+    const entry = Object.assign({ ts: new Date().toISOString(), type: String(type) }, fields || {});
+    diagBuffer.push(entry);
+    if (diagBuffer.length > DIAG_LIMIT) diagBuffer.splice(0, diagBuffer.length - DIAG_LIMIT);
+  }
+
+  function diagScrub(text) {
+    // One-line, capped, path/URL/credential-stripped — for unexpected window
+    // errors only; the audit requires sanitizing values even in messages.
+    return String(text == null ? "" : text)
+      .replace(/[?&](apikey|token|key)=[^\s&]+/gi, "$1=[redacted]")
+      .replace(/(https?:)?\/\/\S+/g, "[url]")
+      .replace(/\/[\w.\-]+\/[\w.\-\/]+/g, "[path]")
+      .slice(0, 160);
+  }
+
+  function diagBundle(context) {
+    return JSON.stringify(Object.assign({
+      generatedAt: new Date().toISOString(),
+      plugin: PLUGIN_ID,
+      route: (window.location && window.location.pathname) || "",
+      context: context || {},
+      events: diagBuffer.slice(),
+    }, null), null, 2);
+  }
+
+  function downloadDiagnostics() {
+    const blob = new Blob([diagBundle({ trigger: "manual" })], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "channel-studio-diagnostics.json";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  }
+
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text).then(() => true, () => legacyCopy(text));
+    }
+    return Promise.resolve(legacyCopy(text));
+  }
+
+  function legacyCopy(text) {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand("copy");
+      ta.remove();
+      return ok;
+    } catch (e) { return false; }
+  }
+
+  window.addEventListener("error", (e) => {
+    diagEvent("window_error", { stage: "window", code: diagScrub(e.message || "error") });
+  });
+  window.addEventListener("unhandledrejection", (e) => {
+    diagEvent("unhandled_rejection", {
+      stage: "window",
+      code: diagScrub((e.reason && e.reason.message) || e.reason || "rejection"),
+    });
+  });
+
+  // ------------------------------------------------------------------
   // Transport
   // ------------------------------------------------------------------
 
@@ -127,16 +209,49 @@
   }
 
   async function gql(query, variables) {
-    const resp = await fetch("/graphql", {
-      method: "POST",
-      headers: gqlHeaders(),
-      credentials: "same-origin",
-      body: JSON.stringify({ query, variables: variables || {} }),
-    });
-    const body = await resp.json();
-    if (body.errors && body.errors.length) {
-      throw new Error(body.errors[0].message || "GraphQL error");
+    const mode = variables && variables.args && variables.args.mode
+      ? String(variables.args.mode)
+      : (variables && variables.name ? "task:" + String(variables.name) : "graphql");
+    const started = Date.now();
+    let httpStatus = 0;
+    let outcome = "ok";
+    const fail = (message, stage, status) => {
+      const err = new Error(message);
+      err.stage = stage;
+      if (status != null) err.status = status;
+      diagEvent("transport", { op: mode, httpStatus, ms: Date.now() - started, outcome });
+      throw err;
+    };
+    let resp;
+    try {
+      resp = await fetch("/graphql", {
+        method: "POST",
+        headers: gqlHeaders(),
+        credentials: "same-origin",
+        body: JSON.stringify({ query, variables: variables || {} }),
+      });
+    } catch (e) {
+      outcome = "network";
+      if (e && e.stage) throw e;
+      fail("Could not reach Stash (network failure)", "network");
     }
+    httpStatus = resp.status;
+    if (!resp.ok) {
+      outcome = "http_" + resp.status;
+      fail("Stash answered HTTP " + resp.status, "http", resp.status);
+    }
+    let body;
+    try {
+      body = await resp.json();
+    } catch (e) {
+      outcome = "malformed";
+      fail("Stash returned a non-JSON response (HTTP " + resp.status + ")", "envelope", resp.status);
+    }
+    if (body.errors && body.errors.length) {
+      outcome = "graphql_error";
+      fail(body.errors[0].message || "GraphQL error", "graphql");
+    }
+    diagEvent("transport", { op: mode, httpStatus, ms: Date.now() - started, outcome });
     return body.data;
   }
 
@@ -388,6 +503,57 @@
     return JSON.stringify(canonicalSource(a)) === JSON.stringify(canonicalSource(b));
   }
 
+  // The ONE draft→wire serializer: preview, Validate, Apply and the pending
+  // snapshot's retry identity ALL describe the authored rules through this
+  // function, so the client never submits a shape the server must reject for
+  // structural reasons (audit E1). Rules:
+  //   * genuinely empty facet arrays are OMITTED — the server rejects a
+  //     present-but-empty list (the ANY/ALL toggle and last-chip removal
+  //     both leave [] behind in the editing model);
+  //   * bounds are PRESENCE-based: an explicit 0 is a real bound, blank is
+  //     absence (audit E8);
+  //   * q is trimmed and dropped when blank.
+  // canonicalSource stays COMPARISON-ONLY (it deliberately fills empty keys
+  // so an untouched editor equals the stored record — never a wire form).
+  function toWireSource(source) {
+    const s = source || {};
+    if (s.type !== "filter" && s.type !== "criteria") return s;
+    const out = { type: s.type };
+    for (const k of FACET_KEYS) {
+      const v = idsOf(s[k]);
+      if (v.length) out[k] = v;
+    }
+    if (s.date && (s.date.from || s.date.to)) {
+      out.date = { from: s.date.from || "", to: s.date.to || "" };
+    }
+    if (s.duration && typeof s.duration === "object") {
+      const spec = {};
+      if (s.duration.min != null) spec.min = s.duration.min;
+      if (s.duration.max != null) spec.max = s.duration.max;
+      if (spec.min != null || spec.max != null) out.duration = spec;
+    }
+    if (s.createdAt && s.createdAt.withinDays != null) {
+      out.createdAt = { withinDays: s.createdAt.withinDays };
+    }
+    for (const k of ["studioSceneCount", "performerSceneCount"]) {
+      const v = s[k];
+      if (v && typeof v === "object") {
+        const spec = {};
+        if (v.min != null) spec.min = v.min;
+        if (v.max != null) spec.max = v.max;
+        if (spec.min != null || spec.max != null) out[k] = spec;
+      }
+    }
+    if (typeof s.q === "string" && s.q.trim()) out.q = s.q.trim();
+    return out;
+  }
+
+  function toWireChannel(channel) {
+    const c = clone(channel);
+    c.source = toWireSource(c.source);
+    return c;
+  }
+
   // Three-way rebase of a local draft against fresh server state (audit C8):
   //   base  = the acknowledged definition the draft was created from
   //   fresh = the server's current record
@@ -476,6 +642,25 @@
     return hh ? hh + "h " + mm + "m" : mm + "m";
   }
 
+  // Minute rendering with authored precision: whole minutes read as ints,
+  // sub-minute bounds keep up to two decimals instead of silently flooring
+  // (mirrors criteria._fmt_minutes — E8).
+  function fmtMinutes(seconds) {
+    const m = Number(seconds) / 60;
+    if (!Number.isFinite(m)) return "0 min";
+    if (Number.isInteger(m)) return m + " min";
+    return (Math.round(m * 100) / 100) + " min";
+  }
+
+  // The inverse for the minute INPUT fields: seconds -> typed text (no forced
+  // rounding), or "" when the bound is absent.
+  function minutesText(seconds) {
+    if (seconds == null) return "";
+    const m = Number(seconds) / 60;
+    if (!Number.isFinite(m)) return "";
+    return Number.isInteger(m) ? String(m) : String(Math.round(m * 100) / 100);
+  }
+
   const SOURCE_LABELS = {
     savedFilter: "saved search",
     tag: "tag set",
@@ -533,8 +718,8 @@
     if (s.date && (s.date.from || s.date.to)) {
       active.push("Dated " + (s.date.from || "the beginning") + " to " + (s.date.to || "today"));
     }
-    if (s.duration && s.duration.min) active.push("Running at least " + Math.round(s.duration.min / 60) + " min");
-    if (s.duration && s.duration.max) active.push("Running at most " + Math.round(s.duration.max / 60) + " min");
+    if (s.duration && s.duration.min != null) active.push("Running at least " + fmtMinutes(s.duration.min));
+    if (s.duration && s.duration.max != null) active.push("Running at most " + fmtMinutes(s.duration.max));
     if (s.createdAt && s.createdAt.withinDays) {
       active.push("Added to the library within the last " + s.createdAt.withinDays + " days (moves with the calendar)");
     }
@@ -585,6 +770,11 @@
     return out;
   }
 
+  // Client-side mirror of the server's structural checks — run against the
+  // WIRE source (toWireSource) so "the client says valid" and "the server
+  // accepts" describe the same shape. Meaningful invalid values stay in the
+  // draft (and the wire) so the user gets a typed field error instead of a
+  // silent normalization.
   function ruleSourceClientErrors(source) {
     const errors = [];
     const s = source || {};
@@ -599,8 +789,20 @@
         errors.push({ field: "source." + k, code: "bad_scene_count", message: "The upper bound must exceed the lower one." });
       }
     }
-    if (s.duration && s.duration.min != null && s.duration.max != null && Number(s.duration.max) < Number(s.duration.min)) {
-      errors.push({ field: "source.duration", code: "bad_duration", message: "Maximum duration is below the minimum." });
+    if (s.duration) {
+      for (const half of ["min", "max"]) {
+        const v = s.duration[half];
+        if (v == null) continue;
+        if (typeof v !== "number" || Number.isNaN(v) || v < 0) {
+          errors.push({ field: "source.duration", code: "bad_duration", message: "Durations must be 0 minutes or more." });
+        } else if (v > GRAPHQL_INT_MAX) {
+          errors.push({ field: "source.duration", code: "bad_duration", message: "That duration is too large — Stash accepts at most " + GRAPHQL_INT_MAX.toLocaleString() + " seconds." });
+        }
+      }
+      if (s.duration.min != null && s.duration.max != null
+          && Number(s.duration.max) < Number(s.duration.min)) {
+        errors.push({ field: "source.duration", code: "bad_duration", message: "Maximum duration is below the minimum." });
+      }
     }
     if (s.date && s.date.from && s.date.to && s.date.from > s.date.to) {
       errors.push({ field: "source.date", code: "bad_date", message: "The start date is after the end date." });
@@ -1358,7 +1560,13 @@
     const [phase, setPhase] = useState("clean");  // clean|dirty|validating|applying|applied
     const [applyError, setApplyError] = useState(null); // {kind, message, errors, currentRevision}
     const [lastAppliedRev, setLastAppliedRev] = useState(null);
-    const [refreshNote, setRefreshNote] = useState(null);
+    // Honest post-Apply refresh state, read from the durable status op:
+    // {state: "pending"|"failed"|"ready"|"unknown", since?, offAir?, missing?}
+    // Never cleared on a timer — it changes when the durable state changes.
+    const [refreshState, setRefreshState] = useState(null);
+    // Set when the pre-flight check itself could not run: Apply stays safe
+    // (the server validates at commit) but the UI must not imply it pre-checked.
+    const [preflightNote, setPreflightNote] = useState(null);
     const [rebaseNotice, setRebaseNotice] = useState(null);
     const [preview, setPreview] = useState(null);
     const [previewState, setPreviewState] = useState("idle"); // idle|loading|ok|error
@@ -1378,6 +1586,7 @@
     const previewSeqRef = useRef(0);
     const aliveRef = useRef(true);
     const refreshTimerRef = useRef(null);
+    const refreshPollsLeftRef = useRef(0);
     const menuRef = useOutsideClose(menuOpen, () => setMenuOpen(false));
     const glyphRef = useOutsideClose(glyphOpen, () => setGlyphOpen(false));
 
@@ -1399,11 +1608,53 @@
       reportPhase({ phase, dirty: isDirty() });
     });
 
-    // Local mirror of the rules text-search input (committed to the draft on a
-    // debounce). Null = mirror the committed value.
+    // Local mirror of the rules text-search input. The DRAFT is written
+    // synchronously on every keystroke — only the preview stays debounced —
+    // so an immediate Apply commits exactly the text that was visible
+    // (audit E6). The mirror exists so the input is never re-formatted while
+    // typing; it converges on blur / channel switch / external rebase.
     const committedQ = draft && draft.source && draft.source.q ? String(draft.source.q) : "";
     const [qLocal, setQLocal] = useState(null);
-    useEffect(() => { setQLocal(null); }, [committedQ, channelId]);
+    useEffect(() => {
+      const el = document.getElementById("f-qsearch");
+      if (el && document.activeElement === el) return; // typing: the mirror is authoritative
+      setQLocal(null);
+    }, [committedQ, channelId]);
+
+    // Same pattern for the two duration minute fields: typed text is kept
+    // verbatim until blur; the draft carries whole SECONDS (E8: decimals
+    // allowed, explicit 0 preserved, blank = absent).
+    const committedDur = draft && draft.source ? (draft.source.duration || null) : null;
+    const durMinCommitted = committedDur && committedDur.min != null ? committedDur.min : null;
+    const durMaxCommitted = committedDur && committedDur.max != null ? committedDur.max : null;
+    const [durText, setDurText] = useState({}); // {min?, max?} typed mirrors; absent = follow draft
+    useEffect(() => {
+      if (document.activeElement === document.getElementById("f-dur-min")
+          || document.activeElement === document.getElementById("f-dur-max")) return;
+      setDurText({});
+    }, [durMinCommitted, durMaxCommitted, channelId]);
+
+    // Minutes in, whole SECONDS in the draft. Decimals are accepted (stored
+    // to the nearest second); blank clears the bound; an explicit 0 is a
+    // real bound (presence-based — never erased as "empty"). Meaningless
+    // values a browser can still yield (negative, huge) stay in the draft so
+    // the typed validation errors below the field fire instead of silently
+    // normalizing away (audit E8).
+    const setDurationHalf = (half, raw) => {
+      setDurText((t) => Object.assign({}, t, { [half]: raw }));
+      edit((d) => {
+        const spec = Object.assign({}, d.source.duration || {});
+        const v = String(raw).trim();
+        if (v === "") delete spec[half];
+        else {
+          const minutes = Number(v);
+          if (Number.isFinite(minutes)) spec[half] = Math.round(minutes * 60);
+        }
+        if (spec.min == null && spec.max == null) delete d.source.duration;
+        else d.source.duration = spec;
+        return d;
+      });
+    };
 
     // ---- init / retarget ----
     useEffect(() => {
@@ -1413,7 +1664,8 @@
       setPreviewState("idle");
       setApplyError(null);
       setLastAppliedRev(null);
-      setRefreshNote(null);
+      setRefreshState(null);
+      setPreflightNote(null);
       setRebaseNotice(null);
       pendingRef.current = null;
       (async () => {
@@ -1482,8 +1734,16 @@
         }
         void loadPreview();
         resolveNamesFor(working && working.source);
+        scheduleRefreshPolls(); // recover pending/failed refresh state durably
       })();
-      return () => { alive = false; };
+      return () => {
+        alive = false;
+        schedulePreview.cancel();       // no stale preview for the next channel
+        if (refreshTimerRef.current) {  // ditto for the refresh poll loop
+          clearTimeout(refreshTimerRef.current);
+          refreshTimerRef.current = null;
+        }
+      };
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [channelId]);
 
@@ -1605,22 +1865,12 @@
         phaseRef.current = "dirty";
       }
       if (applyError) setApplyError(null);
+      if (preflightNote) setPreflightNote(null);
       schedulePreview();
       resolveNamesFor(next.source);
     }
 
     const schedulePreview = useMemo(() => debounce(() => { void loadPreview(); }, PREVIEW_DEBOUNCE_MS), []);
-
-    // Debounced commit of the rules text-search input.
-    const commitQRef = useRef(null);
-    const commitQ = useMemo(() => debounce((v) => {
-      edit((d) => {
-        if (v.trim()) d.source.q = v.trim();
-        else delete d.source.q;
-        return d;
-      });
-    }, TEXT_DEBOUNCE_MS), []);
-    commitQRef.current = commitQ;
 
     async function loadPreview() {
       const d = draftRef.current;
@@ -1629,7 +1879,8 @@
       setPreviewState("loading");
       try {
         const args = {
-          source: JSON.stringify(d.source),
+          // The preview sees exactly what Apply sends (audit E1).
+          source: JSON.stringify(toWireSource(d.source)),
           sort: d.sort || "shuffle",
           sampleLimit: "10",
           includePaths: true,
@@ -1645,6 +1896,70 @@
         setPreviewState("error");
       }
     }
+
+    // ---- honest refresh status (durable, never timer-cleared) ----
+    // GetChannelRefreshStatus reads the two durable stores: the pending
+    // INTENT journal and the published health snapshot. A pending entry means
+    // work is outstanding; healthStatus "unavailable" means the last check
+    // FAILED (retryable via RequeueChannelRefresh). Readiness is never
+    // synthesized — a channel with no durable record reports "unknown".
+    async function pollRefreshOnce() {
+      if (isTemp) return false;
+      let out = null;
+      try {
+        out = await runOp("GetChannelRefreshStatus", { channelId });
+      } catch (e) {
+        diagEvent("refresh_status", { channelId, outcome: "unreadable" });
+        return refreshPollsLeftRef.current > 1; // transient: retry within the budget
+      }
+      if (!aliveRef.current || !out || typeof out !== "object") return false;
+      if (out.pending) {
+        setRefreshState({ state: "pending", since: out.pending.enqueuedAt || null });
+        return true; // keep polling
+      }
+      const health = out.health;
+      if (!health || typeof health !== "object") {
+        setRefreshState({ state: "unknown" });
+        return false;
+      }
+      const status = health.healthStatus;
+      if (status === "unavailable") {
+        setRefreshState({ state: "failed" });
+        return false;
+      }
+      setRefreshState({
+        state: "ready",
+        offAir: status === "offAir",
+        missing: status === "missingSource",
+      });
+      return false;
+    }
+
+    function scheduleRefreshPolls() {
+      if (isTemp) return;
+      if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+      refreshPollsLeftRef.current = REFRESH_POLL_MAX;
+      const tick = async () => {
+        refreshTimerRef.current = null;
+        if (!aliveRef.current) return;
+        const outstanding = await pollRefreshOnce();
+        if (outstanding && aliveRef.current && --refreshPollsLeftRef.current > 0) {
+          refreshTimerRef.current = setTimeout(tick, REFRESH_POLL_MS);
+        }
+      };
+      refreshTimerRef.current = setTimeout(tick, 300);
+    }
+
+    const retryRefresh = async () => {
+      try {
+        await runOp("RequeueChannelRefresh", { channelId });
+        diagEvent("refresh_requeue", { channelId, outcome: "queued" });
+        scheduleRefreshPolls();
+      } catch (e) {
+        diagEvent("refresh_requeue", { channelId, outcome: "failed" });
+        toast("Could not queue the refresh — try again.", "err");
+      }
+    };
 
     function validateDraft() {
       const d = draftRef.current;
@@ -1665,20 +1980,20 @@
         }
       }
       if (isRuleSource(d.source)) {
-        for (const e of ruleSourceClientErrors(d.source)) errors.push(e);
-        const canon = canonicalSource(d.source);
-        const hasRule = FACET_KEYS.some((k) => canon[k] && canon[k].length)
-          || canon.date || canon.duration || canon.createdAt || canon.q
-          || canon.studioSceneCount || canon.performerSceneCount;
+        // Validate exactly what preview/validate/apply will send (audit E1):
+        // the wire source. An explicit duration 0 counts as a rule; a facet
+        // the author emptied does not.
+        const wire = toWireSource(d.source);
+        for (const e of ruleSourceClientErrors(wire)) errors.push(e);
+        const hasRule = FACET_KEYS.some((k) => wire[k] && wire[k].length)
+          || wire.date || wire.duration || wire.createdAt || wire.q
+          || wire.studioSceneCount || wire.performerSceneCount;
         if (!hasRule && d.source.type === "criteria") {
           errors.push({ field: "source", code: "empty_rules", message: "Add at least one rule — an empty criteria pool matches nothing." });
         }
       }
       return errors;
     }
-
-    // membership effects of the last pre-flight (drives the refresh-pending note)
-    const effectsRef = useRef([]);
 
     function fieldError(field) {
       if (applyError && Array.isArray(applyError.errors)) {
@@ -1732,27 +2047,39 @@
         setPhase("dirty");
         return;
       }
-      const snapshot = clone(draftRef.current);
+      // The submitted snapshot is the WIRE channel: this exact JSON is what
+      // preview showed, what Validate checked, and what the idempotent retry
+      // replays — one immutable form (audit E1/E6).
+      const snapshot = toWireChannel(clone(draftRef.current));
       const ops = buildOps(snapshot);
       const expected = expectedOverride != null ? expectedOverride : getRevision();
       // Pre-flight against the live document: precise typed errors before the
       // task queue is involved (no writes; revision races are still handled
-      // by the receipt).
+      // by the receipt). If it CANNOT run we continue — the server validates
+      // at commit — but the UI says so instead of implying a clean pre-check.
       try {
         const check = await runOp("ValidateChannelChanges", { ops: JSON.stringify(ops) });
         if (!aliveRef.current) return;
+        setPreflightNote(null);
         if (check && check.valid === false && (check.errors || []).length) {
           setPhase("dirty");
           setApplyError({ kind: "validation", errors: check.errors, message: "the server rejected these changes" });
+          diagEvent("apply_preflight", { channelId, outcome: "invalid", count: check.errors.length });
           return;
         }
-        effectsRef.current = (check && check.effects) || [];
-      } catch (e) { /* pre-flight is best-effort; the receipt remains the truth */ }
+      } catch (e) {
+        if (aliveRef.current) {
+          setPreflightNote(String((e && e.message) || e));
+          diagEvent("apply_preflight", { channelId, outcome: "unavailable" });
+        }
+      }
       if (!aliveRef.current) return;
-      // Reuse the pending requestId ONLY for a byte-identical retry (same ops,
-      // same expectedRevision) — that is the idempotent-replay case.
+      // Reuse the pending requestId ONLY for a byte-identical retry on the
+      // wire (same serialized ops, same expectedRevision) — that is the
+      // idempotent-replay case.
       const pending = pendingRef.current;
-      const reuse = pending && pending.expected === expected && deepEqual(snapshot, pending.snapshot);
+      const reuse = pending && pending.expected === expected
+        && deepEqual(toWireChannel(clone(draftRef.current)), pending.snapshot);
       const requestId = reuse ? pending.requestId : newRequestId();
       pendingRef.current = { requestId, snapshot, expected };
       // The immutable submitted request survives navigation/remount/reload;
@@ -1789,13 +2116,13 @@
       if (receipt.status === "committed") {
         pendingRef.current = null;
         drafts.setExtras(channelId, { pending: null });
-        // Did the draft move on while the request was in flight? Compare the
-        // LIVE draft (an editor that died mid-apply falls back to its stored
-        // session draft — which now includes edits typed DURING the apply).
+        // Did the draft move on while the request was in flight? Compare on
+        // the wire: an edit that only re-filled empty facet arrays in the
+        // editing model is not a change (the snapshot is already wire-form).
         const currentDraft = aliveRef.current && draftRef.current
           ? draftRef.current
           : (drafts.get(channelId) ? drafts.get(channelId).draft : snapshot);
-        const untouched = deepEqual(currentDraft, snapshot);
+        const untouched = deepEqual(toWireChannel(clone(currentDraft)), snapshot);
         const finalId = (receipt.idMap && receipt.idMap[channelId]) || channelId;
         // The fresh server record becomes the newer draft's acknowledged base.
         let freshStored = null;
@@ -1822,22 +2149,11 @@
         setStored(freshStored);
         setSummary(freshSummary);
         setLastAppliedRev(receipt.revision);
-        // The durable receipt (what we poll) does not carry the task's inline
-        // refresh map — membership effects come from the pre-flight instead.
-        const membershipChanged = effectsRef.current.some((e) => e.reindex);
-        const outcomes = receipt.refresh && typeof receipt.refresh === "object"
-          ? Object.entries(receipt.refresh) : [];
-        if (outcomes.length || membershipChanged) {
-          setRefreshNote(outcomes.length
-            ? "Background programming refresh pending — " + outcomes.length
-              + (outcomes.length === 1 ? " channel" : " channels") + " ("
-              + [...new Set(outcomes.map(([, o]) => String(o).split(":")[0]))].join(", ") + ")"
-            : "Background programming refresh pending — membership changed.");
-          if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
-          refreshTimerRef.current = setTimeout(() => {
-            if (aliveRef.current) setRefreshNote(null);
-          }, REFRESH_NOTE_MS);
-        }
+        diagEvent("apply_commit", { channelId, outcome: "committed", revision: receipt.revision });
+        // Honest post-commit state: poll the durable refresh status until no
+        // work is outstanding (or the budget rests). The pill changes when
+        // the DURABLE state changes — never on a timer.
+        scheduleRefreshPolls();
         if (untouched) {
           const nextDraft = freshStored ? clone(freshStored) : clone(snapshot);
           draftRef.current = nextDraft;
@@ -1856,21 +2172,25 @@
         if (!transportLike) { pendingRef.current = null; drafts.setExtras(channelId, { pending: null }); }
         setPhase("dirty");
         setApplyError({ kind: "conflict", currentRevision: receipt.currentRevision, message: receipt.message });
+        diagEvent("apply_commit", { channelId, outcome: "revision_conflict" });
       } else if (receipt.error === "validation_failed") {
         if (!transportLike) { pendingRef.current = null; drafts.setExtras(channelId, { pending: null }); }
         setPhase("dirty");
         setApplyError({ kind: "validation", errors: receipt.errors || [], message: receipt.message });
+        diagEvent("apply_commit", { channelId, outcome: "validation_failed" });
       } else if (transportLike) {
         // unresolved: KEEP the pending requestId — a retry of the unchanged
         // draft is the idempotent path the server documents.
         setPhase("dirty");
         setApplyError({ kind: "transport", message: receipt.message || "the server never reported a result" });
+        diagEvent("apply_commit", { channelId, outcome: "unknown" });
         toast("No receipt yet — draft kept. Apply again to reuse the same requestId.", "err");
       } else {
         pendingRef.current = null;
         drafts.setExtras(channelId, { pending: null });
         setPhase("dirty");
         setApplyError({ kind: "rejected", message: receipt.message || receipt.error || "rejected" });
+        diagEvent("apply_commit", { channelId, outcome: "rejected" });
       }
     }
 
@@ -1951,7 +2271,8 @@
       if (isDirty()) { toast("Apply or discard your draft first — a number swap is its own Apply.", "err"); return; }
       const ok = await confirm({
         title: "Swap numbers " + d.number + " ↔ " + other.number + "?",
-        message: "“" + (d.name || "This channel") + "” and “" + other.name + "” exchange numbers. One Apply, atomic — no duplicate-number window.",
+        message: "“" + (d.name || "This channel") + "” and “" + other.name + "” exchange numbers. "
+          + "This commits immediately as its own Apply — separate from any staged draft.",
         confirmLabel: "Swap numbers",
       });
       if (!ok) return;
@@ -2149,10 +2470,12 @@
       });
 
       const sceneErr = rErrors.find((e) => String(e.path || e.field || "").includes(cfg.sceneKey));
+      // Map server typed errors onto THIS facet's row — including its
+      // exclusion list (a newly-authored nonexistent exclusion fails the
+      // same way a positive id does, with the same source.<key> path).
       const facetErr = rErrors.find((e) => {
         const p = String(e.path || e.field || "");
-        return !sceneErr && (p.includes("." + cfg.allKey) || p.includes("." + cfg.anyKey)
-          || p.endsWith(".source." + cfg.allKey));
+        return !sceneErr && [cfg.allKey, cfg.anyKey, cfg.exclKey].some((k) => p.includes("." + k));
       });
 
       return h("div", { key: facet, className: "jw-rule-row" + (facetErr ? " jw-rule-row-invalid" : "") },
@@ -2243,8 +2566,8 @@
       const setMeta = (mutate) => edit((d) => { mutate(d.source); return d; });
       const dateFrom = src.date && src.date.from ? src.date.from : "";
       const dateTo = src.date && src.date.to ? src.date.to : "";
-      const durMin = src.duration && src.duration.min != null ? Math.round(src.duration.min / 60) : "";
-      const durMax = src.duration && src.duration.max != null ? Math.round(src.duration.max / 60) : "";
+      const durMin = durText.min != null ? durText.min : minutesText(durMinCommitted);
+      const durMax = durText.max != null ? durText.max : minutesText(durMaxCommitted);
       const within = src.createdAt && src.createdAt.withinDays ? src.createdAt.withinDays : "";
       const qErr = rErrors.find((e) => String(e.path || e.field || "").includes("duration"));
       const dateErr = rErrors.find((e) => String(e.path || e.field || "").includes("date"));
@@ -2274,31 +2597,21 @@
           }),
           h("label", { className: "jw-dynamic-num" }, "duration ≥",
             h("input", {
-              type: "number", min: 0, style: { width: "76px" }, "aria-label": "Minimum duration in minutes",
+              type: "number", min: 0, step: "any", style: { width: "76px" },
+              id: "f-dur-min", "aria-label": "Minimum duration in minutes",
               value: durMin, placeholder: "min",
-              onChange: (e) => setMeta((s) => {
-                const v = parseInt(e.target.value, 10);
-                const spec = Object.assign({}, s.duration || {});
-                if (Number.isNaN(v)) delete spec.min; else spec.min = v * 60;
-                if (spec.min == null && spec.max == null) delete s.duration;
-                else s.duration = spec;
-                return s;
-              }),
+              onChange: (e) => setDurationHalf("min", e.target.value),
+              onBlur: () => setDurText((t) => Object.assign({}, t, { min: null })),
             })),
           h("label", { className: "jw-dynamic-num" }, "≤",
             h("input", {
-              type: "number", min: 0, style: { width: "76px" }, "aria-label": "Maximum duration in minutes",
+              type: "number", min: 0, step: "any", style: { width: "76px" },
+              id: "f-dur-max", "aria-label": "Maximum duration in minutes",
               value: durMax, placeholder: "max",
-              onChange: (e) => setMeta((s) => {
-                const v = parseInt(e.target.value, 10);
-                const spec = Object.assign({}, s.duration || {});
-                if (Number.isNaN(v)) delete spec.max; else spec.max = v * 60;
-                if (spec.min == null && spec.max == null) delete s.duration;
-                else s.duration = spec;
-                return s;
-              }),
+              onChange: (e) => setDurationHalf("max", e.target.value),
+              onBlur: () => setDurText((t) => Object.assign({}, t, { max: null })),
             })),
-          h("span", { className: "jw-hint" }, "min"),
+          h("span", { className: "jw-hint" }, "min · decimals ok"),
         ),
         h("div", { className: "jw-rule-dates", style: { marginTop: "8px" } },
           h("label", { className: "jw-dynamic-num" }, "added within",
@@ -2314,12 +2627,18 @@
             })),
           h("span", { className: "jw-hint" }, "days"),
           h("input", {
-            type: "text", className: "jw-input", style: { flex: 1 }, "aria-label": "Text search",
-            placeholder: "text search…", value: qValue,
+            type: "text", id: "f-qsearch", className: "jw-input", style: { flex: 1 },
+            "aria-label": "Text search", placeholder: "text search…", value: qValue,
             onChange: (e) => {
-              setQLocal(e.target.value);
-              commitQRef.current(e.target.value);
+              const v = e.target.value;
+              setQLocal(v); // the visible mirror…
+              edit((d) => { // …and the draft truth, synchronously (E6)
+                if (v.trim()) d.source.q = v.trim();
+                else delete d.source.q;
+                return d;
+              });
             },
+            onBlur: () => setQLocal(null),
           }),
         ),
         qErr || dateErr ? h("div", { className: "jw-error-text", role: "alert" }, (qErr || dateErr).message) : null,
@@ -2472,8 +2791,9 @@
             h("div", { className: "jw-count-l" }, "on-air rotation (max " + ROTATION_SIZE + ")")),
         ),
         preview.poolCount === 0
-          ? h("p", { className: "jw-error-text", role: "alert" },
-              "Empty pool — nothing matches these rules yet. The channel would be off air.")
+          ? h("p", { className: "jw-hint", role: "status" },
+              "0 scenes match these rules — the channel would read Off Air. That's a valid rule set; "
+              + "adjust the bounds to bring scenes back.")
           : h("div", { className: "jw-preview-strip" },
               (preview.sample || []).map((sItem) => h("div", { key: sItem.id, className: "jw-sample-card" },
                 h("div", {
@@ -2523,16 +2843,67 @@
       return h("span", { className: "jw-apply-state" }, "All changes applied.");
     })();
 
+    // The durable refresh pill: pending / failed(+Retry) / ready(+off-air,
+    // +missing). State comes from GetChannelRefreshStatus and changes only
+    // when that durable state changes — never an 8-second timer.
+    const refreshPill = (() => {
+      if (!refreshState || refreshState.state === "unknown") return null;
+      if (refreshState.state === "pending") {
+        return h("span", {
+          className: "jw-pill jw-pill-dirty", title: "Membership changed — the rotation and programming are being recomputed",
+        }, "Programming refresh pending…");
+      }
+      if (refreshState.state === "failed") {
+        return h("span", {
+          className: "jw-pill jw-pill-err",
+          title: "The last refresh could not reach Stash. Last-known numbers stay shown; Retry queues the recompute for the next pass.",
+        },
+          "Refresh failed (Stash unavailable) ",
+          h("button", { className: "jw-link", onClick: () => void retryRefresh() }, "Retry"));
+      }
+      if (refreshState.offAir) {
+        return h("span", {
+          className: "jw-pill jw-pill-dirty",
+          title: "The rules are valid but nothing matches them right now — raising the duration past everything lands here, and it stays saved",
+        }, "Off air — 0 scenes match");
+      }
+      if (refreshState.missing) {
+        return h("span", {
+          className: "jw-pill jw-pill-err",
+          title: "The linked source no longer resolves — relink it or edit the rules",
+        }, "Source missing");
+      }
+      return h("span", { className: "jw-pill jw-pill-clean", title: "No refresh work is outstanding for this channel" }, "Ready");
+    })();
+
     const conflicting = applyError && applyError.kind === "conflict";
+
+    const copyErrorDetails = () => {
+      const bundle = diagBundle({
+        stage: "apply", kind: applyError ? applyError.kind : null, channelId,
+        requestId: (pendingRef.current && pendingRef.current.requestId) || null,
+      });
+      copyText(bundle).then((ok) => {
+        toast(ok ? "Error details copied — keep them with the request id when reporting."
+                 : "Could not copy — use “Download diagnostics” in the toolbar.", ok ? "" : "err");
+      });
+    };
 
     const actionBar = h("div", { className: "jw-editor-actions" },
       rebaseNotice ? h("div", { className: "jw-apply-row", role: "status", style: { color: "#f0ad4e" } },
         rebaseNotice) : null,
       h("div", { className: "jw-apply-row" },
-        barState,
+        h("span", { className: "jw-apply-wrap", role: "status", "aria-live": "polite" },
+          barState,
+          preflightNote ? h("span", {
+            className: "jw-apply-state",
+            title: preflightNote,
+          }, "Pre-check unavailable — Apply validates on commit.") : null,
+          refreshPill),
+        applyError ? h("button", {
+          className: "jw-link", onClick: copyErrorDetails, title: "Copy a redacted, correlated event bundle for reporting",
+        }, "Copy error details") : null,
         h("span", { style: { flex: 1 } }),
-        refreshNote ? h("span", { className: "jw-pill jw-pill-dirty", title: "The receipt's refresh map" }, refreshNote) : null,
-        phase === "applied" && !dirty && !refreshNote ? h("span", { className: "jw-pill jw-pill-clean" }, "Ready") : null,
         h("button", { className: "jw-btn", onClick: discardDraft, disabled: !dirty && !isTemp || phase === "applying" }, "Discard"),
         h("button", {
           className: "jw-btn jw-btn-primary", id: "apply-btn",
@@ -3155,6 +3526,10 @@
           onClick: () => { setBulkMode((v) => !v); setBulkSelected(new Set()); },
         }, bulkMode ? "Selecting… done" : "Select…"),
         h("button", { className: "jw-btn", onClick: exportCsv }, "Export CSV"),
+        h("button", {
+          className: "jw-btn", onClick: downloadDiagnostics,
+          title: "Download the bounded, redacted browser event log (works even when the server is unreachable)",
+        }, "Diagnostics"),
         h("button", { className: "jw-btn", onClick: () => void reload(), title: "Refetch the library and revision" }, "Reload"),
         h("span", { className: "jw-revision-chip" }, "r" + lib.revision),
         dirtyPill,

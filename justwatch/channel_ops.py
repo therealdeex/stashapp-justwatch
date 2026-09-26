@@ -13,6 +13,8 @@ the EDITING and DIRECTORY-DISCOVERY surface:
 * ApplyChannelChanges    TASK   touched-records transaction + refresh
 * GetChannelApplyResult  sync   durable receipt lookup by requestId
 * GetChannelHistory      sync   bounded revision archive
+* GetChannelRefreshStatus sync  durable refresh truth: pending work + health
+* RequeueChannelRefresh  sync   force ONE channel's recompute (the UI Retry)
 
 Every read here is bounded (no scene queries in the library surface except
 PreviewChannelPool, which is capped at a count + one page). Apply is the ONLY
@@ -25,7 +27,7 @@ import json
 import time
 from typing import Any
 
-from justwatch import channel_service, contract, criteria, library, lineup, refresh
+from justwatch import channel_service, contract, criteria, library, lineup, refresh, snapshots
 
 
 def _as_int(value: Any, default: int) -> int:
@@ -479,4 +481,73 @@ def op_get_channel_history(ctx) -> dict:
         **result,
         "note": "restore is a NEW Apply of a past definition — never a rewind "
                 "of the actually-aired ledger",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Refresh status + retry (durable truth for "what happens after Apply")
+# ---------------------------------------------------------------------------
+
+def op_get_channel_refresh_status(ctx) -> dict:
+    """What a worker owes this channel and what the last outcome was — read
+    from the two durable stores (the pending INTENT journal and the published
+    health snapshot), never inferred. ``pending`` non-null means refresh work
+    is outstanding; a ``healthStatus`` of ``unavailable`` means the last
+    check FAILED (last-known numbers are kept stale-flagged) and is
+    retryable via RequeueChannelRefresh. Readiness is deliberately NOT
+    synthesized: a fresh library with no entries reports ``null``s rather
+    than a guessed "ready" (the E2/E3 worker-identity remediation stays the
+    authority on what "current" means)."""
+    doc = _library(ctx)
+    pending = refresh.read_pending(ctx.data_dir)
+    snap = snapshots.read_snapshot(ctx.data_dir, ctx.assets_dir)
+    health_by_id = snap.get("channels") if isinstance(snap.get("channels"), dict) else {}
+    channel_id = str(ctx.args.get("channelId") or "").strip()
+    base = {
+        "pluginId": contract.PLUGIN_ID,
+        "contractVersion": contract.CONTRACT_VERSION,
+        "libraryRevision": doc["revision"],
+        "snapshotRevision": snap.get("revision"),
+        "computedAt": snap.get("computedAt"),
+    }
+    if channel_id:
+        entry = next((e for e in pending if e.get("channelId") == channel_id), None)
+        health = health_by_id.get(channel_id)
+        return {
+            **base,
+            "channelId": channel_id,
+            "pending": entry if isinstance(entry, dict) else None,
+            "health": health if isinstance(health, dict) else None,
+        }
+    return {
+        **base,
+        "pending": pending,
+        "healthStatusByChannel": {
+            cid: h.get("healthStatus") for cid, h in health_by_id.items()
+            if isinstance(h, dict) and h.get("healthStatus")
+        },
+    }
+
+
+def op_requeue_channel_refresh(ctx) -> dict:
+    """The UI's "Retry refresh": durably enqueue ONE channel's recompute
+    (forced past the health-current short-circuit for one pass). Bounded and
+    local — one small journal write under the library lock, no Stash calls —
+    so it is safe as a sync op; the recompute itself still runs on the next
+    refresh pass (Apply task, PrepareProgramming, or the scheduler)."""
+    channel_id = str(ctx.args.get("channelId") or "").strip()
+    if not channel_id:
+        raise ValueError("channelId is required")
+    doc = _library(ctx)
+    channel = next((c for c in doc["channels"] if c["id"] == channel_id), None)
+    if channel is None:
+        raise LookupError(f"no channel {channel_id!r} in the library")
+    entry = refresh.requeue(ctx.data_dir, channel, doc["revision"])
+    return {
+        "pluginId": contract.PLUGIN_ID,
+        "contractVersion": contract.CONTRACT_VERSION,
+        "queued": True,
+        "channelId": channel_id,
+        "generation": entry["generation"],
+        "note": "refresh re-queued; the next refresh pass recomputes this channel",
     }

@@ -96,13 +96,16 @@ def normalize(source: dict) -> dict:
                            "to": str(date.get("to") or "")}
         duration = source.get("duration")
         if isinstance(duration, dict):
-            lo = duration.get("min")
-            hi = duration.get("max")
             mins: dict[str, int] = {}
-            if isinstance(lo, int) and not isinstance(lo, bool) and lo > 0:
-                mins["min"] = lo
-            if isinstance(hi, int) and not isinstance(hi, bool) and hi > 0:
-                mins["max"] = hi
+            for half in ("min", "max"):
+                v = duration.get(half)
+                # Presence is the author's intent: an EXPLICIT 0 is a real
+                # bound (max: 0 = an intentionally empty pool), never noise.
+                # Keep any non-negative int, distinguish "key present" from
+                # blank, so a validated constrained source never normalizes
+                # into an invalid empty one (audit E8).
+                if isinstance(v, int) and not isinstance(v, bool) and v >= 0:
+                    mins[half] = v
             if mins:
                 out["duration"] = mins
         created = source.get("createdAt")
@@ -299,6 +302,12 @@ def validate(source: Any) -> list[dict]:
                 if isinstance(v, bool) or not isinstance(v, int) or v < 0:
                     err(f"source.duration.{half}", "bad_duration",
                         f"{half} must be a non-negative integer of seconds")
+                elif v > INT_MAX:
+                    # GraphQL Int is signed 32-bit; a bound above it would be
+                    # silently clamped by the wire, so reject it typed (E8).
+                    err(f"source.duration.{half}", "bad_duration",
+                        f"{half} exceeds the largest duration Stash accepts "
+                        f"({INT_MAX:,} seconds)")
             lo, hi = duration.get("min"), duration.get("max")
             if isinstance(lo, int) and isinstance(hi, int) and not isinstance(lo, bool) \
                     and not isinstance(hi, bool) and hi < lo:
@@ -353,7 +362,8 @@ def has_membership(source: dict) -> bool:
     return False
 
 
-def build_scene_filter(source: dict, object_filter: dict | None = None) -> dict:
+def build_scene_filter(source: dict, object_filter: dict | None = None,
+                       today: _dt.date | None = None) -> dict:
     """THE canonical projection of any supported source into a
     ``SceneFilterType`` variable — used by preview, Lineup, health, and BOTH
     schedulers' indexers so the pool being edited is always the pool that
@@ -371,6 +381,10 @@ def build_scene_filter(source: dict, object_filter: dict | None = None) -> dict:
     Dynamic scene-count semantics (defined ONCE): ``min`` inclusive, ``max``
     EXCLUSIVE — "at least min, fewer than max". Stash's BETWEEN is inclusive,
     so a combined range converts max to ``max - 1``.
+
+    ``today`` injects the UTC clock used to resolve created-at recency (the
+    rotation version already injects the same way) so tests can pin a day
+    without freezing production behavior (audit E9).
     """
     kind = source.get("type")
     if kind == "savedFilter":
@@ -431,17 +445,20 @@ def build_scene_filter(source: dict, object_filter: dict | None = None) -> dict:
                            "modifier": "BETWEEN"}
         duration = source.get("duration")
         if isinstance(duration, dict):
-            lo = int(duration.get("min") or 0)
+            # Presence, not truthiness: an explicit 0 bound is a real bound
+            # (max: 0 projects to a 0..0 BETWEEN — an intentionally empty
+            # pool), never "absent" with a widened INT_MAX upper (E8).
+            lo = duration.get("min")
             hi = duration.get("max")
             out["duration"] = {
-                "value": lo,
-                "value2": int(hi) if hi else INT_MAX,
+                "value": int(lo) if lo is not None else 0,
+                "value2": int(hi) if hi is not None else INT_MAX,
                 "modifier": "BETWEEN",
             }
         created = source.get("createdAt")
         if isinstance(created, dict):
             out["created_at"] = {
-                "value": created_cutoff(int(created["withinDays"])),
+                "value": created_cutoff(int(created["withinDays"]), today),
                 "modifier": "GREATER_THAN",
             }
         for facet, filter_key in (("studioSceneCount", "studios_filter"),
@@ -509,6 +526,15 @@ def rotation_signature(source: dict, sort: str, seed: int, size: int,
     return rotation_version(source, sort, int(seed), size, today)
 
 
+def _fmt_minutes(seconds: int) -> str:
+    """Whole-minute bounds read as minutes; sub-minute bounds keep decimals
+    instead of silently flooring (E8: authored precision is preserved)."""
+    minutes = seconds / 60
+    if minutes == int(minutes):
+        return f"{int(minutes)} min"
+    return f"{round(minutes, 2)} min"
+
+
 def summarize(source: dict, resolve_name=None) -> list[str]:
     """Plain-language membership sentences (server-side mirror of the editor's
     summary, used by ValidateChannelChanges effect output). ``resolve_name``
@@ -569,13 +595,14 @@ def summarize(source: dict, resolve_name=None) -> list[str]:
         lines.append(f"{rows}. Dated {date.get('from') or 'the beginning'} to {date.get('to') or 'today'}.")
     duration = source.get("duration")
     if isinstance(duration, dict):
-        rows += 1
         bounds = []
-        if duration.get("min"):
-            bounds.append(f"at least {int(duration['min']) // 60} min")
-        if duration.get("max"):
-            bounds.append(f"at most {int(duration['max']) // 60} min")
-        lines.append(f"{rows}. Running " + " and ".join(bounds) + ".")
+        if duration.get("min") is not None:
+            bounds.append(f"at least {_fmt_minutes(duration['min'])}")
+        if duration.get("max") is not None:
+            bounds.append(f"at most {_fmt_minutes(duration['max'])}")
+        if bounds:
+            rows += 1
+            lines.append(f"{rows}. Running " + " and ".join(bounds) + ".")
     created = source.get("createdAt")
     if isinstance(created, dict) and created.get("withinDays"):
         rows += 1

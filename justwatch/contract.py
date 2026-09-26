@@ -103,6 +103,8 @@ OPERATIONS: dict[str, str] = {
     "applyChannelChanges": "ApplyChannelChanges",
     "getChannelApplyResult": "GetChannelApplyResult",
     "getChannelHistory": "GetChannelHistory",
+    "getChannelRefreshStatus": "GetChannelRefreshStatus",
+    "requeueChannelRefresh": "RequeueChannelRefresh",
 }
 
 #: Operations a sync ``runPluginOperation`` may address (fast, bounded). The
@@ -113,7 +115,8 @@ SYNC_OPERATIONS = ("capabilities", "directory", "lineup", "previewLineup",
                    "programmingDesk", "previewProgramming", "programmingStatus",
                    "getChannelLibrary", "getChannelDirectory", "getChannelDefinition",
                    "validateChannelChanges", "previewChannelPool",
-                   "getChannelApplyResult", "getChannelHistory")
+                   "getChannelApplyResult", "getChannelHistory",
+                   "getChannelRefreshStatus", "requeueChannelRefresh")
 
 
 def capabilities(plugin_version: str) -> dict:
@@ -163,6 +166,14 @@ def capabilities(plugin_version: str) -> dict:
                 "applyOperation": "ApplyChannelChanges",
                 "validateOperation": "ValidateChannelChanges",
                 "resultOperation": "GetChannelApplyResult",
+            },
+            # Post-Apply refresh truth (additive v1): the durable pending-work
+            # journal + published health for "is my channel still refreshing /
+            # did the last check fail", plus a bounded requeue for the retry.
+            "refreshStatus": {
+                "version": 1,
+                "operation": "GetChannelRefreshStatus",
+                "requeueOperation": "RequeueChannelRefresh",
             },
             "poolPreview": {"version": 1, "operation": "PreviewChannelPool"},
             # The plugin exposes tuning settings, but they govern its own

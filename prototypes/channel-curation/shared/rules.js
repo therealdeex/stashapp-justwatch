@@ -10,7 +10,7 @@
 // A channel can alternatively be linked to a saved search (savedFilter), used
 // verbatim including its text query — shown read-only with a membership note.
 
-import { el, clear, entityPicker, debounce, fmtCount, hashOf } from "./ui.js";
+import { el, clear, entityPicker, fmtCount, hashOf } from "./ui.js";
 import { FIXTURES } from "./fixture-data.js";
 
 const ENT = {
@@ -25,6 +25,14 @@ export function entityName(kind, id) {
 }
 
 const ids = (v) => (Array.isArray(v) ? v.map(String) : []);
+
+// Minute rendering with authored precision (mirrors criteria._fmt_minutes).
+function fmtMinutes(seconds) {
+  const m = Number(seconds) / 60;
+  if (!Number.isFinite(m)) return "0 min";
+  if (Number.isInteger(m)) return `${m} min`;
+  return `${Math.round(m * 100) / 100} min`;
+}
 
 // Stable canonical form of a source: filter sources always carry every list
 // key (empty when unused) so "the editor touched nothing" stays byte-equal to
@@ -47,6 +55,40 @@ export function canonicalSource(source) {
 
 export function sourcesEquivalent(a, b) {
   return JSON.stringify(canonicalSource(a)) === JSON.stringify(canonicalSource(b));
+}
+
+// The ONE draft→wire serializer — mirrors production ui/index.js so the
+// prototype can never drift from what the plugin accepts (audit E1/E8):
+//   * genuinely empty facet arrays are OMITTED (the server rejects a
+//     present-but-empty list);
+//   * bounds are PRESENCE-based: an explicit 0 is a real bound, blank is
+//     absence;
+//   * q is trimmed and dropped when blank.
+// canonicalSource above stays COMPARISON-ONLY.
+export function toWireSource(source) {
+  const s = source || {};
+  if (s.type !== "filter") return s;
+  const out = { type: "filter" };
+  for (const k of ["tags", "tagsAny", "excludeTags", "performers", "performersAny", "studios", "studiosAny", "excludePerformers", "excludeStudios"]) {
+    const v = ids(s[k]).filter((x) => /^\d+$/.test(x));
+    if (v.length) out[k] = v;
+  }
+  if (s.date && (s.date.from || s.date.to)) out.date = { from: s.date.from || "", to: s.date.to || "" };
+  if (s.duration && typeof s.duration === "object") {
+    const spec = {};
+    if (s.duration.min != null) spec.min = s.duration.min;
+    if (s.duration.max != null) spec.max = s.duration.max;
+    if (spec.min != null || spec.max != null) out.duration = spec;
+  }
+  if (s.createdAt && s.createdAt.withinDays != null) out.createdAt = { withinDays: s.createdAt.withinDays };
+  if (typeof s.q === "string" && s.q.trim()) out.q = s.q.trim();
+  return out;
+}
+
+export function toWireChannel(channel) {
+  const c = JSON.parse(JSON.stringify(channel));
+  c.source = toWireSource(c.source);
+  return c;
 }
 
 function sortedIds(set) {
@@ -91,8 +133,8 @@ export function summarizeLines(source) {
   if (s.date?.from || s.date?.to) {
     active.push(`scenes dated ${s.date.from || "the beginning"} → ${s.date.to || "today"}`);
   }
-  if (s.duration?.min) active.push(`running at least ${Math.round(s.duration.min / 60)} minutes`);
-  if (s.duration?.max) active.push(`running at most ${Math.round(s.duration.max / 60)} minutes`);
+  if (s.duration?.min != null) active.push(`running at least ${fmtMinutes(s.duration.min)}`);
+  if (s.duration?.max != null) active.push(`running at most ${fmtMinutes(s.duration.max)}`);
   if (s.createdAt?.withinDays) active.push(`added to the library within the last ${s.createdAt.withinDays} days (moves with the calendar)`);
   if (s.studioSceneCount && (s.studioSceneCount.min || s.studioSceneCount.max)) {
     const {min, max} = s.studioSceneCount;
@@ -349,16 +391,27 @@ export function ruleEditor(sourceDraft, onDraftChange) {
       onchange: () => { s.date = { from: dateFrom.value || "", to: dateTo.value || "" }; if (!dateFrom.value && !dateTo.value) s.date = undefined; changed(); rerender(); } });
     const dateTo = el("input", { type: "date", value: s.date?.to || "", "aria-label": "Scene date to",
       onchange: () => { s.date = { from: dateFrom.value || "", to: dateTo.value || "" }; if (!dateFrom.value && !dateTo.value) s.date = undefined; changed(); rerender(); } });
-    const durMin = el("input", { type: "number", min: 0, style: "width:90px", value: s.duration?.min ? Math.round(s.duration.min / 60) : "", "aria-label": "Minimum duration in minutes",
+    const durMin = el("input", { type: "number", min: 0, step: "any", style: "width:90px",
+      value: s.duration?.min != null ? (Number.isInteger(s.duration.min / 60) ? String(s.duration.min / 60) : String(Math.round(s.duration.min / 60 * 100) / 100)) : "",
+      "aria-label": "Minimum duration in minutes",
       placeholder: "min",
       onchange: () => { setDuration(); } });
-    const durMax = el("input", { type: "number", min: 0, style: "width:90px", value: s.duration?.max ? Math.round(s.duration.max / 60) : "", "aria-label": "Maximum duration in minutes",
+    const durMax = el("input", { type: "number", min: 0, step: "any", style: "width:90px",
+      value: s.duration?.max != null ? (Number.isInteger(s.duration.max / 60) ? String(s.duration.max / 60) : String(Math.round(s.duration.max / 60 * 100) / 100)) : "",
+      "aria-label": "Maximum duration in minutes",
       placeholder: "max",
       onchange: () => { setDuration(); } });
     function setDuration() {
-      const lo = parseInt(durMin.value, 10), hi = parseInt(durMax.value, 10);
-      if (Number.isNaN(lo) && Number.isNaN(hi)) s.duration = undefined;
-      else s.duration = { min: Number.isNaN(lo) ? 0 : lo * 60, ...(Number.isNaN(hi) ? {} : { max: hi * 60 }) };
+      // Decimals allowed (stored to the nearest second); explicit 0 is a
+      // real bound (presence-based, never erased); blank is absence (E8).
+      const lo = durMin.value.trim() === "" ? undefined : Number(durMin.value);
+      const hi = durMax.value.trim() === "" ? undefined : Number(durMax.value);
+      if (lo === undefined && hi === undefined) s.duration = undefined;
+      else {
+        s.duration = {};
+        if (lo !== undefined && Number.isFinite(lo)) s.duration.min = Math.round(lo * 60);
+        if (hi !== undefined && Number.isFinite(hi)) s.duration.max = Math.round(hi * 60);
+      }
       changed();
       rerender();
     }
@@ -366,7 +419,7 @@ export function ruleEditor(sourceDraft, onDraftChange) {
       placeholder: "days",
       onchange: () => { s.createdAt = created.value ? { withinDays: parseInt(created.value, 10) } : undefined; changed(); rerender(); } });
     const q = el("input", { type: "text", value: s.q || "", placeholder: "text search…", style: "flex:1", "aria-label": "Text search",
-      oninput: debounce(() => { s.q = q.value.trim() || undefined; changed(); }, 300) });
+      oninput: () => { s.q = q.value.trim() || undefined; changed(); } }); // synchronous draft truth (E6)
 
     node.append(el("div", { class: "rule-row" },
       el("div", { class: "rule-head" }, el("span", { class: "rule-name" }, "Scene details")),

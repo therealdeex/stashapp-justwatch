@@ -217,14 +217,23 @@ def _channel_health(client: Any, channel: dict, previous: dict) -> dict:
         "rotationVersion": rotation["rotationVersion"],
     }
     if not items:
-        # Empty rotation: either the source truly has nothing playable (off
-        # air) or the source entity/filter no longer exists (relink). An
-        # existing source with a rotation always answered queries, so the
-        # existence check only runs when the rotation is empty.
+        # Empty rotation: WHERE the emptiness comes from decides the status.
+        # Rule sources (filter/criteria) query Stash directly — a successful
+        # zero-result query means the rules are valid and simply match
+        # nothing, which is OFF AIR, never a "missing source" (audit E7:
+        # resolve_source only understands linked shapes and would answer
+        # false for a criteria pool). Linked sources (saved search / tag /
+        # performer / studio) may genuinely have lost their target entity,
+        # so the existence lookup still runs for them — and a FAILED lookup
+        # is "unavailable" (stale, retryable), never "missing".
+        if source.get("type") in ("filter", "criteria"):
+            entry["healthStatus"] = "offAir"
+            entry["sourceMissing"] = False
+            return entry
         try:
             _, exists = lineup.resolve_source(client, source)
         except Exception:
-            exists = False
+            return _stale_entry(previous, channel_id, "unavailable")
         entry["healthStatus"] = "offAir" if exists else "missingSource"
         entry["sourceMissing"] = not exists
     return entry

@@ -11,7 +11,7 @@
 // and need another Apply.
 
 import { el, clear, tile, statusChip, debounce, clone, deepEqual, toast, confirmDialog, sectionCard, fmtCount, fmtDuration } from "./ui.js";
-import { ruleEditor, summaryBox, summarizeLines, sourcesEquivalent } from "./rules.js";
+import { ruleEditor, summaryBox, summarizeLines, sourcesEquivalent, toWireSource, toWireChannel } from "./rules.js";
 
 const PALETTE = ["#E91E63", "#D32F2F", "#F57C00", "#F9A825", "#AFB42B", "#3883C",
   "#00897B", "#00ACC1", "#3949AB", "#5E35B1", "#7B1FA2", "#455A64"];
@@ -73,13 +73,14 @@ export function createEditorPane({ api, drafts, channelId, onChanged, compact = 
   const schedulePreview = debounce(() => { void loadPreview(); }, 350);
 
   async function loadPreview() {
-    const mySig = JSON.stringify(draft.source || {});
+    // The preview sees exactly what Apply sends: the wire source (E1).
+    const mySig = JSON.stringify(toWireSource(draft.source || {}));
     previewStale = true;
     renderPreview();
     try {
-      const result = await api.preview({ id: channelId, source: draft.source, seedCount: stored?.seedCount, programming: draft.programming });
+      const result = await api.preview({ id: channelId, source: toWireSource(draft.source), seedCount: stored?.seedCount, programming: draft.programming });
       if (destroyed) return;
-      if (JSON.stringify(draft.source || {}) !== mySig) return; // stale response: ignore
+      if (JSON.stringify(toWireSource(draft.source || {})) !== mySig) return; // stale response: ignore
       preview = result;
       previewStale = false;
       renderPreview();
@@ -380,12 +381,14 @@ export function createEditorPane({ api, drafts, channelId, onChanged, compact = 
       renderBar();
       return;
     }
-    // Snapshot — immutable from here. Later edits re-dirty the editor.
-    applyingSnapshot = clone(draft);
+    // Snapshot — immutable from here, in the ONE wire form preview showed and
+    // the retry replays (E1). Later edits re-dirty the editor.
+    applyingSnapshot = toWireChannel(clone(draft));
     // A previous attempt that died in transport keeps its request id: retrying
-    // an unchanged draft reuses it, so a request that actually committed
-    // server-side resolves to the SAME receipt instead of applying twice.
-    const reusePending = pendingRequestId && deepEqual(applyingSnapshot, pendingSnapshot);
+    // an unchanged draft (identical ON THE WIRE) reuses it, so a request that
+    // actually committed server-side resolves to the SAME receipt instead of
+    // applying twice.
+    const reusePending = pendingRequestId && deepEqual(toWireChannel(clone(draft)), pendingSnapshot);
     const requestId = reusePending ? pendingRequestId : newRequestId();
     const sourceTouched = !sourcesEquivalent(stored?.source, applyingSnapshot.source);
     const ops = [{ op: "channel.put", channel: applyingSnapshot, _sourceTouched: sourceTouched }];
@@ -414,7 +417,7 @@ export function createEditorPane({ api, drafts, channelId, onChanged, compact = 
       drafts.drop(channelId);
       lastAppliedRevision = receipt.revision;
       applyError = null;
-      if (deepEqual(draft, applyingSnapshot)) {
+      if (deepEqual(toWireChannel(clone(draft)), applyingSnapshot)) {
         draft = clone(stored);
         phase = "applied";
         preparingTimer = setTimeout(() => {

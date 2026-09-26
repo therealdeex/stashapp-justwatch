@@ -76,11 +76,18 @@ def test_no_rules_at_all_is_invalid_but_empty_results_are_valid():
 
 
 def test_recency_is_utc_and_moves_with_the_calendar():
-    cutoff = created_cutoff(180, today=__import__("datetime").date(2026, 9, 23))
+    # One clock drives BOTH paths (audit E9): the test pins a day instead of
+    # racing the real calendar, and the rollover is checked deterministically.
+    import datetime as dt
+    day = dt.date(2026, 9, 23)
+    cutoff = created_cutoff(180, today=day)
     assert cutoff == "2026-03-27"
-    f = criteria.build_scene_filter({"type": "criteria", "tags": ["1"], "createdAt": {"withinDays": 180}})
+    f = criteria.build_scene_filter({"type": "criteria", "tags": ["1"], "createdAt": {"withinDays": 180}}, today=day)
     assert f["created_at"]["value"] == cutoff
     assert f["created_at"]["modifier"] == "GREATER_THAN"
+    nxt = criteria.build_scene_filter({"type": "criteria", "tags": ["1"], "createdAt": {"withinDays": 180}},
+                                      today=day + dt.timedelta(days=1))
+    assert nxt["created_at"]["value"] == "2026-03-28"
 
 
 def test_metadata_only_rule_is_valid():
