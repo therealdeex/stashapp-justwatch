@@ -107,15 +107,20 @@ const FAS = {
   faCheck: {iconName: 'check', icon: [512, 512, [], 'f00c']},
 };
 
-function makePage(state) {
+function makePage(theme) {
   const scripts = {
     '/react.js': fs.readFileSync(path.join(deps, 'react/umd/react.development.js')),
     '/react-dom.js': fs.readFileSync(path.join(deps, 'react-dom/umd/react-dom.development.js')),
     '/ui.js': fs.readFileSync(path.join(uiDir, 'index.js')),
     '/ui.css': fs.readFileSync(path.join(uiDir, 'styles.css')),
   };
+  // The UI derives its tokens from Stash's Bootstrap vars; simulate a light
+  // theme by defining them on <body> (dark run leaves them unset → fallbacks).
+  const bodyStyle = theme === 'light'
+    ? 'background:#f2f4f7;margin:0;--body-color:#f2f4f7;--text-color:#1f2933;--primary:#137cbd;--danger:#d64545'
+    : 'background:#202b33;margin:0';
   const html = `<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="/ui.css">
-<body style="background:#202b33;margin:0"><div id="root"></div>
+<body style="${bodyStyle}"><div id="root"></div>
 <script src="/react.js"></script><script src="/react-dom.js"></script>
 <script>
 window.PluginApi = {React, libraries:{FontAwesomeSolid: ${JSON.stringify(FAS)}},
@@ -128,8 +133,8 @@ window.PluginApi = {React, libraries:{FontAwesomeSolid: ${JSON.stringify(FAS)}},
   return {scripts, html};
 }
 
-async function boot(browser, viewport) {
-  const {scripts, html} = makePage();
+async function boot(browser, viewport, theme) {
+  const {scripts, html} = makePage(theme);
   const context = await browser.newContext({viewport: viewport || {width: 1500, height: 950}});
   const page = await context.newPage();
   const state = {errors: []};
@@ -220,7 +225,7 @@ const settle = (ms) => new Promise((r) => setTimeout(r, ms));
     await b.page.waitForTimeout(900); // preview + name resolution settle
     await shot(b.page, '01-main');
     // rules card
-    await b.page.locator('.jw-card-title', {hasText: 'What airs (rules)'}).scrollIntoViewIfNeeded();
+    await b.page.locator('.jw-card-title', {hasText: 'What airs'}).scrollIntoViewIfNeeded();
     await b.page.waitForTimeout(300);
     await shot(b.page, '02-rules');
     // programming + preview + action bar
@@ -266,22 +271,27 @@ const settle = (ms) => new Promise((r) => setTimeout(r, ms));
     await b.page.locator('.jw-pick-row').nth(2).click();
     await shot(b.page, '06-picker');
     await b.page.keyboard.press('Escape');
-    // groups
-    await b.page.getByRole('button', {name: 'Groups…', exact: true}).click();
+    // groups (behind the "More actions" overflow menu)
+    await b.page.getByRole('button', {name: 'More actions'}).click();
+    await b.page.getByRole('menuitem', {name: 'Groups…', exact: true}).click();
     await b.page.locator('.jw-groups-row').first().waitFor();
+    await b.page.waitForTimeout(400); // dialog entrance animation
     await shot(b.page, '07-groups');
     await b.page.getByRole('button', {name: 'Delete group Archive'}).click();
-    await b.page.waitForTimeout(250);
+    await b.page.waitForTimeout(400);
     await shot(b.page, '07b-groups-deleting');
     await b.page.keyboard.press('Escape');
     // new channel
     await b.page.getByRole('button', {name: '+ New channel…'}).click();
+    await b.page.locator('.jw-dialog').waitFor();
+    await b.page.waitForTimeout(400);
     await shot(b.page, '08-new-channel');
     await b.page.keyboard.press('Escape');
     // history via the ⋯ menu
     await b.page.getByRole('button', {name: 'Channel actions'}).click();
     await b.page.getByRole('menuitem', {name: 'History…'}).click();
     await b.page.locator('.jw-history-row').first().waitFor();
+    await b.page.waitForTimeout(400);
     await shot(b.page, '09-history');
     await b.context.close();
   }
@@ -325,6 +335,17 @@ const settle = (ms) => new Promise((r) => setTimeout(r, ms));
     await b.page.locator('#f-name').waitFor({timeout: 10000});
     await b.page.waitForTimeout(700);
     await shot(b.page, '12-narrow');
+    await b.context.close();
+  }
+  // --- light theme: the token rework must hold on a light Stash theme --------
+  {
+    const b = await boot(browser, undefined, 'light');
+    await b.page.locator('#f-name').waitFor({timeout: 10000});
+    await b.page.waitForTimeout(900);
+    await shot(b.page, '16-light-main');
+    await b.page.locator('.jw-card-title', {hasText: 'What airs'}).scrollIntoViewIfNeeded();
+    await b.page.waitForTimeout(300);
+    await shot(b.page, '17-light-rules');
     await b.context.close();
   }
   await browser.close();
