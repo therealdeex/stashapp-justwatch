@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased (Apply receipt poll fix, 2026-09-28)
+
+- **"Still says Draft after Apply" fixed.** The receipt poll waited on a
+  chain of `setTimeout` calls; browsers intensively throttle chained timers
+  in hidden/occluded/backgrounded tabs (down to ~1 wake per minute), so a
+  committed Apply could sit "Applying…" with the draft chip showing for many
+  minutes even though the receipt had been durable for seconds. The poll is
+  now bounded by a wall-clock budget (120s of `Date.now()`, not an iteration
+  count), and an immediate poll fires when the tab becomes visible or
+  focused again — coming back to the tab resolves the receipt instantly.
+  Apply semantics are unchanged: unknown past the budget keeps the draft,
+  and re-Apply reuses the same requestId (idempotent replay). Reproduction
+  and verification harnesses in `analysis/draft-badge-repro-2026-09-28/`.
+
 ## Unreleased (Channel Studio UX pass, 2026-09-26)
 
 Quality-and-experience pass over the Studio UI. No protocol, schema or
