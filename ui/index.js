@@ -60,6 +60,8 @@
   const GRAPHQL_INT_MAX = 2147483647; // Stash's Int is signed 32-bit
   const BANDS = { ch: [1, 99], net: [100, 899] };
   const DRAFT_COUNT_CAP = 100; // chips shown per facet line
+  const CHIP_FILTER_MIN = 12;  // facet lists longer than this get a filter box
+  const CLEAR_CONFIRM_MIN = 10; // bulk removals larger than this ask first
 
   const SORTS = [
     { key: "shuffle", label: "Shuffle" },
@@ -1230,6 +1232,137 @@
   }
 
   // ------------------------------------------------------------------
+  // FacetChipList — one facet's entity list (includes or exclusions).
+  // Per-chip removal plus batch ergonomics for long lists: filter box,
+  // manage mode (toggle chips + Select all shown + Remove N), Clear all.
+  // filter/manage/selection are VIEW state only — the draft changes only
+  // through the single onRemove/onClearAll callbacks (one edit per action).
+  // ------------------------------------------------------------------
+
+  function FacetChipList({ ids, kind, variant, noun, confirm, onRemove, onClearAll }) {
+    const [filter, setFilter] = useState("");
+    const [manage, setManage] = useState(false);
+    const [sel, setSel] = useState(() => new Set());
+    const filterRef = useRef(null);
+
+    const nameOf = (id) => entityName(kind, id);
+    const idSet = new Set(ids);
+    const selLive = new Set([...sel].filter((id) => idSet.has(id)));
+    const q = filter.trim().toLowerCase();
+    const filtered = q ? ids.filter((id) => nameOf(id).toLowerCase().includes(q)) : ids;
+    const shown = filtered.slice(0, DRAFT_COUNT_CAP);
+    const overflow = filtered.length - shown.length;
+    const showFilter = ids.length > CHIP_FILTER_MIN || manage;
+
+    useEffect(() => {
+      if (manage && filterRef.current) filterRef.current.focus();
+    }, [manage]);
+
+    const exitManage = () => { setManage(false); setSel(new Set()); };
+
+    const toggleSel = (id) => setSel((cur) => {
+      const next = new Set(selLive.size === cur.size ? cur : selLive);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+    const removeSelected = async () => {
+      const list = [...selLive];
+      if (!list.length) return;
+      if (list.length > CLEAR_CONFIRM_MIN) {
+        const ok = await confirm({
+          title: "Remove " + noun,
+          message: "Remove the " + list.length.toLocaleString() + " selected " + noun + " from this rule?",
+          confirmLabel: "Remove " + list.length.toLocaleString(),
+        });
+        if (!ok) return;
+      }
+      onRemove(list);
+      setSel(new Set());
+      // the Remove button is now disabled (0 selected) — return focus to the
+      // filter so keyboard flow (and Escape-to-exit) keeps working
+      if (filterRef.current) filterRef.current.focus();
+    };
+
+    if (!ids.length) return null;
+
+    return h("div", {
+      className: "jw-facet-chips",
+      onKeyDown: (e) => { if (e.key === "Escape" && manage) { e.stopPropagation(); exitManage(); } },
+    },
+      h("div", { className: "jw-chipbar" },
+        showFilter
+          ? h("input", {
+              ref: filterRef, type: "search",
+              className: "jw-input jw-chip-filter",
+              placeholder: "Filter these…", "aria-label": "Filter these " + noun,
+              value: filter, onChange: (e) => setFilter(e.target.value),
+            })
+          : null,
+        h("button", {
+          className: "jw-btn jw-btn-ghost jw-btn-small",
+          "aria-pressed": manage ? "true" : "false",
+          title: manage ? "Back to plain chips" : "Pick many at once to remove them",
+          onClick: () => (manage ? exitManage() : setManage(true)),
+        }, manage ? "Done" : "Manage"),
+        manage ? h("span", { className: "jw-chipbar-sel" },
+          selLive.size.toLocaleString() + " selected") : null,
+        manage ? h("button", {
+          className: "jw-btn jw-btn-ghost jw-btn-small",
+          disabled: !shown.length,
+          onClick: () => setSel(new Set(shown)),
+        }, "Select all shown") : null,
+        manage ? h("button", {
+          className: "jw-btn jw-btn-small",
+          disabled: !selLive.size,
+          onClick: () => void removeSelected(),
+        }, "Remove " + (selLive.size ? selLive.size.toLocaleString() + " " : "") + "selected") : null,
+        h("button", {
+          className: "jw-btn jw-btn-ghost jw-btn-small jw-chipbar-clear",
+          title: "Remove every " + noun.replace(/s$/, "") + " from this list",
+          onClick: onClearAll,
+        }, "Clear all"),
+      ),
+      filtered.length
+        ? h("div", { className: "jw-entity-summary", role: manage ? "group" : undefined },
+            shown.map((id) => manage
+              ? h("button", {
+                  key: id, type: "button",
+                  className: "jw-entity-chip jw-entity-chip-check"
+                    + (variant === "exclude" ? " jw-entity-chip-excl" : "")
+                    + (selLive.has(id) ? " jw-chip-active" : ""),
+                  "aria-pressed": selLive.has(id) ? "true" : "false",
+                  onClick: () => toggleSel(id),
+                },
+                  h("span", { className: "jw-entity-check", "aria-hidden": "true" },
+                    selLive.has(id) ? "✓" : ""),
+                  h("span", null, nameOf(id)))
+              : h("span", {
+                  key: id,
+                  className: "jw-entity-chip" + (variant === "exclude" ? " jw-entity-chip-excl" : ""),
+                },
+                  h("span", null, nameOf(id)),
+                  h("button", {
+                    "aria-label": (variant === "exclude" ? "Keep " : "Remove ") + nameOf(id),
+                    onClick: () => onRemove([id]),
+                  }, "✕"))),
+            overflow > 0
+              ? (manage
+                  ? h("span", { className: "jw-hint" },
+                      overflow.toLocaleString() + " more hidden — use the filter")
+                  : h("button", {
+                      className: "jw-entity-chip jw-entity-overflow",
+                      title: "Show and manage all " + filtered.length.toLocaleString(),
+                      onClick: () => { setFilter(""); setManage(true); },
+                    }, "+ " + overflow.toLocaleString() + " more"))
+              : null,
+          )
+        : h("p", { className: "jw-hint" }, "No " + noun + " match \"" + filter + "\"."),
+    );
+  }
+
+  // ------------------------------------------------------------------
   // Groups manager — a true staged draft: renames/reorders/creates/deletes
   // stage locally; ONE Apply commits them as a single transaction (audit C9:
   // the old dialog wrote on blur, violating explicit Apply).
@@ -1253,8 +1386,10 @@
     }, [rows, server, deletes]);
 
     const rename = (gid, name) => {
-      const trimmed = String(name || "").trim();
-      setRows((cur) => cur.map((g) => (g.id === gid ? { ...g, name: trimmed } : g)));
+      // raw text while typing (trailing spaces stay typable); dirty-compare
+      // and apply() trim, so Apply always commits the trimmed name — even
+      // when the field was never blurred (audit: blur-only commit lost renames)
+      setRows((cur) => cur.map((g) => (g.id === gid ? { ...g, name: String(name) } : g)));
     };
     const move = (gid, dir) => {
       setRows((cur) => {
@@ -1359,10 +1494,9 @@
         rows.filter((g) => !deletes[g.id]).map((g, i) => h("div", { key: g.id, className: "jw-groups-row", role: "listitem" },
           h("span", { className: "jw-groups-pos" }, "#" + (i + 1)),
           h("input", {
-            className: "jw-input jw-groups-name", defaultValue: g.name,
-            key: "name-" + g.id + "-" + (g.staged ? "new" : "0"),
+            className: "jw-input jw-groups-name", value: g.name,
             "aria-label": "Group name " + g.name,
-            onBlur: (e) => rename(g.id, e.target.value),
+            onChange: (e) => rename(g.id, e.target.value),
             onKeyDown: (e) => { if (e.key === "Enter") e.target.blur(); },
           }),
           h("span", { className: "jw-groups-count" }, memberCount(g.id) + " ch"),
@@ -2530,14 +2664,42 @@
         return d;
       });
 
-      const toggleLogic = (mode) => setFacet((s) => {
-        // Move the ids of BOTH lists into the chosen storage field (sparse
-        // sources may omit the unused list entirely).
-        const merged = sortedIds([...idsOf(s[cfg.allKey]), ...idsOf(s[cfg.anyKey])]);
-        s[cfg.allKey] = mode === "all" ? merged : [];
-        s[cfg.anyKey] = mode === "any" ? merged : [];
-        return s;
-      });
+      const toggleLogic = (mode) => {
+        setFacet((s) => {
+          // Move the ids of BOTH lists into the chosen storage field (sparse
+          // sources may omit the unused list entirely).
+          const merged = sortedIds([...idsOf(s[cfg.allKey]), ...idsOf(s[cfg.anyKey])]);
+          s[cfg.allKey] = mode === "all" ? merged : [];
+          s[cfg.anyKey] = mode === "any" ? merged : [];
+          return s;
+        });
+        toast("Switched to " + mode.toUpperCase() + " — same " + cfg.noun + ", "
+          + (mode === "all" ? "a scene must match every one" : "a scene needs at least one") + ".", "");
+      };
+
+      const clearIncludes = async () => {
+        if (union.length > CLEAR_CONFIRM_MIN) {
+          const ok = await confirm({
+            title: "Clear " + cfg.noun,
+            message: "Remove all " + union.length.toLocaleString() + " chosen " + cfg.noun + " from this rule?",
+            confirmLabel: "Clear all",
+          });
+          if (!ok) return;
+        }
+        setFacet((s) => { s[cfg.allKey] = []; s[cfg.anyKey] = []; return s; });
+      };
+
+      const clearExclusions = async () => {
+        if (excl.length > CLEAR_CONFIRM_MIN) {
+          const ok = await confirm({
+            title: "Clear excluded " + cfg.noun,
+            message: "Stop excluding all " + excl.length.toLocaleString() + " " + cfg.noun + "?",
+            confirmLabel: "Clear all",
+          });
+          if (!ok) return;
+        }
+        setFacet((s) => { s[cfg.exclKey] = []; return s; });
+      };
 
       const pressedAll = all.length > 0 && any.length === 0;
       const pressedAny = any.length > 0 && all.length === 0;
@@ -2582,16 +2744,25 @@
             h("button", {
               "aria-pressed": pressedAll ? "true" : "false",
               className: pressedAll ? "jw-logic-on" : "",
-              title: "A scene must match every one of these",
+              disabled: union.length === 0,
+              title: union.length === 0
+                ? "Pick " + cfg.noun + " first, then choose the match logic"
+                : "A scene must match every one of these",
               onClick: () => toggleLogic("all"),
             }, "ALL"),
             h("button", {
               "aria-pressed": pressedAny ? "true" : "false",
               className: pressedAny ? "jw-logic-on" : "",
-              title: "A scene matches at least one of these",
+              disabled: union.length === 0,
+              title: union.length === 0
+                ? "Pick " + cfg.noun + " first, then choose the match logic"
+                : "A scene matches at least one of these",
               onClick: () => toggleLogic("any"),
             }, "ANY"),
           ),
+          union.length === 0
+            ? h("span", { className: "jw-hint" }, "match logic applies once you choose " + cfg.noun)
+            : null,
           h("button", { className: "jw-btn jw-btn-small", onClick: () => pickInto("main") },
             "Choose (" + (union.length ? union.length.toLocaleString() : "none") + ")"),
           h("label", { className: "jw-exclude-label" },
@@ -2600,33 +2771,58 @@
               excl.length ? excl.length.toLocaleString() : "none"),
           ),
         ),
-        h("div", { className: "jw-entity-summary" },
-          union.length
-            ? union.slice(0, DRAFT_COUNT_CAP).map((id) => h("span", { key: id, className: "jw-entity-chip" },
-                h("span", null, entityName(cfg.kind, id) + (any.includes(id) ? " (any)" : "")),
-                h("button", {
-                  "aria-label": "Remove " + entityName(cfg.kind, id),
-                  onClick: () => setFacet((s) => {
-                    s[cfg.allKey] = (s[cfg.allKey] || []).filter((x) => x !== id);
-                    s[cfg.anyKey] = (s[cfg.anyKey] || []).filter((x) => x !== id);
-                    return s;
+        union.length
+          ? h("div", null,
+              h("span", { className: "jw-chip-scope" },
+                pressedAll ? "all of" : pressedAny ? "any of" : "matching"),
+              all.length > 0 && any.length > 0
+                // transient both-lists state the model allows before
+                // validation: show each list under its own label
+                ? h("div", null,
+                    h("span", { className: "jw-chip-scope" }, "all of"),
+                    h(FacetChipList, {
+                      ids: all, kind: cfg.kind, variant: "include", noun: cfg.noun, confirm,
+                      onRemove: (ids) => setFacet((s) => {
+                        const rm = new Set(ids);
+                        s[cfg.allKey] = (s[cfg.allKey] || []).filter((x) => !rm.has(x));
+                        return s;
+                      }),
+                      onClearAll: () => setFacet((s) => { s[cfg.allKey] = []; return s; }),
+                    }),
+                    h("span", { className: "jw-chip-scope" }, "any of"),
+                    h(FacetChipList, {
+                      ids: any, kind: cfg.kind, variant: "include", noun: cfg.noun, confirm,
+                      onRemove: (ids) => setFacet((s) => {
+                        const rm = new Set(ids);
+                        s[cfg.anyKey] = (s[cfg.anyKey] || []).filter((x) => !rm.has(x));
+                        return s;
+                      }),
+                      onClearAll: () => setFacet((s) => { s[cfg.anyKey] = []; return s; }),
+                    }))
+                : h(FacetChipList, {
+                    ids: union, kind: cfg.kind, variant: "include", noun: cfg.noun, confirm,
+                    onRemove: (ids) => setFacet((s) => {
+                      const rm = new Set(ids);
+                      s[cfg.allKey] = (s[cfg.allKey] || []).filter((x) => !rm.has(x));
+                      s[cfg.anyKey] = (s[cfg.anyKey] || []).filter((x) => !rm.has(x));
+                      return s;
+                    }),
+                    onClearAll: () => void clearIncludes(),
                   }),
-                }, "✕"),
-              ))
-            : h("span", { className: "jw-hint" }, "none"),
-          union.length > DRAFT_COUNT_CAP
-            ? h("span", { className: "jw-entity-chip" }, "+ " + (union.length - DRAFT_COUNT_CAP) + " more")
-            : null,
-        ),
+            )
+          : h("p", { className: "jw-hint" }, "none — every " + cfg.noun.replace(/s$/, "") + " matches until you narrow it"),
         excl.length
-          ? h("div", { className: "jw-entity-summary" },
-              excl.slice(0, DRAFT_COUNT_CAP).map((id) => h("span", { key: id, className: "jw-entity-chip jw-entity-chip-excl" },
-                h("span", null, "without " + entityName(cfg.kind, id)),
-                h("button", {
-                  "aria-label": "Keep " + entityName(cfg.kind, id),
-                  onClick: () => setFacet((s) => { s[cfg.exclKey] = (s[cfg.exclKey] || []).filter((x) => x !== id); return s; }),
-                }, "✕"),
-              )))
+          ? h("div", null,
+              h("span", { className: "jw-chip-scope" }, "without"),
+              h(FacetChipList, {
+                ids: excl, kind: cfg.kind, variant: "exclude", noun: cfg.noun, confirm,
+                onRemove: (ids) => setFacet((s) => {
+                  const rm = new Set(ids);
+                  s[cfg.exclKey] = (s[cfg.exclKey] || []).filter((x) => !rm.has(x));
+                  return s;
+                }),
+                onClearAll: () => void clearExclusions(),
+              }))
           : null,
         cfg.sceneKey ? h("div", { className: "jw-dynamic-row" },
           h("span", { className: "jw-dynamic-label" }, "…or match by activity:"),
@@ -2674,7 +2870,7 @@
           h("span", { className: "jw-rule-name" }, "Scene details"),
         ),
         h("div", { className: "jw-rule-dates" },
-          h("label", { className: "jw-dynamic-num" }, "dated",
+          h("label", { className: "jw-dynamic-num" }, "Released from",
             h("input", {
               type: "date", "aria-label": "Scene date from", value: dateFrom,
               onChange: (e) => setMeta((s) => {
@@ -2683,16 +2879,16 @@
                 return s;
               }),
             })),
-          h("span", { className: "jw-hint" }, "→"),
-          h("input", {
-            type: "date", "aria-label": "Scene date to", value: dateTo,
-            onChange: (e) => setMeta((s) => {
-              s.date = { from: s.date && s.date.from ? s.date.from : "", to: e.target.value };
-              if (!s.date.from && !s.date.to) delete s.date;
-              return s;
-            }),
-          }),
-          h("label", { className: "jw-dynamic-num" }, "duration ≥",
+          h("label", { className: "jw-dynamic-num" }, "to",
+            h("input", {
+              type: "date", "aria-label": "Scene date to", value: dateTo,
+              onChange: (e) => setMeta((s) => {
+                s.date = { from: s.date && s.date.from ? s.date.from : "", to: e.target.value };
+                if (!s.date.from && !s.date.to) delete s.date;
+                return s;
+              }),
+            })),
+          h("label", { className: "jw-dynamic-num" }, "Min length",
             h("input", {
               type: "number", min: 0, step: "any", style: { width: "76px" },
               id: "f-dur-min", "aria-label": "Minimum duration in minutes",
@@ -2700,7 +2896,7 @@
               onChange: (e) => setDurationHalf("min", e.target.value),
               onBlur: () => setDurText((t) => Object.assign({}, t, { min: null })),
             })),
-          h("label", { className: "jw-dynamic-num" }, "≤",
+          h("label", { className: "jw-dynamic-num" }, "Max length",
             h("input", {
               type: "number", min: 0, step: "any", style: { width: "76px" },
               id: "f-dur-max", "aria-label": "Maximum duration in minutes",
@@ -2708,10 +2904,10 @@
               onChange: (e) => setDurationHalf("max", e.target.value),
               onBlur: () => setDurText((t) => Object.assign({}, t, { max: null })),
             })),
-          h("span", { className: "jw-hint" }, "min · decimals ok"),
+          h("span", { className: "jw-hint" }, "minutes · decimals ok"),
         ),
         h("div", { className: "jw-rule-dates", style: { marginTop: "8px" } },
-          h("label", { className: "jw-dynamic-num" }, "added within",
+          h("label", { className: "jw-dynamic-num" }, "Added within last",
             h("input", {
               type: "number", min: 1, style: { width: "76px" }, "aria-label": "Added within days",
               value: within, placeholder: "days",
@@ -2725,7 +2921,7 @@
           h("span", { className: "jw-hint" }, "days"),
           h("input", {
             type: "text", id: "f-qsearch", className: "jw-input", style: { flex: 1 },
-            "aria-label": "Text search", placeholder: "text search…", value: qValue,
+            "aria-label": "Text search", placeholder: "title/details contain…", value: qValue,
             onChange: (e) => {
               const v = e.target.value;
               setQLocal(v); // the visible mirror…
@@ -2843,6 +3039,23 @@
             n ? n + (n === 1 ? " program apart" : " programs apart") : "Follow play order"))),
         ),
       ),
+      h("div", { className: "jw-field" },
+        h("span", { className: "jw-field-label" }, "Play order"),
+        h("div", { className: "jw-chip-row", role: "group", "aria-label": "Play order" },
+          SORTS.map((s) => h("button", {
+            key: s.key,
+            className: "jw-chip" + ((draft.sort || "shuffle") === s.key ? " jw-chip-active" : ""),
+            "aria-pressed": ((draft.sort || "shuffle") === s.key) ? "true" : "false",
+            onClick: () => edit((d) => { d.sort = s.key; return d; }),
+          }, s.label)),
+          draft.sort && !SORTS.some((s) => s.key === draft.sort)
+            ? h("span", {
+                className: "jw-chip jw-chip-active",
+                title: "Stored value this editor does not offer — picking a chip replaces it",
+              }, draft.sort + " (stored)")
+            : null),
+        h("p", { className: "jw-hint" },
+          "The order scenes enter the on-air loop. Shuffle re-rolls only when the rules change.")),
       progMode !== "fixed" ? h("div", { className: "jw-fieldrow" },
         h("div", { className: "jw-field" },
           h("label", { className: "jw-field-label", htmlFor: "f-repeat" }, "No repeats within"),
@@ -2870,10 +3083,20 @@
     // ---------- preview ----------
 
     const previewCard = h("div", { className: "jw-card" },
-      h("h3", { className: "jw-card-title" }, "Preview"),
+      h("div", { className: "jw-card-head" },
+        h("h3", { className: "jw-card-title" }, "Preview"),
+        h("button", {
+          className: "jw-btn jw-btn-ghost jw-btn-small",
+          disabled: previewState === "loading",
+          title: "Re-run the preview against the current draft",
+          onClick: () => { schedulePreview.cancel(); void loadPreview(); },
+        }, previewState === "loading" ? "Checking…" : "Refresh"),
+      ),
       previewState === "loading" ? h("p", { className: "jw-hint" }, "Checking the current draft…") : null,
       previewState === "error"
-        ? h("p", { className: "jw-error-text", role: "alert" }, "Preview failed: " + (preview && preview.message ? preview.message : "unknown error"))
+        ? h("p", { className: "jw-error-text", role: "alert" },
+            "Preview failed: " + (preview && preview.message ? preview.message : "unknown error") + " ",
+            h("button", { className: "jw-link", onClick: () => void loadPreview() }, "Retry"))
         : null,
       previewState === "ok" && preview && preview.status === "missing_source"
         ? h("p", { className: "jw-error-text", role: "alert" }, preview.message || "This source no longer resolves.")
@@ -2995,7 +3218,7 @@
     };
 
     const actionBar = h("div", { className: "jw-editor-actions" },
-      rebaseNotice ? h("div", { className: "jw-apply-row", role: "status", style: { color: "#f0ad4e" } },
+      rebaseNotice ? h("div", { className: "jw-apply-row jw-rebase-note", role: "status" },
         rebaseNotice) : null,
       h("div", { className: "jw-apply-row" },
         h("span", { className: "jw-apply-wrap", role: "status", "aria-live": "polite" },
@@ -3011,16 +3234,23 @@
         h("span", { style: { flex: 1 } }),
         h("button", { className: "jw-btn", onClick: discardDraft, disabled: !dirty && !isTemp || phase === "applying" }, "Discard"),
         h("button", {
-          className: "jw-btn jw-btn-primary", id: "apply-btn",
+          className: "jw-btn jw-btn-primary" + (applyEnabled ? " jw-apply-hot" : ""), id: "apply-btn",
           disabled: !applyEnabled,
           title: "Commit this draft to the library" + (applyEnabled ? " (" + APPLY_SHORTCUT + ")" : ""),
           onClick: () => void doApply(),
         }, phase === "applying" ? "Applying…" : phase === "validating" ? "Validating…" : "Apply"),
       ),
       conflicting ? h("div", { className: "jw-apply-row", style: { marginTop: "8px" } },
-        h("button", { className: "jw-btn", onClick: () => setApplyError(null) }, "Keep draft"),
-        h("button", { className: "jw-btn jw-btn-primary", onClick: () => void doApply(applyError.currentRevision) },
-          "Apply onto r" + applyError.currentRevision),
+        h("button", {
+          className: "jw-btn",
+          title: "Dismiss this notice — nothing is sent",
+          onClick: () => setApplyError(null),
+        }, "Keep editing my draft"),
+        h("button", {
+          className: "jw-btn jw-btn-primary",
+          title: "Commit my draft on top of revision " + applyError.currentRevision,
+          onClick: () => void doApply(applyError.currentRevision),
+        }, "Overwrite r" + applyError.currentRevision + " with my draft"),
       ) : null,
     );
 
@@ -3162,6 +3392,8 @@
     const [bulkMode, setBulkMode] = useState(false);
     const [bulkSelected, setBulkSelected] = useState(() => new Set());
     const [dialog, setDialog] = useState(null); // "groups" | "new"
+    const [moreOpen, setMoreOpen] = useState(false);
+    const moreRef = useOutsideClose(moreOpen, () => setMoreOpen(false));
     const [confirmSpec, setConfirmSpec] = useState(null);
     const [toasts, setToasts] = useState([]);
     const [inflights, setInflights] = useState([]); // [{channelId, name}] — background applies
@@ -3515,7 +3747,7 @@
     // ---- render ----
 
     if (bootError) {
-      return h("div", { className: "jw-page" },
+      return h("div", { className: "jw-page jw-studio" },
         h("h1", { className: "jw-title" }, "Channel Studio"),
         h("div", { className: "jw-missing-note", role: "alert" },
           "The channel library is not available on this deployment: " + bootError),
@@ -3523,7 +3755,7 @@
     }
 
     if (!lib) {
-      return h("div", { className: "jw-page" }, h("div", { className: "jw-loading" }, "Tuning the dial…"));
+      return h("div", { className: "jw-page jw-studio" }, h("div", { className: "jw-loading" }, "Tuning the dial…"));
     }
 
     const dirtyPill = draftCount > 0
@@ -3634,18 +3866,28 @@
         },
           h("option", { value: "" }, "All groups"),
           groupsSorted.map((g) => h("option", { key: g.id, value: g.id }, g.name))),
-        h("button", { className: "jw-btn", onClick: () => setDialog("groups") }, "Groups…"),
         h("button", {
           className: "jw-btn" + (bulkMode ? " jw-btn-primary" : ""),
           "aria-pressed": bulkMode ? "true" : "false",
           onClick: () => { setBulkMode((v) => !v); setBulkSelected(new Set()); },
         }, bulkMode ? "Done" : "Select…"),
-        h("button", { className: "jw-btn", onClick: exportCsv }, "Export CSV"),
-        h("button", {
-          className: "jw-btn", onClick: downloadDiagnostics,
-          title: "Download the bounded, redacted browser event log (works even when the server is unreachable)",
-        }, "Diagnostics"),
-        h("button", { className: "jw-btn", onClick: () => void reload(), title: "Refetch the library and revision" }, "Reload"),
+        h("div", { className: "jw-menu-host", ref: moreRef },
+          h("button", {
+            className: "jw-btn", "aria-haspopup": "menu",
+            "aria-expanded": moreOpen ? "true" : "false", "aria-label": "More actions",
+            title: "Groups, export, diagnostics, reload",
+            onClick: () => setMoreOpen((v) => !v),
+          }, "⋯"),
+          moreOpen ? h("div", { className: "jw-menu", role: "menu" }, [
+            ["Groups…", () => setDialog("groups")],
+            ["Export CSV", () => void exportCsv()],
+            ["Download diagnostics", () => downloadDiagnostics()],
+            ["Reload library", () => void reload()],
+          ].map(([label, fn]) => h("button", {
+            key: label, className: "jw-menu-item", role: "menuitem",
+            onClick: () => { setMoreOpen(false); fn(); },
+          }, label))) : null,
+        ),
         h("span", { className: "jw-revision-chip" }, "r" + lib.revision),
         dirtyPill,
         applyingPill,
@@ -3700,7 +3942,12 @@
         ),
         editor || h("div", { className: "jw-editor jw-editor-empty" },
           h("div", { className: "jw-empty-title" }, "Nothing selected"),
-          h("div", { className: "jw-empty-sub" }, "Pick a channel on the dial."),
+          h("div", { className: "jw-empty-sub" }, "Pick a channel on the dial, or start a new one."),
+          h("button", {
+            className: "jw-btn jw-btn-primary",
+            style: { marginTop: "12px", alignSelf: "flex-start" },
+            onClick: () => setDialog("new"),
+          }, "+ New channel…"),
         ),
       ),
       dialog === "groups"
