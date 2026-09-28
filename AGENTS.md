@@ -290,6 +290,19 @@ Networks" (legacy legend otherwise).
 
 ## Production deployment
 
+**PROTOCOL — NO SNAPSHOTS OF PRODUCTION, EVER.** This rule covers every
+production surface: the prod Stash web UI (`192.168.8.40:9999`), the prod
+Fire TV stick (`192.168.8.169`), and any other prod host. Never take
+screenshots, screen recordings, UI snapshots, Playwright/browser captures,
+or any other visual inspection against production — adult content makes
+this a hard privacy line, and it applies even though the plugin install
+there is "ours". ALL visual/UI verification happens on DEV on this machine:
+dev Stash web UI at `localhost:9998` (interactive login) and the dev Fire TV
+stick `192.168.8.196:5555`. Production is verified ONLY through its
+machine-readable surfaces: the plugin GraphQL ops, GraphQL queries, logs,
+and `adb logcat`. If a change genuinely cannot be verified without eyes on
+the UI, hand it to Shahram to look at — do not reach for the screen.
+
 - **Prod Stash** runs on `192.168.8.40` (`docker-personal.manx-teeth.ts.net`,
   SSH as shahram) — NOT docker: systemd unit `stash.service`, working dir
   `/mnt/stash-virtiofs/stashapp`, `plugins_path: /mnt/stash-virtiofs/stashapp/plugins`.
@@ -300,8 +313,8 @@ Networks" (legacy legend otherwise).
   the prod stick's `run-as ... shared_prefs ... stashApiKey`).
 - Prod stick **192.168.8.169:5555 runs the debug-signed APK** (same keystore
   as dev) — `adb install -r` of the armeabi-v7a APK works in place. HARD RULE
-  from that repo still applies: no screenshots/UI inspection against prod
-  (adult content); verify via the plugin GraphQL surface and logcat only.
+  from that repo still applies (see PROTOCOL above): no screenshots/UI
+  inspection against prod; verify via the plugin GraphQL surface and logcat only.
 - Deployment order is safe either way: an old APK ignores `Directory.networks`;
   a new APK falls back to legacy generation without the block. Deploy the
   plugin first, then the APK.

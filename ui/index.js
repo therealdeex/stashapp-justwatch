@@ -4030,12 +4030,14 @@
     const IconCmp = (api.components && api.components.Icon) || null;
     const NavLink = RRDOM.NavLink;
     if (api.patch && typeof api.patch.before === "function" && NavLink) {
-      // UtilityItems is the nav group Stash always renders (top-right, next to
-      // Statistics/Settings); MenuItems collapses on narrow layouts.
-      api.patch.before("MainNavBar.UtilityItems", function (props) {
+      // MenuItems is the primary nav group — the Scenes/Images/…/Tags icon
+      // row the owner navigates by (UtilityItems is the Donate/Statistics/
+      // Settings group and the wrong neighborhood for an owner page). The
+      // tile copies the stock item markup so it renders identically in the
+      // row, including the narrow-layout collapse.
+      api.patch.before("MainNavBar.MenuItems", function (props) {
         try {
-          if (!props || typeof props !== "object") return [{}];
-          const existing = props.children != null ? props.children : null;
+          const existing = props && props.children != null ? props.children : null;
           const icon = FAS.faTv && typeof IconCmp === "function"
             ? h(IconCmp, { icon: FAS.faTv, className: "nav-menu-icon d-block d-xl-inline mb-2 mb-xl-0" })
             : null;
