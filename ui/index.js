@@ -53,7 +53,14 @@
   const PREVIEW_DEBOUNCE_MS = 350;
   const SEARCH_DEBOUNCE_MS = 250;
   const APPLY_POLL_INTERVAL_MS = 2000;
-  const APPLY_POLL_TRIES = 60; // ~2 min: the Apply task refreshes inline
+  // Wall-clock budget for waiting on the durable receipt. Iteration caps are
+  // wrong for this: Chrome intensively throttles CHAINED timers (each sleep
+  // scheduled from inside the previous one) in hidden/occluded/backgrounded
+  // tabs down to ~1 wake per minute, so a capped loop can sit "Applying…" for
+  // many minutes while the receipt has been durable for seconds. The budget
+  // is measured against Date.now(), and returning to the tab wakes an
+  // immediate poll (see pollApplyReceipt).
+  const APPLY_POLL_BUDGET_MS = 120000;
   const REFRESH_POLL_MS = 4000;
   const REFRESH_POLL_MAX = 30; // ~2 min of honest pending state, then rest
   const MAX_NAME_LEN = 60;
@@ -302,21 +309,48 @@
     return data.runPluginTask; // job id — never treated as success by itself
   }
 
-  function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
-
   // A queued task is not an outcome. Poll the plugin's durable receipt store
   // until this requestId resolves; "unknown" past the budget is reported, not
   // invented — the caller keeps its draft and may resubmit the SAME id.
+  //
+  // The wait must survive timer throttling: browsers starve chained timers in
+  // hidden/occluded/backgrounded pages (down to ~1 wake per minute), so the
+  // loop is bounded by a wall-clock budget rather than an iteration count,
+  // and a visibilitychange/focus/pageshow flip polls IMMEDIATELY — coming
+  // back to the tab resolves a receipt that has been durable for minutes.
   async function pollApplyReceipt(requestId) {
-    for (let i = 0; i < APPLY_POLL_TRIES; i++) {
-      await sleep(i === 0 ? 700 : APPLY_POLL_INTERVAL_MS);
-      let receipt = null;
-      try {
-        receipt = await runOp("GetChannelApplyResult", { requestId });
-      } catch (e) {
-        continue; // transient query failure: the task may still be running
+    const started = Date.now();
+    let wake = null;
+    const wakeNow = () => { if (wake) { const w = wake; wake = null; w(); } };
+    const onWake = () => wakeNow();
+    if (typeof document !== "undefined" && document.addEventListener) {
+      document.addEventListener("visibilitychange", onWake);
+      window.addEventListener("focus", onWake);
+      window.addEventListener("pageshow", onWake);
+    }
+    try {
+      for (let i = 0; ; i++) {
+        const remain = APPLY_POLL_BUDGET_MS - (Date.now() - started);
+        if (remain <= 0) break;
+        await new Promise((resolve) => {
+          const timer = setTimeout(() => done(), Math.min(i === 0 ? 700 : APPLY_POLL_INTERVAL_MS, remain));
+          function done() { clearTimeout(timer); wake = null; resolve(); }
+          wake = done;
+        });
+        let receipt = null;
+        try {
+          receipt = await runOp("GetChannelApplyResult", { requestId });
+        } catch (e) {
+          continue; // transient query failure: the task may still be running
+        }
+        if (receipt && receipt.status && receipt.status !== "unknown") return receipt;
       }
-      if (receipt && receipt.status && receipt.status !== "unknown") return receipt;
+    } finally {
+      if (typeof document !== "undefined" && document.removeEventListener) {
+        document.removeEventListener("visibilitychange", onWake);
+        window.removeEventListener("focus", onWake);
+        window.removeEventListener("pageshow", onWake);
+      }
     }
     return {
       requestId, status: "unknown",
