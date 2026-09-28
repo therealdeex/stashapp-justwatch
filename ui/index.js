@@ -99,7 +99,7 @@
   const EXCLUSIVE_FACETS = [["tags", "tagsAny"], ["performers", "performersAny"], ["studios", "studiosAny"]];
 
   const DIAL_ITEM_HEIGHT = 44;
-  const PICKER_ITEM_HEIGHT = 34;
+  const PICKER_ITEM_HEIGHT = 36;
 
   // The one editor power shortcut, advertised next to the Apply button.
   const APPLY_SHORTCUT = (() => {
@@ -111,6 +111,24 @@
   ]);
 
   const TOAST_ICONS = { ok: "✓", err: "!" };
+
+  // Loading skeleton: a card-shaped block of shimmer lines (the global
+  // prefers-reduced-motion query stills the shimmer).
+  function skelCard(n) {
+    const widths = ["w60", "w80", "", "w40", "", "w80", ""];
+    return h("div", { className: "jw-skel-card", "aria-hidden": "true" },
+      Array.from({ length: n }, (_, i) => h("div", {
+        key: i, className: "jw-skel jw-skel-line " + widths[i % widths.length],
+      })));
+  }
+
+  // Keyboard legend rows for the "Keyboard shortcuts…" dialog.
+  const SHORTCUT_ROWS = [
+    [["/"], "Search channels"],
+    [[APPLY_SHORTCUT], "Apply the current draft"],
+    [["Esc"], "Close dialogs; exit chip manage mode"],
+    [["Enter", "Space"], "Select the focused channel in the dial"],
+  ];
 
   // ------------------------------------------------------------------
   // Browser diagnostics: a bounded, structured event buffer.
@@ -2532,8 +2550,9 @@
     }
 
     if (!draft) {
-      return h("div", { className: "jw-editor" },
-        h("div", { className: "jw-loading", role: "status" }, "Loading definition…"));
+      return h("div", { className: "jw-editor", role: "status", "aria-label": "Loading channel" },
+        h("div", { className: "jw-editor-scroll" },
+          skelCard(2), skelCard(4), skelCard(3)));
     }
 
     const groups = (lib.groups || []).slice().sort((a, b) => a.position - b.position);
@@ -2605,11 +2624,13 @@
         h("span", { className: "jw-field-label" }, "Glyph (optional — the TV renders the number without one)"),
         h("div", { style: { position: "relative", display: "inline-block" }, ref: glyphRef },
           h("button", {
-            className: "jw-btn", onClick: () => setGlyphOpen((v) => !v),
+            className: "jw-btn jw-glyph-btn", onClick: () => setGlyphOpen((v) => !v),
             "aria-expanded": glyphOpen ? "true" : "false",
           },
-            h(GlyphTile, { codepoint: draft.glyph, color: draft.color, size: 22, fallback: draft.number }),
-            h("span", { style: { marginLeft: "8px" } }, draft.glyph ? glyphName(draft.glyph) : "No glyph"),
+            h(GlyphTile, { codepoint: draft.glyph, color: draft.color, size: 28, fallback: draft.number }),
+            h("span", null, draft.glyph ? glyphName(draft.glyph) : "No glyph"),
+            h("span", { "aria-hidden": "true", style: { color: "var(--jw-faint)", fontSize: ".7rem" } },
+              glyphOpen ? "▴" : "▾"),
           ),
           glyphOpen ? h("div", { className: "jw-glyph-pop" },
             h("div", { className: "jw-glyph-grid" },
@@ -2647,7 +2668,7 @@
 
     const facetRow = (facet) => {
       const cfg = {
-        tags: { kind: "tag", allKey: "tags", anyKey: "tagsAny", exclKey: "excludeTags", noun: "tags", icon: "faTags", note: "Sub-tags always count (hierarchy included). ALL = a scene must carry every tag; ANY = at least one." },
+        tags: { kind: "tag", allKey: "tags", anyKey: "tagsAny", exclKey: "excludeTags", noun: "tags", icon: "faTags", note: "Sub-tags count automatically. ALL = a scene must carry every tag; ANY = at least one." },
         performers: { kind: "performer", allKey: "performers", anyKey: "performersAny", exclKey: "excludePerformers", sceneKey: "performerSceneCount", noun: "performers", icon: "faUser" },
         studios: { kind: "studio", allKey: "studios", anyKey: "studiosAny", exclKey: "excludeStudios", sceneKey: "studioSceneCount", noun: "studios", icon: "faBuilding", note: "Sub-studios count (hierarchy included)." },
       }[facet];
@@ -2763,12 +2784,14 @@
           union.length === 0
             ? h("span", { className: "jw-hint" }, "match logic applies once you choose " + cfg.noun)
             : null,
-          h("button", { className: "jw-btn jw-btn-small", onClick: () => pickInto("main") },
-            "Choose (" + (union.length ? union.length.toLocaleString() : "none") + ")"),
-          h("label", { className: "jw-exclude-label" },
-            "exclude",
-            h("button", { className: "jw-btn jw-btn-small", onClick: () => pickInto(cfg.exclKey) },
-              excl.length ? excl.length.toLocaleString() : "none"),
+          h("div", { className: "jw-rule-actions" },
+            h("button", { className: "jw-btn jw-btn-small", onClick: () => pickInto("main") },
+              "Choose (" + (union.length ? union.length.toLocaleString() : "none") + ")"),
+            h("label", { className: "jw-exclude-label" },
+              "exclude",
+              h("button", { className: "jw-btn jw-btn-small", onClick: () => pickInto(cfg.exclKey) },
+                excl.length ? excl.length.toLocaleString() : "none"),
+            ),
           ),
         ),
         union.length
@@ -2972,8 +2995,8 @@
 
     const rulesCard = isRuleSource(draft.source)
       ? h("div", { className: "jw-card" },
-          h("h3", { className: "jw-card-title" }, "What airs (rules)"),
-          h("p", { className: "jw-hint" }, "Rows combine with AND. ALL / ANY applies within a row; ids and the dynamic activity rule combine too."),
+          h("h3", { className: "jw-card-title" }, "What airs"),
+          h("p", { className: "jw-hint" }, "Every row must hold at once. Within a row, ALL / ANY chooses how the picks combine — and the activity rule counts too."),
           ["tags", "performers", "studios"].map(facetRow),
           sceneDetailsRow,
           h("div", { className: "jw-summary-box", "aria-label": "Plain-language rule summary", style: { marginTop: "10px" } },
@@ -3119,10 +3142,14 @@
                 h("div", {
                   className: "jw-sample-art", "aria-hidden": "true",
                   style: sItem.preview ? { backgroundImage: "url('" + sItem.preview + "')" } : null,
-                }, sItem.preview ? "" : "▶"),
+                },
+                  sItem.preview ? "" : "▶",
+                  sItem.duration != null
+                    ? h("span", { className: "jw-sample-dur" }, fmtDuration(sItem.duration))
+                    : null),
                 h("div", { className: "jw-sample-cap" },
                   h("div", { className: "jw-sample-title" }, sItem.title || "Untitled"),
-                  [sItem.studio, fmtDuration(sItem.duration), sItem.date].filter(Boolean).join(" · ")),
+                  [sItem.studio, sItem.date].filter(Boolean).join(" · ")),
               ))),
         preview.rotationComplete === false
           ? h("p", { className: "jw-hint" }, "The scan bound (" + ROTATION_SCAN_LIMIT.toLocaleString() + " rows) capped this rotation.")
@@ -3391,7 +3418,7 @@
     const [collapsed, setCollapsed] = useState(() => new Set());
     const [bulkMode, setBulkMode] = useState(false);
     const [bulkSelected, setBulkSelected] = useState(() => new Set());
-    const [dialog, setDialog] = useState(null); // "groups" | "new"
+    const [dialog, setDialog] = useState(null); // "groups" | "new" | "shortcuts"
     const [moreOpen, setMoreOpen] = useState(false);
     const moreRef = useOutsideClose(moreOpen, () => setMoreOpen(false));
     const [confirmSpec, setConfirmSpec] = useState(null);
@@ -3755,7 +3782,19 @@
     }
 
     if (!lib) {
-      return h("div", { className: "jw-page jw-studio" }, h("div", { className: "jw-loading" }, "Tuning the dial…"));
+      return h("div", { className: "jw-page jw-studio" },
+        h("header", { className: "jw-topbar" },
+          h("div", { className: "jw-topbar-title" },
+            h("h1", { className: "jw-title" }, "Channel Studio"),
+            h("span", { className: "jw-tagline" }, "Your library, on the air — edits apply when you say so."))),
+        h("main", { className: "jw-columns", role: "status", "aria-label": "Loading channel studio" },
+          h("section", { className: "jw-dial", "aria-hidden": "true" },
+            Array.from({ length: 12 }, (_, i) => h("div", {
+              key: i, className: "jw-skel jw-skel-dial-row" + (i % 3 === 2 ? " short" : ""),
+            }))),
+          h("div", { className: "jw-editor", "aria-hidden": "true" },
+            h("div", { className: "jw-editor-scroll" },
+              skelCard(3), skelCard(5), skelCard(4)))));
     }
 
     const dirtyPill = draftCount > 0
@@ -3866,31 +3905,34 @@
         },
           h("option", { value: "" }, "All groups"),
           groupsSorted.map((g) => h("option", { key: g.id, value: g.id }, g.name))),
-        h("button", {
-          className: "jw-btn" + (bulkMode ? " jw-btn-primary" : ""),
-          "aria-pressed": bulkMode ? "true" : "false",
-          onClick: () => { setBulkMode((v) => !v); setBulkSelected(new Set()); },
-        }, bulkMode ? "Done" : "Select…"),
-        h("div", { className: "jw-menu-host", ref: moreRef },
+        h("div", { className: "jw-topbar-side" },
           h("button", {
-            className: "jw-btn", "aria-haspopup": "menu",
-            "aria-expanded": moreOpen ? "true" : "false", "aria-label": "More actions",
-            title: "Groups, export, diagnostics, reload",
-            onClick: () => setMoreOpen((v) => !v),
-          }, "⋯"),
-          moreOpen ? h("div", { className: "jw-menu", role: "menu" }, [
-            ["Groups…", () => setDialog("groups")],
-            ["Export CSV", () => void exportCsv()],
-            ["Download diagnostics", () => downloadDiagnostics()],
-            ["Reload library", () => void reload()],
-          ].map(([label, fn]) => h("button", {
-            key: label, className: "jw-menu-item", role: "menuitem",
-            onClick: () => { setMoreOpen(false); fn(); },
-          }, label))) : null,
+            className: "jw-btn" + (bulkMode ? " jw-btn-primary" : ""),
+            "aria-pressed": bulkMode ? "true" : "false",
+            onClick: () => { setBulkMode((v) => !v); setBulkSelected(new Set()); },
+          }, bulkMode ? "Done" : "Select…"),
+          h("div", { className: "jw-menu-host", ref: moreRef },
+            h("button", {
+              className: "jw-btn", "aria-haspopup": "menu",
+              "aria-expanded": moreOpen ? "true" : "false", "aria-label": "More actions",
+              title: "Groups, export, diagnostics, reload",
+              onClick: () => setMoreOpen((v) => !v),
+            }, "⋯"),
+            moreOpen ? h("div", { className: "jw-menu", role: "menu" }, [
+              ["Groups…", () => setDialog("groups")],
+              ["Export CSV", () => void exportCsv()],
+              ["Keyboard shortcuts…", () => setDialog("shortcuts")],
+              ["Download diagnostics", () => downloadDiagnostics()],
+              ["Reload library", () => void reload()],
+            ].map(([label, fn]) => h("button", {
+              key: label, className: "jw-menu-item", role: "menuitem",
+              onClick: () => { setMoreOpen(false); fn(); },
+            }, label))) : null,
+          ),
+          h("span", { className: "jw-revision-chip" }, "r" + lib.revision),
+          dirtyPill,
+          applyingPill,
         ),
-        h("span", { className: "jw-revision-chip" }, "r" + lib.revision),
-        dirtyPill,
-        applyingPill,
       ),
       bulkMode ? h("div", { className: "jw-bulk-bar", role: "toolbar", "aria-label": "Bulk actions" },
         h("strong", null, bulkSelected.size + " selected"),
@@ -3962,6 +4004,16 @@
             lib, drafts: draftsRef.current, onClose: () => setDialog(null),
             onCreate: (tempId) => { setDialog(null); handleCreated(tempId); },
           })
+        : null,
+      dialog === "shortcuts"
+        ? h(Dialog, {
+            title: "Keyboard shortcuts", onClose: () => setDialog(null),
+            footer: h("button", { className: "jw-btn", onClick: () => setDialog(null) }, "Close"),
+          },
+            SHORTCUT_ROWS.map(([keys, desc]) => h("div", { key: desc, className: "jw-shortcut-row" },
+              h("span", null, desc),
+              h("span", { className: "jw-shortcut-keys" },
+                keys.map((k) => h("kbd", { key: k, className: "jw-kbd" }, k))))))
         : null,
       h(ConfirmDialog, { spec: confirmSpec }),
       h(Toasts, { items: toasts, onDismiss: (id) => setToasts((cur) => cur.filter((t) => t.id !== id)) }),

@@ -65,7 +65,7 @@
   min-height: 540px;
 }
 
-.jw-studio button { font: inherit; color: inherit; }
+.jw-studio button { font-family: inherit; color: inherit; }
 .jw-studio button:focus-visible,
 .jw-studio input:focus-visible,
 .jw-studio select:focus-visible,
