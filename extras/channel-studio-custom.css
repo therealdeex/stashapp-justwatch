@@ -1,0 +1,46 @@
+/* Channel Studio — OPTIONAL owner customizations (presentation only).
+ *
+ * Install:  Stash → Settings → Interface → Custom CSS.
+ * APPEND this file's contents below any CSS you already have there (do not
+ * replace your existing snippets), then Save. See extras/README.md.
+ *
+ * Remove:   delete these lines again from the same box and Save — the
+ * plugin's built-in styles take over unchanged.
+ *
+ * Scope:    every rule is scoped to .jw-studio (the Channel Studio page) or
+ * the plugin's own dialog roots (.jw-sheet-*). Nothing here touches global
+ * Stash chrome, Bootstrap classes, or other pages.
+ *
+ * HARD RULES (from the plugin's styling contract):
+ *  - Do NOT change row heights or paddings on .jw-dial-row /
+ *    .jw-group-header — the dial is virtualized at exactly 44px per row;
+ *    taller rows break the windowing math.
+ *  - Do NOT let names wrap inside .jw-dial-name.
+ *  - Prefer the --jw-* theme variables so dark/light themes keep working.
+ */
+
+/* Example 1 — warmer accent for staged (not yet applied) arrangement
+   numbers on the dial. */
+.jw-studio .jw-dial-number-staged {
+  color: #ffb74d;
+}
+
+/* Example 2 — a slightly stronger brand edge on the selected dial row. */
+.jw-studio .jw-dial-row-selected {
+  box-shadow: inset 4px 0 0 var(--jw-accent);
+}
+
+/* Example 3 — quieter displaced-bystander tint in arrangement reviews. */
+.jw-studio .jw-review-row-displaced,
+.jw-sheet-organize .jw-review-row-displaced,
+.jw-sheet-numres .jw-review-row-displaced {
+  background: color-mix(in srgb, var(--jw-warn) 4%, transparent);
+}
+
+/* Example 4 — bigger review rows if you prefer more breathing room.
+   (Safe: the review table rows are NOT the virtualized dial — but keep the
+   36px row height in sync with the list's fixed row height by only editing
+   font-size/line-height, as here.) */
+.jw-studio .jw-review-row {
+  font-size: 14px;
+}

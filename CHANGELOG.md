@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased (Apply receipt poll fix, 2026-09-28)
+## 0.9.0 (2026-10-06)
+
+- **Channel organization & arrangement.** Deterministic arrangement planning via `PreviewChannelArrangement` (advertised by `features.arrangement`), renumber commits through the `channels.renumber` opcode on `ApplyChannelChanges`, a new `organization` module with fixtures, and the Channel Studio organization UI.
 
 - **"Still says Draft after Apply" fixed.** The receipt poll waited on a
   chain of `setTimeout` calls; browsers intensively throttle chained timers

@@ -390,7 +390,64 @@ def library_lock(data_dir: str | Path, timeout: float = 60.0):
 # ---------------------------------------------------------------------------
 
 _OK_OPS = ("channel.put", "channel.create", "channel.swap", "group.put",
-           "group.delete", "channels.move", "channels.patch")
+           "group.delete", "channels.move", "channels.patch",
+           "channels.renumber")
+
+
+def _final_numbers(doc: dict, ops: list[dict]) -> tuple[dict, dict]:
+    """The single interpreter of "what number does every record end at if this
+    packet commits" — pure arithmetic over the ORIGINAL document, shared by
+    Validate and Apply through :func:`_check_ops` so they can never diverge.
+
+    Returns ``(numbers, temps)``: existing channel id → final number for EVERY
+    channel (untouched ones keep their current number), and client tempId →
+    number for creations. Only structurally valid, in-band numbers are folded;
+    invalid ones are reported by the per-op checks and the record simply keeps
+    its current slot in the plan, so the final-occupancy pass never fabricates
+    extra errors for a packet that is already rejected. Swaps fold as pairwise
+    exchanges (sequential application, matching :func:`_apply_ops` staging
+    order); ``channels.renumber`` folds last within its own op. NO mutation,
+    NO candidate copy.
+    """
+    by_id = {c["id"]: c for c in doc["channels"]}
+    numbers = {c["id"]: c["number"] for c in doc["channels"]}
+    temps: dict[str, int] = {}
+
+    def _in_band(kind: str, value: Any) -> bool:
+        lo, hi = BANDS[kind]
+        return not isinstance(value, bool) and isinstance(value, int) \
+            and lo <= value <= hi
+
+    for op in ops:
+        if not isinstance(op, dict):
+            continue
+        kind = op.get("op")
+        if kind == "channel.put":
+            channel = op.get("channel") or {}
+            stored = by_id.get(channel.get("id"))
+            number = channel.get("number")
+            if stored is not None and _in_band(stored["kind"], number):
+                numbers[stored["id"]] = number
+        elif kind == "channel.create":
+            channel = op.get("channel") or {}
+            temp_id = op.get("tempId")
+            number = channel.get("number")
+            ns = channel.get("kind") or "net"
+            if isinstance(temp_id, str) and temp_id and _in_band(ns, number):
+                temps[temp_id] = number
+        elif kind == "channel.swap":
+            a, b = op.get("a"), op.get("b")
+            if a in numbers and b in numbers:
+                numbers[a], numbers[b] = numbers[b], numbers[a]
+        elif kind == "channels.renumber":
+            for entry in op.get("assignments") or ():
+                if not isinstance(entry, dict):
+                    continue
+                cid, number = entry.get("channelId"), entry.get("number")
+                if isinstance(cid, str) and cid in by_id \
+                        and _in_band(by_id[cid]["kind"], number):
+                    numbers[cid] = number
+    return numbers, temps
 
 
 def apply_transaction(
@@ -510,9 +567,14 @@ def _now_iso() -> str:
 
 def _check_ops(library: dict, ops: list[dict]) -> list[dict]:
     """Static validation of the ops against the CURRENT document (identity,
-    references, band and uniqueness constraints). Number-uniqueness for puts
-    is re-checked under the lock inside _apply_ops too — this pass exists so
-    drafts get precise field errors before any revision check."""
+    references, band and occupancy constraints). Occupancy is judged on the
+    packet-aware FINAL number plan (:func:`_final_numbers`), not record by
+    record against the original library — so permutations, insertions and
+    create-into-vacated are expressible in one packet while a genuinely
+    untouched holder still rejects exactly as before. Number-uniqueness is
+    re-checked under the lock inside _apply_ops on the staged candidate (the
+    race/bug backstop). This pass exists so drafts get precise field errors
+    before any revision check."""
     errors: list[dict] = []
 
     def err(op_i: int, path: str, code: str, message: str) -> None:
@@ -521,10 +583,11 @@ def _check_ops(library: dict, ops: list[dict]) -> list[dict]:
     by_id = {c["id"]: c for c in library["channels"]}
     groups = {g["id"]: g for g in library["groups"]}
     new_groups: dict[str, str] = {}
-    swap_pairs = {
-        frozenset((op.get("a"), op.get("b")))
-        for op in ops if isinstance(op, dict) and op.get("op") == "channel.swap"
-    }
+    final_numbers, final_temps = _final_numbers(library, ops)
+    renumber_entries: list[tuple[int, int, str, int]] = []  # (op_i, j, cid, number)
+    renumber_op: dict[str, int] = {}
+    put_numbers: dict[str, tuple[int, int]] = {}
+    swap_ids: dict[str, int] = {}
     for i, op in enumerate(ops):
         if not isinstance(op, dict) or op.get("op") not in _OK_OPS:
             err(i, "op", "unknown_op", f"op must be one of: {', '.join(_OK_OPS)}")
@@ -536,15 +599,23 @@ def _check_ops(library: dict, ops: list[dict]) -> list[dict]:
                 err(i, "channel", "not_an_object", "channel.put needs a channel object")
                 continue
             existing = by_id.get(channel.get("id"))
-            if existing is not None:
-                if channel.get("seed") is not None and channel["seed"] != existing["seed"]:
-                    err(i, "channel.seed", "identity_change",
-                        f"seed is immutable for {channel['id']}")
-                if channel.get("kind") is not None and channel["kind"] != existing["kind"]:
-                    err(i, "channel.kind", "identity_change",
-                        f"kind is immutable for {channel['id']}")
+            if existing is None:
+                err(i, "channel.id", "unknown_channel",
+                    "channel.put needs the id of an existing channel")
+                continue
+            if channel.get("seed") is not None and channel["seed"] != existing["seed"]:
+                err(i, "channel.seed", "identity_change",
+                    f"seed is immutable for {channel['id']}")
+            if channel.get("kind") is not None and channel["kind"] != existing["kind"]:
+                err(i, "channel.kind", "identity_change",
+                    f"kind is immutable for {channel['id']}")
             _check_channel_draft(i, channel, by_id, groups, new_groups, err,
-                                 swap_pairs=swap_pairs, creating=False)
+                                 creating=False, final_numbers=final_numbers)
+            number = channel.get("number")
+            lo, hi = BANDS[existing["kind"]]
+            if not isinstance(number, bool) and isinstance(number, int) \
+                    and lo <= number <= hi:
+                put_numbers[existing["id"]] = (i, number)
         elif kind == "channel.create":
             channel = op.get("channel") or {}
             temp_id = op.get("tempId")
@@ -554,7 +625,7 @@ def _check_ops(library: dict, ops: list[dict]) -> list[dict]:
                 err(i, "channel.id", "identity_change",
                     "created channels must not carry an id (the server assigns it)")
             _check_channel_draft(i, channel, by_id, groups, new_groups, err,
-                                 swap_pairs=swap_pairs, creating=True)
+                                 creating=True, final_numbers=final_numbers)
         elif kind == "channel.swap":
             a, b = by_id.get(op.get("a")), by_id.get(op.get("b"))
             if a is None or b is None:
@@ -563,6 +634,40 @@ def _check_ops(library: dict, ops: list[dict]) -> list[dict]:
                 err(i, "a/b", "bad_swap", "cannot swap a channel with itself")
             elif a["kind"] != b["kind"]:
                 err(i, "a/b", "bad_swap", "swaps stay within one number band")
+            else:
+                swap_ids[a["id"]] = i
+                swap_ids[b["id"]] = i
+        elif kind == "channels.renumber":
+            assignments = op.get("assignments")
+            if not isinstance(assignments, list) or not assignments:
+                err(i, "assignments", "empty_assignment",
+                    "channels.renumber needs a non-empty assignments list")
+                continue
+            for j, entry in enumerate(assignments):
+                path = f"assignments[{j}]"
+                if not isinstance(entry, dict) or set(entry) != {"channelId", "number"}:
+                    err(i, path, "bad_assignment",
+                        "each assignment needs exactly the keys channelId and number")
+                    continue
+                cid = entry["channelId"]
+                if not isinstance(cid, str) or cid not in by_id:
+                    err(i, f"{path}.channelId", "unknown_channel",
+                        f"no such channel {cid!r} (renumber maps existing ids "
+                        "only; a creation's number lives in its channel.create)")
+                    continue
+                number = entry["number"]
+                if isinstance(number, bool) or not isinstance(number, int):
+                    err(i, f"{path}.number", "bad_number",
+                        "number must be a real integer (booleans are not numbers)")
+                    continue
+                lo, hi = BANDS[by_id[cid]["kind"]]
+                if not (lo <= number <= hi):
+                    err(i, f"{path}.number", "cross_band",
+                        f"{cid} is a {by_id[cid]['kind']} channel; number must "
+                        f"be {lo}-{hi}")
+                    continue
+                renumber_entries.append((i, j, cid, number))
+                renumber_op.setdefault(cid, i)
         elif kind == "group.put":
             group = op.get("group")
             if not isinstance(group, dict):
@@ -638,7 +743,62 @@ def _check_ops(library: dict, ops: list[dict]) -> list[dict]:
                     f"patch may only set: {', '.join(PATCHABLE_FLAGS)}")
             elif any(not isinstance(v, bool) for v in patch.values()):
                 err(i, "patch", "bad_patch", "patch values must be booleans")
+
+    # --- packet-level number composition (one final-number authority per
+    # channel) and final-occupancy validation, judged on the plan that
+    # _final_numbers computed. Only structurally valid entries participate,
+    # so a packet that already failed per-op checks is never double-counted.
+    assigned: dict[str, int] = {}
+    for _, _, cid, number in renumber_entries:
+        if cid in assigned:
+            err(renumber_op[cid], "assignments", "ambiguous_assignment",
+                f"{cid} is assigned a final number more than once in this packet")
+        else:
+            assigned[cid] = number
+    for cid in sorted(set(assigned) & set(swap_ids)):
+        err(renumber_op[cid], "assignments", "ambiguous_assignment",
+            f"{cid} is both swapped and renumbered in this packet; use one "
+            "mechanism (a renumber 2-cycle is a swap without the clean-draft "
+            "prerequisite)")
+    for cid in sorted(set(put_numbers) & set(assigned)):
+        put_i, put_number = put_numbers[cid]
+        if put_number != assigned[cid]:
+            err(renumber_op[cid], "assignments", "ambiguous_assignment",
+                f"channel.put and channels.renumber assign different numbers "
+                f"to {cid} ({put_number} vs {assigned[cid]})")
+    holders = {c["number"]: c for c in library["channels"]}
+    for op_i, j, cid, number in renumber_entries:
+        holder = holders.get(number)
+        if holder is not None and holder["id"] != cid \
+                and final_numbers.get(holder["id"]) == number:
+            err(op_i, f"assignments[{j}].channelId", "destination_occupied",
+                f"channel {number} is held by {holder['name']}; move it in the "
+                "same packet (or drop the assignment)")
+    finals: dict[str, int] = dict(final_numbers)
+    finals.update(final_temps)
+    touched = set(assigned) | set(put_numbers) | set(final_temps)
+    for op in ops:
+        if isinstance(op, dict) and op.get("op") == "channel.swap":
+            for cid in (op.get("a"), op.get("b")):
+                if isinstance(cid, str) and cid in finals:
+                    touched.add(cid)
+    by_final: dict[int, list[str]] = {}
+    for key in sorted(touched):
+        by_final.setdefault(finals[key], []).append(key)
+    for number in sorted(by_final):
+        if len(by_final[number]) >= 2:
+            names = ", ".join(
+                _final_key_name(key, library) for key in sorted(by_final[number]))
+            errors.append({
+                "path": "ops", "code": "duplicate_destination",
+                "message": f"final number {number} would be held by {names}"})
     return errors
+
+
+def _final_key_name(key: str, doc: dict) -> str:
+    """Display name for a final-plan key (existing id or creation tempId)."""
+    channel = next((c for c in doc["channels"] if c["id"] == key), None)
+    return f"{key} ({channel['name']})" if channel else f"new channel {key}"
 
 
 #: Modes each namespace can actually serve end-to-end. A stored mode is
@@ -652,7 +812,7 @@ _ALL_MODES = ("fixed", "explore", "discovery", "continuing")
 
 
 def _check_channel_draft(i, channel, by_id, groups, new_groups, err, *,
-                         creating: bool, swap_pairs=frozenset()) -> None:
+                         creating: bool, final_numbers: dict | None = None) -> None:
     if creating:
         channel = dict(channel)
         channel.setdefault("kind", "net")
@@ -671,11 +831,19 @@ def _check_channel_draft(i, channel, by_id, groups, new_groups, err, *,
     if isinstance(number, bool) or not isinstance(number, int) or not (lo <= number <= hi):
         err(i, "channel.number", "bad_number", f"number must be {lo}-{hi}")
     else:
+        # Occupancy is packet-aware: the draft may take a number whose
+        # ORIGINAL holder this same packet moves away (a renumber, another
+        # put, or a swap) — only a holder that STAYS put is a real conflict.
+        # This keeps the legacy `duplicate_number` code and message for the
+        # untouched-holder case (existing clients match on it) while letting
+        # arrangements and create-into-vacated validate exactly like Apply.
         holder = next((c for c in by_id.values() if c["number"] == number), None)
-        if holder is not None and holder["id"] != channel.get("id") \
-                and frozenset((channel.get("id"), holder["id"])) not in swap_pairs:
-            err(i, "channel.number", "duplicate_number",
-                f"channel {number} is taken by {holder['name']}; use Swap")
+        if holder is not None and holder["id"] != channel.get("id"):
+            holder_stays = final_numbers is None or \
+                final_numbers.get(holder["id"], holder["number"]) == number
+            if holder_stays:
+                err(i, "channel.number", "duplicate_number",
+                    f"channel {number} is taken by {holder['name']}; use Swap")
     color = channel.get("color")
     if color is not None and (not isinstance(color, str) or not COLOR_RE.match(color)):
         err(i, "channel.color", "bad_color", "color must be #RRGGBB")
@@ -775,6 +943,10 @@ def _apply_ops(library: dict, ops: list[dict]) -> dict:
         elif kind == "channel.swap":
             a, b = by_id[op["a"]], by_id[op["b"]]
             a["number"], b["number"] = b["number"], a["number"]
+        elif kind == "channels.renumber":
+            for entry in op["assignments"]:
+                if entry["channelId"] in by_id:
+                    by_id[entry["channelId"]]["number"] = entry["number"]
         elif kind == "channels.move":
             for cid in op["channelIds"]:
                 if cid in by_id:

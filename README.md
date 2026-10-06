@@ -158,7 +158,10 @@ channels), `PreviewLineup`, `GetCatalog`, `ValidateCatalog`, `Schedule`
 `ProgrammingStatus` — plus, when `features.channelLibrary` is advertised,
 the editing surface: `GetChannelLibrary`, `GetChannelDirectory`,
 `GetChannelDefinition`, `ValidateChannelChanges`, `PreviewChannelPool`,
-`GetChannelApplyResult`, `GetChannelHistory` (see
+`GetChannelApplyResult`, `GetChannelHistory`, and — when
+`features.arrangement` is advertised — `PreviewChannelArrangement`
+(read-only deterministic arrangement planning; commits ride
+`ApplyChannelChanges` via the `channels.renumber` opcode; see
 docs/CHANNEL-CURATION-API.md).
 Task ops (`runPluginTask`): `SaveCatalog`, `RefreshData`, `PrepareProgramming`,
 and now `ApplyChannelChanges` (the only library write path) — writes run as

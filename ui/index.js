@@ -6,6 +6,7 @@
 //
 //   GetChannelLibrary / GetChannelDefinition / GetChannelHistory     reads
 //   PreviewChannelPool                                        draft preview
+//   PreviewChannelArrangement                     arrangement plans (sync)
 //   ValidateChannelChanges                                     pre-flight
 //   ApplyChannelChanges (TASK)  ->  GetChannelApplyResult    THE write path
 //
@@ -135,6 +136,10 @@
     [[APPLY_SHORTCUT], "Apply the current draft"],
     [["Esc"], "Close dialogs; exit chip manage mode"],
     [["Enter", "Space"], "Select the focused channel in the dial"],
+    [["Shift", "click"], "Select a range of channels (in Select channels mode)"],
+    [["Ctrl", "A"], "Select all matching channels (dial focused, Select mode)"],
+    [["Ctrl", "Z"], "Undo the last staged arrangement (before Apply)"],
+    [["Ctrl", "Shift", "Z"], "Redo a staged arrangement"],
   ];
 
   // ------------------------------------------------------------------
@@ -367,6 +372,56 @@
       ops: JSON.stringify(ops),
     });
     return pollApplyReceipt(requestId);
+  }
+
+  // ------------------------------------------------------------------
+  // Arrangement seam (frozen contract 2026-10-05, decisions 1-4):
+  // ONE sync preview op with an intent discriminated union; the server is
+  // the ONLY planner — the browser renders authoritative plans and freezes
+  // the server-emitted `packet`. PHASE-4 BRIDGE: this helper is the single
+  // place that knows the wire shape; if the landed op takes nested maps
+  // directly instead of JSON-string fields, change ONLY here.
+  // ------------------------------------------------------------------
+  async function previewChannelArrangement(req) {
+    const args = {
+      expectedRevision: req.expectedRevision,
+      correlationToken: String(req.correlationToken),
+      intent: JSON.stringify(req.intent),
+    };
+    if (req.explain) args.explain = true;
+    if (req.overlays && req.overlays.length) args.channels = JSON.stringify(req.overlays);
+    return runOp("PreviewChannelArrangement", args);
+  }
+
+  function newCorrelationToken() {
+    if (window.crypto && typeof window.crypto.randomUUID === "function") {
+      return "org-" + window.crypto.randomUUID();
+    }
+    return "org-" + Date.now().toString(36) + "-" + Math.floor(Math.random() * 1e9).toString(36);
+  }
+
+  // Capability handshake (features.arrangement gates the organize surface).
+  // Absent/failed -> arrangement tools explain themselves; basic editing
+  // (put/create/move/patch, groups) keeps working unchanged.
+  async function fetchCapabilities() {
+    try {
+      const caps = await runOp("Capabilities");
+      return caps && typeof caps === "object" ? caps : null;
+    } catch (e) {
+      diagEvent("capabilities", { outcome: "unavailable" });
+      return null;
+    }
+  }
+
+  // Tab-local submit mutex: bulk Applies and arrangement Applies never
+  // overlap SUBMISSIONS from this tab — a second Apply waits for the first
+  // RECEIPT, so expectedRevision is never guessed (frozen contract
+  // decision 6: one coordinator, explicit scope).
+  let submitChain = Promise.resolve();
+  function enqueueSubmit(fn) {
+    const run = submitChain.then(() => fn());
+    submitChain = run.catch(() => {});
+    return run;
   }
 
   let idSeq = 0;
@@ -629,6 +684,7 @@
   function toWireChannel(channel) {
     const c = clone(channel);
     c.source = toWireSource(c.source);
+    delete c.pendingGroupName; // client-side sentinel plumbing, never a wire field
     return c;
   }
 
@@ -988,6 +1044,317 @@
   }
 
   // ------------------------------------------------------------------
+  // Organization draft store (frozen contract decision 5):
+  // sessionStorage key jw-studio-org-v1:<libraryId> — same privacy
+  // characteristics as the draft/ops-pending keys (per-tab, browser-session
+  // storage). Contents: the staged arrangement (server-planned overlay +
+  // bounded undo/redo), the FROZEN packet once Stage->Apply begins, and the
+  // pending-receipt state. Local truth only: nothing here reaches the
+  // server until Apply arrangement submits the frozen packet byte-identical.
+  //
+  // staged: { baseRevision, correlationToken, label, intent, response,
+  //           packet: { expectedRevision, ops, requestId }, beforeAfter,
+  //           tempRefs, optIns, stagedAt }
+  // pending: { requestId, expected, opsDigest, correlationToken,
+  //            beforeAfter, tempIds, submittedAt }
+  // undo/redo: bounded stacks of prior `staged` values (null = no staging).
+  // ------------------------------------------------------------------
+
+  function makeOrgStore(libraryId) {
+    const key = "jw-studio-org-v1:" + libraryId;
+    const UNDO_CAP = 50;
+    let listeners = [];
+    let memory = null;
+    const emit = () => listeners.slice().forEach((fn) => { try { fn(); } catch (e) { /* noop */ } });
+    function blank() { return { v: 1, staged: null, pending: null, undo: [], redo: [] }; }
+    function read() {
+      if (memory) return memory;
+      let parsed = null;
+      try { parsed = JSON.parse(sessionStorage.getItem(key) || "null"); } catch (e) { parsed = null; }
+      memory = parsed && parsed.v === 1 && typeof parsed === "object"
+        ? Object.assign(blank(), parsed) : blank();
+      return memory;
+    }
+    function write() {
+      try { sessionStorage.setItem(key, JSON.stringify(memory)); } catch (e) { /* memory-only session */ }
+      emit();
+    }
+    return {
+      get() { return read(); },
+      stage(staged) {
+        const s = read();
+        s.undo.push(s.staged);
+        if (s.undo.length > UNDO_CAP) s.undo.splice(0, s.undo.length - UNDO_CAP);
+        s.redo = [];
+        s.staged = staged;
+        s.pending = null;
+        write();
+      },
+      undo() {
+        const s = read();
+        if (!s.undo.length) return false;
+        s.redo.push(s.staged);
+        s.staged = s.undo.pop();
+        s.pending = null;
+        write();
+        return true;
+      },
+      redo() {
+        const s = read();
+        if (!s.redo.length) return false;
+        s.undo.push(s.staged);
+        s.staged = s.redo.pop();
+        s.pending = null;
+        write();
+        return true;
+      },
+      discardStaged() { // explicit Discard — undoable like any other stage
+        const s = read();
+        if (!s.staged) return;
+        s.undo.push(s.staged);
+        if (s.undo.length > UNDO_CAP) s.undo.splice(0, s.undo.length - UNDO_CAP);
+        s.redo = [];
+        s.staged = null;
+        s.pending = null;
+        write();
+      },
+      setPending(p) { const s = read(); s.pending = p; write(); },
+      clearPending() { const s = read(); s.pending = null; write(); },
+      clearStagedOnly() { const s = read(); s.staged = null; write(); },
+      subscribe(fn) { listeners.push(fn); return () => { listeners = listeners.filter((f) => f !== fn); }; },
+    };
+  }
+
+  // ------------------------------------------------------------------
+  // Organization pure helpers
+  // ------------------------------------------------------------------
+
+  // Dial preview overlay from a staged arrangement: number/group changes
+  // keyed by channel id OR temp ref (plan rows for pending creations ride
+  // as tempRef overlays — they never receive server ids pre-commit).
+  function orgOverlayOf(staged) {
+    if (!staged) return null;
+    const numbers = new Map();
+    const groups = new Map();
+    const ba = staged.beforeAfter || {};
+    for (const ref of Object.keys(ba)) {
+      if (ba[ref] && Array.isArray(ba[ref].number)) numbers.set(ref, ba[ref].number[1]);
+      if (ba[ref] && Array.isArray(ba[ref].group)) groups.set(ref, ba[ref].group[1]);
+    }
+    const temps = staged.tempRefs || {};
+    for (const ref of Object.keys(temps)) {
+      if (temps[ref] && temps[ref].number != null) numbers.set(ref, temps[ref].number);
+      if (temps[ref] && temps[ref].groupId) groups.set(ref, temps[ref].groupId);
+    }
+    if (!numbers.size && !groups.size) return null;
+    return { numbers, groups };
+  }
+
+  // beforeAfter map from a preview response: ref -> {number:[from,to],
+  // group:[from,to]} — the reversal + bystander-rebase source of truth.
+  function beforeAfterFromResponse(resp) {
+    const out = {};
+    for (const nc of (resp && resp.numberChanges) || []) {
+      const ref = nc.channelId || nc.tempRef;
+      if (!ref) continue;
+      const entry = out[ref] || (out[ref] = {});
+      entry.number = [nc.from, nc.to];
+    }
+    for (const gc of (resp && resp.groupChanges) || []) {
+      const ref = gc.channelId || gc.tempRef;
+      if (!ref) continue;
+      const entry = out[ref] || (out[ref] = {});
+      entry.group = [gc.from, gc.to];
+    }
+    return out;
+  }
+
+  function tempRefsFromResponse(resp) {
+    const out = {};
+    for (const cr of (resp && resp.created) || []) {
+      if (cr && cr.tempRef) out[cr.tempRef] = { number: cr.number, groupId: cr.groupId || null };
+    }
+    return out;
+  }
+
+  const REASON_TEXT = {
+    "direct": "moved directly — the number was free",
+    "insert-shift-up": "shifted up to make room",
+    "insert-shift-down": "shifted down to make room",
+    "block-displaced": "displaced — pushed up by the incoming block",
+    "range-pack": "packed into the range",
+    "exclusive-outside-relocation": "relocated — outside the exclusive range",
+    "shift-interval": "shifted by the interval offset",
+    "relocate": "relocated to a chosen number",
+    "swap": "swapped numbers",
+  };
+  function reasonText(reason) {
+    return REASON_TEXT[reason] || String(reason || "moved");
+  }
+
+  // Freeze a preview response into a staged arrangement (frozen contract
+  // decision 2): the server-emitted packet is stored verbatim; the UI only
+  // (a) merges full pending-create drafts into channel.create skeletons and
+  // (b) appends explicitly opted-in channel.put ops whose number AGREES with
+  // the plan's final number for that channel.
+  function freezeArrangementPacket(resp, opts) {
+    const options = opts || {};
+    const drafts = options.drafts || null;
+    const optInPuts = options.optInPuts || {}; // channelId -> wire channel
+    const finalNumbers = {}; // channelId/tempRef -> final number per the plan
+    for (const nc of (resp && resp.numberChanges) || []) {
+      const ref = nc.channelId || nc.tempRef;
+      if (ref) finalNumbers[ref] = nc.to;
+    }
+    const ops = clone((resp.packet && resp.packet.ops) || []);
+    for (const op of ops) {
+      if (op.op === "channel.create" && op.tempId && drafts) {
+        // The planner never fabricates sources/colors/glyphs — merge the
+        // owner's full pending draft into the skeleton (the plan's
+        // placement wins where the skeleton carries it; an assign_group-only
+        // skeleton omits `number` and the draft's own choice stands).
+        const entry = drafts.get(op.tempId);
+        if (entry && entry.draft) {
+          const full = toWireChannel(clone(entry.draft));
+          delete full.id; delete full.seed; delete full.provenance;
+          const skel = op.channel || {};
+          const merged = Object.assign({}, full);
+          if (skel.kind != null) merged.kind = skel.kind;
+          if (skel.number != null) merged.number = skel.number;
+          if (skel.groupId != null) merged.groupId = skel.groupId;
+          if (skel.name != null && skel.name !== "") merged.name = skel.name;
+          op.channel = merged;
+        }
+      }
+    }
+    for (const id of Object.keys(optInPuts)) {
+      const wire = clone(optInPuts[id]);
+      if (finalNumbers[id] != null) wire.number = finalNumbers[id]; // agreement rule
+      ops.push({ op: "channel.put", channel: wire });
+    }
+    return {
+      expectedRevision: (resp.packet && resp.packet.expectedRevision != null)
+        ? resp.packet.expectedRevision : resp.revision,
+      ops,
+      requestId: newRequestId(),
+    };
+  }
+
+  // Frozen contract §5 (backend clarification): assign_group + a number
+  // arrangement combine by concatenating two SAME-REVISION preview packets —
+  // group ops never touch numbers. Canonical order: group.put →
+  // channel.create (skeletons merged per tempId) → channels.move →
+  // channels.renumber.
+  function combineArrangementResponses(assignResp, rangeResp) {
+    const out = clone(rangeResp);
+    out.groupChanges = clone(assignResp.groupChanges || []);
+    out.warnings = (assignResp.warnings || []).concat(rangeResp.warnings || []);
+    out.errors = (assignResp.errors || []).concat(rangeResp.errors || []);
+    out.valid = !!(assignResp.valid && rangeResp.valid);
+    out.noop = !!(assignResp.noop && rangeResp.noop);
+    const groupOps = [];
+    const creates = new Map(); // tempId -> op
+    const moves = [];
+    const renumbers = [];
+    const others = [];
+    const take = (ops) => {
+      for (const op of ops || []) {
+        if (op.op === "group.put") groupOps.push(op);
+        else if (op.op === "channel.create") {
+          // Same tempRef in both packets: the assign packet's groupId is the
+          // intent's target; the number packet's placement wins the number.
+          const prev = creates.get(op.tempId);
+          if (prev) {
+            op.channel = Object.assign({}, prev.channel, op.channel);
+            if (prev.channel && prev.channel.groupId != null) op.channel.groupId = prev.channel.groupId;
+          }
+          creates.set(op.tempId, op);
+        }
+        else if (op.op === "channels.move") moves.push(op);
+        else if (op.op === "channels.renumber") renumbers.push(op);
+        else others.push(op);
+      }
+    };
+    take(assignResp.packet && assignResp.packet.ops);
+    take(rangeResp.packet && rangeResp.packet.ops);
+    out.packet = {
+      expectedRevision: rangeResp.revision,
+      ops: groupOps.concat([...creates.values()], moves, renumbers, others),
+    };
+    return out;
+  }
+
+  // Post-commit Stage reversal: inverse field map over EXISTING channels
+  // only. Created channels/groups are never auto-deleted (they are listed
+  // to the owner instead). Returns { ops, beforeAfter, skippedMoved,
+  // createdCount } — the caller validates + stages it as a NEW arrangement.
+  function buildReversal(staged, libChannels) {
+    const byId = new Map((libChannels || []).map((c) => [c.id, c]));
+    const assignments = [];
+    const groupBack = new Map(); // groupId -> [channelId]
+    const inverse = {};
+    const skippedMoved = [];
+    const createdIds = new Set();
+    for (const op of (staged.packet && staged.packet.ops) || []) {
+      if (op.op === "channel.create" && op.tempId) createdIds.add(op.tempId);
+    }
+    for (const ref of Object.keys(staged.beforeAfter || {})) {
+      if (String(ref).startsWith("temp-")) continue; // a created row: never auto-deleted
+      const ba = staged.beforeAfter[ref];
+      const cur = byId.get(ref);
+      if (!cur) { skippedMoved.push(ref); continue; } // gone since — leave it
+      if (ba.number) {
+        if (cur.number === ba.number[1]) {
+          assignments.push({ channelId: ref, number: ba.number[0] });
+          (inverse[ref] || (inverse[ref] = {})).number = [ba.number[1], ba.number[0]];
+        } else {
+          skippedMoved.push(ref); // moved again since — never blindly replay
+        }
+      }
+      if (ba.group && cur.groupId === ba.group[1]) {
+        const list = groupBack.get(ba.group[0]) || [];
+        list.push(ref);
+        groupBack.set(ba.group[0], list);
+        (inverse[ref] || (inverse[ref] = {})).group = [ba.group[1], ba.group[0]];
+      }
+    }
+    const ops = [];
+    if (assignments.length) ops.push({ op: "channels.renumber", assignments });
+    for (const [gid, ids] of groupBack) ops.push({ op: "channels.move", channelIds: ids, groupId: gid });
+    return { ops, beforeAfter: inverse, skippedMoved, createdCount: createdIds.size };
+  }
+
+  // After a committed arrangement: number/groupId land as server-changed
+  // fields on every touched channel that ALSO has a content draft —
+  // untouched locally -> adopt the acknowledged value; touched on both
+  // sides -> keep the local value (the next editor mount's rebaseDraft
+  // surfaces it as a named conflict). NEVER a wholesale channel.put.
+  function rebaseDraftsAfterArrangement(drafts, beforeAfter) {
+    if (!drafts) return;
+    for (const ref of Object.keys(beforeAfter || {})) {
+      if (String(ref).startsWith("temp-")) continue;
+      const entry = drafts.get(ref);
+      if (!entry || !entry.draft) continue;
+      const ba = beforeAfter[ref];
+      const draft = Object.assign({}, entry.draft);
+      let touched = false;
+      if (ba.number && draft.number === ba.number[0]) { draft.number = ba.number[1]; touched = true; }
+      if (ba.group && ba.group[0] && draft.groupId === ba.group[0]) { draft.groupId = ba.group[1]; touched = true; }
+      if (!touched) continue; // locally divergent (or untouched): leave for rebaseDraft
+      const extras = {};
+      if (entry.base) {
+        const base = Object.assign({}, entry.base);
+        if (ba.number && base.number === ba.number[0]) base.number = ba.number[1];
+        if (ba.group && ba.group[0] && base.groupId === ba.group[0]) base.groupId = ba.group[1];
+        extras.base = base;
+        // The draft is now exactly the acknowledged record: retire it.
+        if (deepEqual(draft, base)) { drafts.drop(ref); continue; }
+      }
+      drafts.put(ref, draft, extras);
+    }
+  }
+
+  // ------------------------------------------------------------------
   // In-flight applies: a channel's apply survives the editor being navigated
   // away (poll continues; the receipt lands; drafts/library update).
   // channelId -> { requestId, snapshot, expected, promise, name }
@@ -1043,7 +1410,7 @@
     return ref;
   }
 
-  function Dialog({ title, onClose, children, footer, wide }) {
+  function Dialog({ title, onClose, children, footer, wide, dialogClass }) {
     const ref = useRef(null);
     useEffect(() => {
       const previous = document.activeElement;
@@ -1076,7 +1443,7 @@
       onMouseDown: (e) => { if (e.target === e.currentTarget) onClose(); },
     },
       h("div", {
-        className: "jw-dialog" + (wide ? " jw-dialog-wide" : ""),
+        className: "jw-dialog" + (wide ? " jw-dialog-wide" : "") + (dialogClass ? " " + dialogClass : ""),
         role: "dialog", "aria-modal": "true", "aria-label": title, ref,
       },
         h("header", { className: "jw-dialog-head" },
@@ -1173,13 +1540,88 @@
         TOAST_ICONS[t.kind]
           ? h("span", { className: "jw-toast-icon", "aria-hidden": "true" }, TOAST_ICONS[t.kind])
           : null,
-        h("span", null, t.message))),
+        h("span", null, t.message),
+        t.action ? h("button", {
+          className: "jw-btn jw-btn-small jw-toast-action",
+          onClick: (e) => { e.stopPropagation(); onDismiss(t.id); t.action.onClick(); },
+        }, t.action.label) : null)),
     );
   }
 
   function StatusChip({ kind, children }) {
     return h("span", { className: "jw-status-chip jw-status-" + kind }, children);
   }
+
+  // Card disclosure (plan §7): long sections collapse behind a one-line
+  // summary; an error badge stays on the header so collapsed error-bearing
+  // controls are never silent. Starts OPEN — collapse is owner-chosen.
+  function Disclosure({ title, summary, errorCount, defaultOpen, children }) {
+    const [open, setOpen] = useState(defaultOpen !== false);
+    return h("div", { className: "jw-card jw-disclosure" },
+      h("button", {
+        type: "button",
+        className: "jw-card-title jw-disclosure-head",
+        "aria-expanded": open ? "true" : "false",
+        onClick: () => setOpen((v) => !v),
+      },
+        h("span", { className: "jw-disclosure-caret", "aria-hidden": "true" }, open ? "▾" : "▸"),
+        h("span", { className: "jw-disclosure-title" }, title),
+        errorCount
+          ? h("span", { className: "jw-disclosure-badge" }, errorCount + " error" + (errorCount === 1 ? "" : "s"))
+          : null,
+        !open && summary ? h("span", { className: "jw-disclosure-summary" }, summary) : null,
+      ),
+      open ? children : null,
+    );
+  }
+
+  // ------------------------------------------------------------------
+  // Optional customization hook (extras/): versioned, feature-detected,
+  // route-scoped, view notifications ONLY — there is deliberately no
+  // mutation surface (snippets can never bypass the draft/Apply flow).
+  // ------------------------------------------------------------------
+  const studioExt = {
+    cleanups: new Map(), // name -> cleanup fn
+    listeners: { staged: new Set(), applied: new Set(), selection: new Set() },
+  };
+  const studioCtxRef = { current: null }; // set while the App route is mounted
+
+  function studioEmit(event, payload) {
+    const set = studioExt.listeners[event];
+    if (!set) return;
+    for (const cb of [...set]) { try { cb(payload); } catch (e) { /* snippet errors never break the page */ } }
+  }
+
+  function studioRunCleanups() {
+    for (const [name, fn] of [...studioExt.cleanups]) {
+      if (typeof fn === "function") { try { fn(); } catch (e) { /* noop */ } }
+      studioExt.cleanups.delete(name);
+    }
+  }
+
+  window.JWChannelStudio = {
+    version: 1,
+    // register once per name; re-registration runs the previous cleanup
+    // first (idempotent after Stash re-injects custom JavaScript).
+    registerExtension(name, ext) {
+      if (!name || !ext || typeof ext.setup !== "function") {
+        throw new Error("JWChannelStudio.registerExtension(name, { version, setup })");
+      }
+      const prev = studioExt.cleanups.get(name);
+      if (typeof prev === "function") { try { prev(); } catch (e) { /* noop */ } }
+      studioExt.cleanups.delete(name);
+      const ctx = studioCtxRef.current;
+      if (!ctx) return () => {}; // route not mounted — nothing to clean up
+      let cleanup = null;
+      try { cleanup = ext.setup(ctx); } catch (e) { console.error("[stash-justwatch] extension failed", e); }
+      studioExt.cleanups.set(name, typeof cleanup === "function" ? cleanup : null);
+      return function unregister() {
+        const fn = studioExt.cleanups.get(name);
+        if (typeof fn === "function") { try { fn(); } catch (e) { /* noop */ } }
+        studioExt.cleanups.delete(name);
+      };
+    },
+  };
 
   // ------------------------------------------------------------------
   // Entity picker (searchable against Stash, windowed, thousands-safe)
@@ -1609,17 +2051,19 @@
   // New channel dialog → local DRAFT (committed on Apply)
   // ------------------------------------------------------------------
 
-  function NewChannelDialog({ lib, drafts, onClose, onCreate }) {
+  function NewChannelDialog({ lib, drafts, arrangementAvailable, onClose, onCreate }) {
     const groups = (lib.groups || []).slice().sort((a, b) => a.position - b.position);
     const [kind, setKind] = useState("net");
     const [number, setNumber] = useState(() => nextFreeNumber(lib.channels || [], "net"));
     const [name, setName] = useState("");
     const [groupId, setGroupId] = useState(groups[0] ? groups[0].id : "");
+    const [newGroupName, setNewGroupName] = useState("");
     const [error, setError] = useState(null);
 
     const band = BANDS[kind];
-    const numberOk = Number.isInteger(number) && number >= band[0] && number <= band[1]
-      && !(lib.channels || []).some((c) => c.number === number);
+    const inBand = Number.isInteger(number) && number >= band[0] && number <= band[1];
+    const occupant = inBand ? (lib.channels || []).find((c) => c.number === number) : null;
+    const numberOk = inBand && (!occupant || arrangementAvailable);
 
     const switchKind = (k) => {
       setKind(k);
@@ -1630,17 +2074,28 @@
       const trimmed = name.trim();
       if (!trimmed) { setError("Give the channel a name."); return; }
       if (!numberOk) { setError("Number " + (number || "") + " is not free in " + band[0] + "–" + band[1] + "."); return; }
-      if (!groupId) { setError("Pick a group."); return; }
+      let gid = groupId;
+      let pendingGroupName;
+      if (groupId === "__create__") {
+        const gn = newGroupName.trim();
+        if (!gn) { setError("Name the new group."); return; }
+        gid = newGroupId();
+        pendingGroupName = gn;
+      } else if (!groupId) { setError("Pick a group."); return; }
       const tempId = newTempId();
       const draft = {
         kind, number, name: trimmed, glyph: null,
-        color: pickDefaultColor(number), groupId, sort: "shuffle",
+        color: pickDefaultColor(number), groupId: gid, sort: "shuffle",
         enabled: true, archived: false, paused: false,
         source: convertLegacySource({ type: "none" }),
         sourceLabel: "", programming: null,
       };
+      if (pendingGroupName) draft.pendingGroupName = pendingGroupName;
       drafts.put(tempId, draft);
-      onCreate(tempId);
+      // An occupied number on an arrangement-capable backend: the draft keeps
+      // the intended number and the resolution sheet opens immediately —
+      // never a silent reset, never an automatic swap.
+      onCreate(tempId, occupant ? { resolveNumber: number } : null);
     };
 
     return h(Dialog, {
@@ -1684,14 +2139,27 @@
           min: band[0], max: band[1], value: number != null ? number : "",
           onChange: (e) => setNumber(e.target.value === "" ? null : parseInt(e.target.value, 10)),
         }),
-        !numberOk && number != null
-          ? h("p", { className: "jw-error-text" }, "That number is taken or out of the band.")
+        occupant
+          ? h("p", { className: "jw-hint" },
+              number + " is “" + occupant.name + "”"
+              + (arrangementAvailable ? " — you'll pick how to place it next." : " — pick a free number."))
+          : null,
+        !inBand && number != null
+          ? h("p", { className: "jw-error-text" }, "That number is out of the band.")
           : null,
       ),
       h("div", { className: "jw-field" },
         h("label", { className: "jw-field-label", htmlFor: "jw-new-group" }, "Group"),
         h("select", { id: "jw-new-group", className: "jw-input", value: groupId, onChange: (e) => setGroupId(e.target.value) },
-          groups.map((g) => h("option", { key: g.id, value: g.id }, g.name))),
+          groups.map((g) => h("option", { key: g.id, value: g.id }, g.name)),
+          h("option", { value: "__create__" }, "Create group…")),
+        groupId === "__create__"
+          ? h("input", {
+              className: "jw-input", style: { marginTop: "6px" },
+              placeholder: "New group name", "aria-label": "New group name",
+              value: newGroupName, onChange: (e) => setNewGroupName(e.target.value),
+            })
+          : null,
       ),
       error ? h("p", { className: "jw-error-text", role: "alert" }, error) : null,
     );
@@ -1754,31 +2222,1037 @@
   }
 
   // ------------------------------------------------------------------
-  // Swap dialog
+  // Number-resolution sheet (plan §3.2): ONE component for create,
+  // duplicate, direct renumber, and Organize single-row conflicts. The
+  // opening explain:true preview powers the whole choice matrix in ONE
+  // round-trip; per-choice re-preview only happens for typed targets.
+  // New channels never see Swap (no original slot). Staging is local truth
+  // (org store); nothing writes until the owner Applies the arrangement.
   // ------------------------------------------------------------------
 
-  function SwapDialog({ draft, lib, onClose, onPick }) {
-    const others = (lib.channels || [])
-      .filter((c) => c.id !== draft.id && c.kind === (draft.kind || "net"))
-      .sort((a, b) => Math.abs(a.number - draft.number) - Math.abs(b.number - draft.number))
-      .slice(0, 30);
+  function NumberResolutionSheet({ lib, drafts, subject, target, onStage, onClose }) {
+    const isTemp = subject.isNew || String(subject.ref).startsWith("temp-");
+    const committed = isTemp ? null : (lib.channels || []).find((c) => c.id === subject.ref) || null;
+    const tempEntry = isTemp && drafts ? drafts.get(subject.ref) : null;
+    const kind = subject.kind
+      || (committed && committed.kind)
+      || (tempEntry && tempEntry.draft && tempEntry.draft.kind)
+      || "net";
+    const band = BANDS[kind] || BANDS.net;
+    const subjectName = isTemp
+      ? String((tempEntry && tempEntry.draft && tempEntry.draft.name) || "(unnamed draft)")
+      : String((committed && committed.name) || subject.ref);
+    const currentNumber = isTemp
+      ? (tempEntry && tempEntry.draft ? tempEntry.draft.number : null)
+      : (committed ? committed.number : null);
+
+    const [dest, setDest] = useState(target);
+    const [choice, setChoice] = useState("insert-up");
+    const [freePick, setFreePick] = useState(null);
+    const [relocateTo, setRelocateTo] = useState(null);
+    const [explain, setExplain] = useState(null); // opening explain response
+    const [resp, setResp] = useState(null);       // the ACTIVE choice's preview
+    const [busy, setBusy] = useState(false);
+    const [loadError, setLoadError] = useState(null);
+    const seqRef = useRef(0);
+    const aliveRef = useRef(true);
+    const tokenRef = useRef(newCorrelationToken());
+    useEffect(() => () => { aliveRef.current = false; }, []);
+
+    const overlays = useMemo(() => (
+      isTemp && tempEntry && tempEntry.draft
+        ? [{
+            tempRef: subject.ref,
+            kind,
+            name: tempEntry.draft.name || undefined,
+            groupId: tempEntry.draft.groupId || undefined,
+          }]
+        : []
+    ), [isTemp, tempEntry, subject.ref, kind]);
+
+    const occupantOf = (n) => Number.isInteger(n)
+      ? (lib.channels || []).find((c) => c.number === n && c.id !== subject.ref) || null
+      : null;
+    const occupant = occupantOf(dest);
+
+    const subjectIntentKey = isTemp ? { tempRef: subject.ref } : { channelId: subject.ref };
+
+    async function runPreview(intent, withExplain) {
+      const seq = ++seqRef.current;
+      setBusy(true);
+      setLoadError(null);
+      try {
+        const out = await previewChannelArrangement({
+          expectedRevision: lib.revision,
+          correlationToken: tokenRef.current,
+          intent,
+          overlays,
+          explain: !!withExplain,
+        });
+        if (!aliveRef.current || seq !== seqRef.current) return;
+        // Stale-guard (frozen contract decision 3): a slow response can
+        // never replace a newer review — (revision, token) must match.
+        if (out && out.correlationToken && out.correlationToken !== tokenRef.current) return;
+        if (withExplain) setExplain(out);
+        setResp(out);
+      } catch (e) {
+        if (!aliveRef.current || seq !== seqRef.current) return;
+        setResp(null);
+        setLoadError(String((e && e.message) || e));
+      } finally {
+        if (aliveRef.current && seq === seqRef.current) setBusy(false);
+      }
+    }
+
+    // Opening call: insert-up at the destination with the full choice matrix.
+    useEffect(() => {
+      if (!Number.isInteger(dest)) return;
+      void runPreview(Object.assign({ type: "insert", number: dest, direction: "up" }, subjectIntentKey), true);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    // Re-preview when the destination or the active choice's parameter moves.
+    useEffect(() => {
+      if (!Number.isInteger(dest)) { setResp(null); return undefined; }
+      let intent = null;
+      if (choice === "free") {
+        if (!Number.isInteger(freePick)) { setResp(null); return undefined; }
+        intent = Object.assign({ type: "insert", number: freePick, direction: "up" }, subjectIntentKey);
+      } else if (choice === "swap") {
+        if (!occupant) { setResp(null); return undefined; }
+        intent = { type: "swap", a: subject.ref, b: occupant.id };
+      } else if (choice === "relocate") {
+        if (!occupant || !Number.isInteger(relocateTo)) { setResp(null); return undefined; }
+        intent = { type: "relocate_occupant", channelId: occupant.id, to: relocateTo };
+      } else {
+        intent = Object.assign({ type: "insert", number: dest, direction: choice === "insert-down" ? "down" : "up" }, subjectIntentKey);
+      }
+      const t = setTimeout(() => { void runPreview(intent, false); }, 250);
+      return () => clearTimeout(t);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [choice, dest, freePick, relocateTo]);
+
+    const choices = (explain && explain.choices) || {};
+    const matrix = [
+      {
+        key: "free",
+        label: "Use a free number",
+        available: !!choices.free,
+        detail: choices.free ? "Suggestions: " + (choices.free.list || []).slice(0, 5).join(", ") : null,
+        reason: choices.free ? null : "No free number is left in " + band[0] + "–" + band[1] + ".",
+      },
+      !isTemp ? {
+        key: "swap",
+        label: "Swap numbers",
+        available: !!(choices.swap && choices.swap.available),
+        detail: choices.swap && choices.swap.available
+          ? "“" + choices.swap.withName + "” (" + choices.swap.withNumber + ") takes "
+            + (currentNumber != null ? "this channel's current number " + currentNumber : "the old slot") + "."
+          : null,
+        reason: choices.swap && !choices.swap.available ? (choices.swap.reason || "Swap is not possible here.") : null,
+      } : null,
+      {
+        key: "insert-up",
+        label: "Insert and shift upward",
+        available: !choices.shiftUp || choices.shiftUp.available !== false,
+        detail: choices.shiftUp && choices.shiftUp.available
+          ? choices.shiftUp.movedCount + " existing channel" + (choices.shiftUp.movedCount === 1 ? "" : "s")
+            + " move; the shift stops at the first free number" + (choices.shiftUp.firstFree != null ? " (" + choices.shiftUp.firstFree + ")" : "") + "."
+          : null,
+        reason: choices.shiftUp && choices.shiftUp.available === false ? choices.shiftUp.reason : null,
+      },
+      {
+        key: "insert-down",
+        label: "Insert and shift downward",
+        available: !choices.shiftDown || choices.shiftDown.available !== false,
+        detail: choices.shiftDown && choices.shiftDown.available
+          ? choices.shiftDown.movedCount + " existing channel" + (choices.shiftDown.movedCount === 1 ? "" : "s")
+            + " move; the shift stops at the first free number" + (choices.shiftDown.firstFree != null ? " (" + choices.shiftDown.firstFree + ")" : "") + "."
+          : null,
+        reason: choices.shiftDown && choices.shiftDown.available === false ? choices.shiftDown.reason : null,
+      },
+      {
+        key: "relocate",
+        label: "Relocate the occupant",
+        available: !!occupant && (!choices.relocate || choices.relocate.available !== false),
+        detail: occupant ? "“" + occupant.name + "” moves to a free number you pick." : null,
+        reason: !occupant && choice === "relocate" ? "The destination is free — nothing to relocate." : null,
+      },
+    ].filter(Boolean);
+
+    // The active plan's affected rows (authoritative: rendered, never
+    // recomputed client-side).
+    const planRows = useMemo(() => {
+      const rows = [];
+      const src = resp || null;
+      for (const nc of (src && src.numberChanges) || []) {
+        const ref = nc.channelId || nc.tempRef;
+        if (!ref) continue;
+        const c = nc.channelId ? (lib.channels || []).find((x) => x.id === nc.channelId) : null;
+        const t = nc.tempRef && drafts ? drafts.get(nc.tempRef) : null;
+        rows.push({
+          key: "n-" + ref,
+          name: c ? c.name : (t && t.draft ? t.draft.name : ref),
+          glyph: c ? c.glyph : (t && t.draft ? t.draft.glyph : null),
+          color: c ? c.color : (t && t.draft ? t.draft.color : null),
+          number: [nc.from, nc.to],
+          reason: nc.reason,
+          displaced: !nc.selected,
+        });
+      }
+      for (const cr of (src && src.created) || []) {
+        const t = drafts ? drafts.get(cr.tempRef) : null;
+        rows.push({
+          key: "c-" + cr.tempRef,
+          name: t && t.draft ? t.draft.name : cr.tempRef,
+          glyph: t && t.draft ? t.draft.glyph : null,
+          color: t && t.draft ? t.draft.color : null,
+          number: [null, cr.number],
+          reason: "direct",
+          displaced: false,
+          isNew: true,
+        });
+      }
+      return rows;
+    }, [resp, lib, drafts]);
+
+    const stage = () => {
+      if (!resp || !resp.valid || resp.noop) return;
+      // Relocate: the preview packet covers the OCCUPANT; the subject's own
+      // placement augments the packet (contract-sanctioned): existing rows
+      // join the renumber map, pending creations append their skeleton.
+      let work = resp;
+      let subjectBeforeAfter = null;
+      if (choice === "relocate") {
+        work = clone(resp);
+        work.packet = clone(resp.packet || { expectedRevision: resp.revision, ops: [] });
+        const finalForSubject = dest;
+        if (isTemp) {
+          const d = tempEntry && tempEntry.draft ? tempEntry.draft : {};
+          work.packet.ops.push({
+            op: "channel.create", tempId: subject.ref,
+            channel: { kind, number: finalForSubject, name: d.name || "", groupId: d.groupId || null },
+          });
+          work.created = (work.created || []).concat([{ tempRef: subject.ref, number: finalForSubject, groupId: d.groupId || null }]);
+        } else {
+          let renum = work.packet.ops.find((o) => o.op === "channels.renumber");
+          if (!renum) { renum = { op: "channels.renumber", assignments: [] }; work.packet.ops.push(renum); }
+          renum.assignments.push({ channelId: subject.ref, number: finalForSubject });
+          work.numberChanges = (work.numberChanges || []).concat([{
+            channelId: subject.ref, tempRef: null, from: currentNumber, to: finalForSubject,
+            selected: true, reason: "direct",
+          }]);
+        }
+        subjectBeforeAfter = { number: [currentNumber, finalForSubject] };
+      }
+      const packet = freezeArrangementPacket(work, { drafts });
+      const beforeAfter = beforeAfterFromResponse(work);
+      if (subjectBeforeAfter) beforeAfter[subject.ref] = subjectBeforeAfter;
+      const finalNumber = choice === "free" ? freePick : dest;
+      onStage({
+        baseRevision: work.revision,
+        correlationToken: tokenRef.current,
+        label: "Place “" + subjectName.slice(0, 40) + "” at " + finalNumber,
+        intent: { type: "number-resolution", choice, subject: subject.ref, number: finalNumber },
+        response: work,
+        packet,
+        beforeAfter,
+        tempRefs: tempRefsFromResponse(work),
+        stagedAt: Date.now(),
+      }, finalNumber);
+    };
+
+    const noop = resp && resp.valid && resp.noop;
+    const respErrors = (resp && resp.errors) || [];
+    const stageable = !!(resp && resp.valid && !resp.noop && !busy);
+
     return h(Dialog, {
-      title: "Swap number " + draft.number + " with…", onClose,
-      footer: [h("button", { key: "c", className: "jw-btn", onClick: onClose }, "Cancel")],
+      title: "Place “" + subjectName + "” at " + (Number.isInteger(dest) ? dest : "…"),
+      onClose, dialogClass: "jw-sheet-numres",
+      footer: [
+        h("button", { key: "c", className: "jw-btn", onClick: onClose }, "Cancel — keep drafts"),
+        h("button", {
+          key: "s", className: "jw-btn jw-btn-primary", disabled: !stageable,
+          title: stageable ? "Stage this plan locally — nothing is written until Apply arrangement" : "Pick an available choice first",
+          onClick: stage,
+        }, busy ? "Planning…" : "Stage arrangement"),
+      ],
     },
-      h("p", { className: "jw-hint" },
-        "Both numbers exchange in the SAME Apply — one transaction, no duplicate-number window."),
-      h("div", { className: "jw-swap-list", role: "listbox", "aria-label": "Swap with" },
-        others.map((c) => h("div", {
-          key: c.id, className: "jw-swap-row", role: "option", tabIndex: 0,
-          onClick: () => { onPick(c); onClose(); },
-          onKeyDown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onPick(c); onClose(); } },
-        },
-          h(GlyphTile, { codepoint: c.glyph, color: c.color, size: 24, fallback: c.number }),
-          h("span", { className: "jw-swap-name" }, c.name),
-          h("span", { className: "jw-pick-eid" }, "#" + c.number),
-        )),
+      h("div", { className: "jw-field" },
+        h("label", { className: "jw-field-label", htmlFor: "jw-numres-dest" },
+          "Destination number (" + band[0] + "–" + band[1] + ")"),
+        h("input", {
+          id: "jw-numres-dest", className: "jw-input jw-num-wide", type: "number",
+          min: band[0], max: band[1], value: dest != null ? dest : "",
+          onChange: (e) => setDest(e.target.value === "" ? null : parseInt(e.target.value, 10)),
+        }),
+        occupant
+          ? h("p", { className: "jw-hint" }, dest + " is “" + occupant.name + "”.")
+          : Number.isInteger(dest)
+            ? h("p", { className: "jw-hint" }, dest + " is free.")
+            : null,
+        currentNumber != null && Number.isInteger(dest) && dest !== currentNumber && !isTemp
+          ? h("p", { className: "jw-hint" }, "The channel keeps " + currentNumber + " until you Apply the staged arrangement.")
+          : null,
       ),
+      h("div", { className: "jw-choice-list", role: "radiogroup", "aria-label": "Placement choices" },
+        matrix.map((row) => h("label", {
+          key: row.key,
+          className: "jw-choice" + (choice === row.key ? " jw-choice-active" : "")
+            + (row.available === false ? " jw-choice-off" : ""),
+        },
+          h("input", {
+            type: "radio", name: "jw-numres-choice", value: row.key,
+            checked: choice === row.key, disabled: row.available === false,
+            onChange: () => setChoice(row.key),
+          }),
+          h("span", { className: "jw-choice-body" },
+            h("span", { className: "jw-choice-label" }, row.label),
+            row.available === false && row.reason
+              ? h("span", { className: "jw-choice-reason" }, row.reason)
+              : (row.detail ? h("span", { className: "jw-choice-detail" }, row.detail) : null),
+            choice === row.key && row.key === "free" ? h("span", { className: "jw-choice-ctrl" },
+              ((choices.free && choices.free.list) || []).slice(0, 5).map((n) => h("button", {
+                key: n, type: "button",
+                className: "jw-chip" + (freePick === n ? " jw-chip-active" : ""),
+                "aria-pressed": freePick === n ? "true" : "false",
+                onClick: () => setFreePick(n),
+              }, String(n))),
+              h("input", {
+                type: "number", className: "jw-input jw-num-wide", min: band[0], max: band[1],
+                placeholder: "free number", "aria-label": "Chosen free number",
+                value: freePick != null ? freePick : "",
+                onChange: (e) => setFreePick(e.target.value === "" ? null : parseInt(e.target.value, 10)),
+              }),
+            ) : null,
+            choice === row.key && row.key === "relocate" && occupant ? h("span", { className: "jw-choice-ctrl" },
+              h("span", { className: "jw-hint" }, "Send “" + occupant.name + "” to"),
+              h("input", {
+                type: "number", className: "jw-input jw-num-wide", min: band[0], max: band[1],
+                placeholder: "free number", "aria-label": "New number for " + occupant.name,
+                value: relocateTo != null ? relocateTo : "",
+                onChange: (e) => setRelocateTo(e.target.value === "" ? null : parseInt(e.target.value, 10)),
+              }),
+              Number.isInteger(relocateTo) && occupantOf(relocateTo)
+                ? h("span", { className: "jw-error-text" }, relocateTo + " is taken by “" + occupantOf(relocateTo).name + "”.")
+                : null,
+            ) : null,
+          ),
+        ))),
+      loadError ? h("p", { className: "jw-error-text", role: "alert" }, loadError) : null,
+      respErrors.length
+        ? h("div", { className: "jw-error-text", role: "alert" },
+            respErrors.map((e, i) => h("div", { key: i }, e.message || String(e.code || e))))
+        : null,
+      noop ? h("p", { className: "jw-hint" }, "Nothing would change — the channel is already there.") : null,
+      (resp && (resp.warnings || []).length)
+        ? h("div", { className: "jw-note-warn" }, resp.warnings.map((w, i) => h("div", { key: i }, w.message || String(w.code || w))))
+        : null,
+      planRows.length
+        ? h("div", { className: "jw-field" },
+            h("span", { className: "jw-field-label" }, "What will happen (" + planRows.length + " row" + (planRows.length === 1 ? "" : "s") + ")"),
+            h("div", { className: "jw-review-list jw-review-list-short" },
+              planRows.map((r) => h("div", {
+                key: r.key,
+                className: "jw-review-row" + (r.displaced ? " jw-review-row-displaced" : ""),
+              },
+                h(GlyphTile, { codepoint: r.glyph, color: r.color, size: 24, fallback: r.number[1] }),
+                h("span", { className: "jw-review-name" }, r.name, r.isNew ? h(StatusChip, { kind: "accent" }, "new") : null),
+                h("span", { className: "jw-review-move" },
+                  r.number[0] != null ? String(r.number[0]) : "—", " → ", r.number[1] != null ? String(r.number[1]) : "—"),
+                h("span", { className: "jw-review-reason" },
+                  (r.displaced ? "displaced — " : "selected — ") + reasonText(r.reason)),
+              ))),
+          )
+        : (busy ? h("p", { className: "jw-hint" }, "Planning…") : null),
+    );
+  }
+
+  // ------------------------------------------------------------------
+  // Organize sheet (plan §3.3): five sequential sections, no tabs.
+  //   1 Channels · 2 Action · 3 Destination and order · 4 Conflicts
+  //   5 Review (virtualized). Stage writes LOCAL truth only; the sticky
+  //   arrangement bar owns the explicit Apply.
+  // ------------------------------------------------------------------
+
+  const ORG_ACTIONS = [
+    { key: "assign_group", label: "Assign group" },
+    { key: "arrange_range", label: "Arrange within range" },
+    { key: "move_block", label: "Move block to start" },
+    { key: "shift_interval", label: "Shift interval by offset" },
+  ];
+
+  function OrganizeSheet({
+    lib, drafts, groups, tempRows, filteredIds, selectionIds,
+    initialScope, initialIntent, reviewStaged,
+    onStage, onSplitSelection, onClose,
+  }) {
+    const committed = lib.channels || [];
+    const byId = useMemo(() => new Map(committed.map((c) => [c.id, c])), [lib]);
+    const tempById = useMemo(() => new Map((tempRows || []).map((t) => [t.id, t])), [tempRows]);
+
+    // ---- section 1: Channels (scope) ----
+    const [scopeType, setScopeType] = useState(() => {
+      if (initialScope && initialScope.type) return initialScope.type;
+      if (initialIntent && initialIntent.scopeType) return initialIntent.scopeType;
+      return selectionIds && selectionIds.size ? "selection" : "group";
+    });
+    const [scopeGroupId, setScopeGroupId] = useState(() => {
+      if (initialScope && initialScope.groupId) return initialScope.groupId;
+      return groups[0] ? groups[0].id : "";
+    });
+    const [scopeStart, setScopeStart] = useState(() => (initialScope && initialScope.range ? initialScope.range.start : null));
+    const [scopeEnd, setScopeEnd] = useState(() => (initialScope && initialScope.range ? initialScope.range.end : null));
+
+    // ---- section 2: Action ----
+    const [action, setAction] = useState(() => (initialIntent && initialIntent.action) || "arrange_range");
+
+    // ---- section 3: Destination and order ----
+    const [destGroupId, setDestGroupId] = useState(groups[0] ? groups[0].id : "");
+    const [newGroupName, setNewGroupName] = useState("");
+    const [rangeStart, setRangeStart] = useState(() => (initialIntent && initialIntent.range ? initialIntent.range.start : null));
+    const [rangeEnd, setRangeEnd] = useState(() => (initialIntent && initialIntent.range ? initialIntent.range.end : null));
+    const [blockStart, setBlockStart] = useState(() => (initialIntent && initialIntent.start != null ? initialIntent.start : null));
+    const [offset, setOffset] = useState(() => (initialIntent && initialIntent.offset != null ? initialIntent.offset : 10));
+    const [order, setOrder] = useState("number");
+
+    // ---- section 4: Conflicts ----
+    const [strategy, setStrategy] = useState(() => (initialIntent && initialIntent.strategy) || "useAvailable");
+    const [outStart, setOutStart] = useState(() => (initialIntent && initialIntent.outside ? initialIntent.outside.start : null));
+    const [outEnd, setOutEnd] = useState(() => (initialIntent && initialIntent.outside ? initialIntent.outside.end : null));
+    // Optional combination (plan §3.4 note): a range arrangement can also
+    // assign the selection to a group in the SAME reviewed packet.
+    const [alsoAssign, setAlsoAssign] = useState(false);
+
+    // ---- section 5: Review ----
+    const [resp, setResp] = useState(reviewStaged ? reviewStaged.response : null);
+    const [busy, setBusy] = useState(false);
+    const [loadError, setLoadError] = useState(null);
+    const [reviewFilter, setReviewFilter] = useState("");
+    const [optIns, setOptIns] = useState(() => new Set());
+    const seqRef = useRef(0);
+    const aliveRef = useRef(true);
+    const tokenRef = useRef(reviewStaged ? reviewStaged.correlationToken : newCorrelationToken());
+    useEffect(() => () => { aliveRef.current = false; }, []);
+
+    // Resolve the scope to concrete refs (existing ids + temp refs).
+    const scopeRefs = useMemo(() => {
+      let refs = [];
+      if (scopeType === "selection") {
+        refs = [...(selectionIds || [])];
+      } else if (scopeType === "group") {
+        refs = committed.filter((c) => c.groupId === scopeGroupId).map((c) => c.id)
+          .concat((tempRows || []).filter((t) => t.groupId === scopeGroupId).map((t) => t.id));
+      } else if (scopeType === "interval") {
+        if (Number.isInteger(scopeStart) && Number.isInteger(scopeEnd)) {
+          const lo = Math.min(scopeStart, scopeEnd);
+          const hi = Math.max(scopeStart, scopeEnd);
+          refs = committed.filter((c) => c.number >= lo && c.number <= hi).map((c) => c.id)
+            .concat((tempRows || []).filter((t) => t.number != null && t.number >= lo && t.number <= hi).map((t) => t.id));
+        }
+      } else if (scopeType === "filter") {
+        refs = (filteredIds || []).slice();
+      }
+      // deterministic: ascending CURRENT number, ties by ref (temps sort last)
+      const numOf = (ref) => {
+        const c = byId.get(ref);
+        if (c) return c.number;
+        const t = tempById.get(ref);
+        return t && t.number != null ? t.number : Number.MAX_SAFE_INTEGER;
+      };
+      return refs.slice().sort((a, b) => numOf(a) - numOf(b) || String(a).localeCompare(String(b)));
+    }, [scopeType, scopeGroupId, scopeStart, scopeEnd, selectionIds, filteredIds, committed, tempRows, byId, tempById]);
+
+    const scopeChannelIds = scopeRefs.filter((r) => !String(r).startsWith("temp-"));
+    const scopeTempRefs = scopeRefs.filter((r) => String(r).startsWith("temp-"));
+    // A selection scope keeps rows hidden by the current filter BY DESIGN —
+    // the scope line says so explicitly, never a silent acting-on-hidden.
+    const hiddenInScope = useMemo(() => {
+      if (scopeType !== "selection") return 0;
+      const shown = new Set(filteredIds || []);
+      return [...(selectionIds || [])].filter((id) => !shown.has(id)).length;
+    }, [scopeType, selectionIds, filteredIds]);
+    const scopeKinds = useMemo(() => {
+      const kinds = new Set();
+      for (const ref of scopeRefs) {
+        const c = byId.get(ref);
+        if (c) kinds.add(c.kind || "net");
+        else if (tempById.has(ref)) kinds.add(tempById.get(ref).kind || "net");
+      }
+      return kinds;
+    }, [scopeRefs, byId, tempById]);
+    const mixedScope = scopeKinds.size > 1;
+
+    const overlays = useMemo(() => scopeTempRefs.map((ref) => {
+      const t = tempById.get(ref) || {};
+      return { tempRef: ref, kind: t.kind || "net", name: t.name || undefined, groupId: t.groupId || undefined };
+    }), [scopeTempRefs, tempById]);
+
+    function buildIntent() {
+      if (action === "shift_interval") {
+        if (!Number.isInteger(scopeStart) || !Number.isInteger(scopeEnd) || !Number.isInteger(offset) || offset === 0) return null;
+        return { type: "shift_interval", range: { start: Math.min(scopeStart, scopeEnd), end: Math.max(scopeStart, scopeEnd) }, offset };
+      }
+      if (!scopeRefs.length) return null;
+      if (action === "assign_group") {
+        const base = { type: "assign_group", channelIds: scopeChannelIds, tempRefs: scopeTempRefs };
+        if (newGroupName.trim()) base.createGroup = { name: newGroupName.trim() };
+        else if (destGroupId) base.groupId = destGroupId;
+        else return null;
+        return base;
+      }
+      if (action === "arrange_range") {
+        if (!Number.isInteger(rangeStart) || !Number.isInteger(rangeEnd)) return null;
+        const intent = {
+          type: "arrange_range", channelIds: scopeChannelIds, tempRefs: scopeTempRefs,
+          range: { start: Math.min(rangeStart, rangeEnd), end: Math.max(rangeStart, rangeEnd) },
+          order, strategy,
+        };
+        if (strategy === "exclusive") {
+          if (!Number.isInteger(outStart) || !Number.isInteger(outEnd)) return null;
+          intent.outside = { start: Math.min(outStart, outEnd), end: Math.max(outStart, outEnd) };
+        }
+        return intent;
+      }
+      if (action === "move_block") {
+        if (!Number.isInteger(blockStart)) return null;
+        // The given order IS the block order: number order by default,
+        // alphabetical opt-in (id / "t:"+tempRef tie-break, mirroring the
+        // server's deterministic rule).
+        const nameOf = (ref) => {
+          const c = byId.get(ref);
+          if (c) return String(c.name || "");
+          const t = tempById.get(ref);
+          return t ? String(t.name || "") : "";
+        };
+        const ordered = order === "alpha"
+          ? scopeRefs.slice().sort((a, b) => nameOf(a).toLowerCase().localeCompare(nameOf(b).toLowerCase())
+              || (String(a).startsWith("temp-") ? "t:" + a : a).localeCompare(String(b).startsWith("temp-") ? "t:" + b : b))
+          : scopeRefs; // already number-sorted
+        return {
+          type: "move_block",
+          channelIds: ordered.filter((r) => !String(r).startsWith("temp-")),
+          tempRefs: ordered.filter((r) => String(r).startsWith("temp-")),
+          start: blockStart,
+        };
+      }
+      return null;
+    }
+
+    const intent = buildIntent();
+    const intentKey = JSON.stringify(intent) + "|" + lib.revision;
+
+    // The optional assign_group half of a combined arrange_range packet.
+    const assignIntent = (alsoAssign && action === "arrange_range" && scopeRefs.length)
+      ? (() => {
+          const base = { type: "assign_group", channelIds: scopeChannelIds, tempRefs: scopeTempRefs };
+          if (newGroupName.trim()) base.createGroup = { name: newGroupName.trim() };
+          else if (destGroupId) base.groupId = destGroupId;
+          else return null;
+          return base;
+        })()
+      : null;
+    const assignKey = JSON.stringify(assignIntent);
+
+    useEffect(() => {
+      if (reviewStaged) return undefined; // reopening a review: no re-preview
+      if (!intent) { setResp(null); return undefined; }
+      if (alsoAssign && action === "arrange_range" && !assignIntent) { setResp(null); return undefined; }
+      const token = tokenRef.current;
+      const seq = ++seqRef.current;
+      const handle = setTimeout(async () => {
+        setBusy(true);
+        setLoadError(null);
+        try {
+          const rangeOut = await previewChannelArrangement({
+            expectedRevision: lib.revision,
+            correlationToken: token,
+            intent,
+            overlays,
+          });
+          if (!aliveRef.current || seq !== seqRef.current) return;
+          if (rangeOut && rangeOut.correlationToken && rangeOut.correlationToken !== token) return;
+          let out = rangeOut;
+          if (assignIntent) {
+            // Frozen contract §5: combine two same-revision packets —
+            // group ops never touch numbers.
+            const assignOut = await previewChannelArrangement({
+              expectedRevision: lib.revision,
+              correlationToken: token,
+              intent: assignIntent,
+              overlays,
+            });
+            if (!aliveRef.current || seq !== seqRef.current) return;
+            if (assignOut && assignOut.correlationToken && assignOut.correlationToken !== token) return;
+            out = combineArrangementResponses(assignOut, rangeOut);
+          }
+          setResp(out);
+        } catch (e) {
+          if (!aliveRef.current || seq !== seqRef.current) return;
+          setResp(null);
+          setLoadError(String((e && e.message) || e));
+        } finally {
+          if (aliveRef.current && seq === seqRef.current) setBusy(false);
+        }
+      }, 350);
+      return () => clearTimeout(handle);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [intentKey, assignKey, reviewStaged]);
+
+    // ---- review rows (merged number+group per ref) ----
+    const reviewRows = useMemo(() => {
+      const src = resp || {};
+      const map = new Map();
+      const rowFor = (ref) => {
+        let row = map.get(ref);
+        if (!row) {
+          const c = byId.get(ref);
+          const t = tempById.get(ref);
+          row = {
+            key: ref, ref,
+            name: c ? c.name : (t ? t.name : ref),
+            glyph: c ? c.glyph : (t ? t.glyph : null),
+            color: c ? c.color : (t ? t.color : null),
+            isTemp: !!t && !c,
+            number: null, group: null, reasons: [], displaced: false,
+            hasDraft: !!(drafts && !String(ref).startsWith("temp-") && drafts.get(ref)),
+          };
+          map.set(ref, row);
+        }
+        return row;
+      };
+      for (const nc of src.numberChanges || []) {
+        const ref = nc.channelId || nc.tempRef;
+        if (!ref) continue;
+        const row = rowFor(ref);
+        row.number = [nc.from, nc.to];
+        row.reasons.push(nc.reason);
+        if (!nc.selected) row.displaced = true;
+      }
+      for (const gc of src.groupChanges || []) {
+        const ref = gc.channelId || gc.tempRef;
+        if (!ref) continue;
+        const row = rowFor(ref);
+        row.group = [gc.from, gc.to];
+      }
+      for (const cr of src.created || []) {
+        const row = rowFor(cr.tempRef);
+        row.number = [null, cr.number];
+        row.reasons.push("direct");
+        row.isTemp = true;
+      }
+      let rows = [...map.values()];
+      const q = reviewFilter.trim().toLowerCase();
+      if (q) {
+        rows = rows.filter((r) => r.name.toLowerCase().includes(q)
+          || (r.number && (String(r.number[0]).includes(q) || String(r.number[1]).includes(q))));
+      }
+      return rows;
+    }, [resp, byId, tempById, drafts, reviewFilter]);
+
+    const groupName = (gid) => {
+      const g = (groups || []).find((x) => x.id === gid);
+      return g ? g.name : (gid || "—");
+    };
+
+    const respErrors = (resp && resp.errors) || [];
+    const warnings = (resp && resp.warnings) || [];
+    const noop = !!(resp && resp.valid && resp.noop);
+    const capacity = resp && resp.capacity;
+    const capacityLine = (() => {
+      if (!capacity || action !== "arrange_range" || !capacity.range) return null;
+      const r = capacity.range;
+      const parts = [
+        "Range " + r.start + "–" + r.end + " holds " + r.totalSlots + " slots",
+        "selection needs " + (capacity.neededSlots != null ? capacity.neededSlots : scopeRefs.length),
+      ];
+      if (strategy === "exclusive") {
+        parts.push(r.outsiderSlots + " outsider" + (r.outsiderSlots === 1 ? "" : "s") + " must move");
+        if (capacity.outside) {
+          parts.push(capacity.outside.freeSlots + " free numbers in "
+            + capacity.outside.start + "–" + capacity.outside.end + " outside the range");
+        }
+      } else {
+        parts.push(r.outsiderSlots + " outsider" + (r.outsiderSlots === 1 ? "" : "s") + " keep their numbers");
+      }
+      if (capacity.shortfall) parts.push("SHORT BY " + capacity.shortfall);
+      return parts.join(" · ");
+    })();
+    const stageable = !!(resp && resp.valid && !resp.noop && !busy && !(capacity && capacity.shortfall));
+
+    const stage = () => {
+      if (!stageable) return;
+      const optInPuts = {};
+      for (const id of optIns) {
+        const entry = drafts && drafts.get(id);
+        if (entry && entry.draft) optInPuts[id] = toWireChannel(clone(entry.draft));
+      }
+      const packet = freezeArrangementPacket(resp, { drafts, optInPuts });
+      const actionLabel = {
+        assign_group: "Assign " + scopeRefs.length + " channels to a group",
+        arrange_range: "Arrange " + scopeRefs.length + " channels into "
+          + Math.min(rangeStart, rangeEnd) + "–" + Math.max(rangeStart, rangeEnd),
+        move_block: "Move a block of " + scopeRefs.length + " channels to " + blockStart,
+        shift_interval: "Shift " + Math.min(scopeStart, scopeEnd) + "–" + Math.max(scopeStart, scopeEnd)
+          + " by " + (offset > 0 ? "+" : "") + offset,
+      }[action] || "Arrangement";
+      onStage({
+        baseRevision: resp.revision,
+        correlationToken: tokenRef.current,
+        label: actionLabel,
+        intent: Object.assign({}, intent, {
+          scopeType, action,
+          range: intent.range || null, start: intent.start != null ? intent.start : null,
+          offset: intent.offset != null ? intent.offset : null,
+        }),
+        response: resp,
+        packet,
+        beforeAfter: beforeAfterFromResponse(resp),
+        tempRefs: tempRefsFromResponse(resp),
+        optIns: [...optIns],
+        stagedAt: Date.now(),
+      });
+    };
+
+    const numInput = (id, label, value, set, min, max, ariaLabel) => h("div", { className: "jw-field" },
+      h("label", { className: "jw-field-label", htmlFor: id }, label),
+      h("input", {
+        id, className: "jw-input jw-num-wide", type: "number",
+        min: min != null ? min : undefined, max: max != null ? max : undefined,
+        "aria-label": ariaLabel || label,
+        value: value != null ? value : "",
+        onChange: (e) => set(e.target.value === "" ? null : parseInt(e.target.value, 10)),
+      }));
+
+    const sectionHead = (n, label) => h("h3", { className: "jw-orgsec-head" },
+      h("span", { className: "jw-orgsec-num" }, n), label);
+
+    const bandMixedError = respErrors.find((e) => e && e.code === "band_mixed");
+
+    return h(Dialog, {
+      title: reviewStaged ? "Review staged arrangement" : "Organize channels",
+      onClose, wide: true, dialogClass: "jw-sheet-organize",
+      footer: reviewStaged
+        ? [h("button", { key: "c", className: "jw-btn jw-btn-primary", onClick: onClose }, "Close review")]
+        : [
+            h("button", { key: "c", className: "jw-btn", onClick: onClose }, "Close — keep staging"),
+            h("button", {
+              key: "s", className: "jw-btn jw-btn-primary", disabled: !stageable,
+              title: stageable
+                ? "Stage this plan locally — nothing is written until Apply arrangement"
+                : "The plan must be valid and change something first",
+              onClick: stage,
+            }, busy ? "Planning…" : "Stage arrangement"),
+          ],
+    },
+      reviewStaged ? null : [
+        // ---- 1. Channels ----
+        h("section", { key: "s1", className: "jw-orgsec", "aria-label": "Channels" },
+          sectionHead("1", "Channels"),
+          h("div", { className: "jw-chip-row", role: "radiogroup", "aria-label": "Scope" },
+            [
+              ["selection", "Current selection" + (selectionIds && selectionIds.size ? " (" + selectionIds.size + ")" : "")],
+              ["group", "An entire group"],
+              ["interval", "A number interval"],
+              ["filter", "The current filter"],
+            ].map(([key, label]) => h("button", {
+              key,
+              className: "jw-chip" + (scopeType === key ? " jw-chip-active" : ""),
+              "aria-pressed": scopeType === key ? "true" : "false",
+              disabled: (key === "selection" && !(selectionIds && selectionIds.size))
+                || (key === "filter" && !(filteredIds && filteredIds.length))
+                || (action === "shift_interval" && key !== "interval"),
+              onClick: () => setScopeType(key),
+            }, label))),
+          scopeType === "group" ? h("div", { className: "jw-field" },
+            h("label", { className: "jw-field-label", htmlFor: "jw-org-group" }, "Group"),
+            h("select", {
+              id: "jw-org-group", className: "jw-input", value: scopeGroupId,
+              onChange: (e) => setScopeGroupId(e.target.value),
+            }, (groups || []).map((g) => h("option", { key: g.id, value: g.id }, g.name))),
+          ) : null,
+          (scopeType === "interval" || action === "shift_interval") ? h("div", { className: "jw-fieldrow" },
+            numInput("jw-org-scstart", "From number", scopeStart, setScopeStart, 1, 899),
+            numInput("jw-org-scend", "To number", scopeEnd, setScopeEnd, 1, 899),
+          ) : null,
+          h("p", { className: "jw-scope-line" },
+            action === "shift_interval"
+              ? (Number.isInteger(scopeStart) && Number.isInteger(scopeEnd)
+                  ? "Every channel currently in " + Math.min(scopeStart, scopeEnd) + "–" + Math.max(scopeStart, scopeEnd)
+                    + " moves — the preview resolves the exact ids before you stage."
+                  : "Pick the interval to shift.")
+              : scopeRefs.length + " channel" + (scopeRefs.length === 1 ? "" : "s") + " in scope"
+                + (scopeTempRefs.length ? " (" + scopeTempRefs.length + " not yet on the server — placed as drafts)" : "")
+                + (hiddenInScope ? " — includes " + hiddenInScope + " hidden by the current filter" : "")),
+          mixedScope && action !== "assign_group"
+            ? h("p", { className: "jw-note-warn" },
+                "The scope mixes My Channels (1–99) and networks (100–899) — a number arrangement needs one band. "
+                + "Split the selection (via Select channels) and arrange each band separately — nothing is omitted silently.")
+            : null,
+        ),
+        // ---- 2. Action ----
+        h("section", { key: "s2", className: "jw-orgsec", "aria-label": "Action" },
+          sectionHead("2", "Action"),
+          h("div", { className: "jw-chip-row", role: "radiogroup", "aria-label": "Action" },
+            ORG_ACTIONS.map((a) => h("button", {
+              key: a.key,
+              className: "jw-chip" + (action === a.key ? " jw-chip-active" : ""),
+              "aria-pressed": action === a.key ? "true" : "false",
+              onClick: () => setAction(a.key),
+            }, a.label))),
+        ),
+        // ---- 3. Destination and order ----
+        h("section", { key: "s3", className: "jw-orgsec", "aria-label": "Destination and order" },
+          sectionHead("3", "Destination and order"),
+          action === "assign_group" ? h("div", null,
+            h("div", { className: "jw-field" },
+              h("label", { className: "jw-field-label", htmlFor: "jw-org-dest" }, "Move to existing group"),
+              h("select", {
+                id: "jw-org-dest", className: "jw-input", value: destGroupId,
+                disabled: !!newGroupName.trim(),
+                onChange: (e) => setDestGroupId(e.target.value),
+              }, (groups || []).map((g) => h("option", { key: g.id, value: g.id }, g.name))),
+            ),
+            h("div", { className: "jw-field" },
+              h("label", { className: "jw-field-label", htmlFor: "jw-org-newgroup" }, "…or create a new group and move there"),
+              h("input", {
+                id: "jw-org-newgroup", className: "jw-input", placeholder: "New group name",
+                value: newGroupName, onChange: (e) => setNewGroupName(e.target.value),
+              }),
+            ),
+          ) : null,
+          action === "arrange_range" ? h("div", { className: "jw-fieldrow" },
+            numInput("jw-org-rstart", "Range start", rangeStart, setRangeStart, 1, 899),
+            numInput("jw-org-rend", "Range end", rangeEnd, setRangeEnd, 1, 899),
+          ) : null,
+          action === "arrange_range" ? h("div", { className: "jw-field" },
+            h("label", { className: "jw-check-line" },
+              h("input", {
+                type: "checkbox", checked: alsoAssign,
+                onChange: (e) => setAlsoAssign(e.target.checked),
+              }),
+              " Also assign the selection to a group (same reviewed packet)"),
+            alsoAssign ? h("div", { className: "jw-fieldrow", style: { marginTop: "6px" } },
+              h("div", { className: "jw-field" },
+                h("label", { className: "jw-field-label", htmlFor: "jw-org-dest2" }, "Group"),
+                h("select", {
+                  id: "jw-org-dest2", className: "jw-input", value: destGroupId,
+                  disabled: !!newGroupName.trim(),
+                  onChange: (e) => setDestGroupId(e.target.value),
+                }, (groups || []).map((g) => h("option", { key: g.id, value: g.id }, g.name))),
+              ),
+              h("div", { className: "jw-field" },
+                h("label", { className: "jw-field-label", htmlFor: "jw-org-newgroup2" }, "…or new group name"),
+                h("input", {
+                  id: "jw-org-newgroup2", className: "jw-input", placeholder: "New group name",
+                  value: newGroupName, onChange: (e) => setNewGroupName(e.target.value),
+                }),
+              ),
+            ) : null,
+          ) : null,
+          action === "move_block"
+            ? numInput("jw-org-bstart", "Starting number", blockStart, setBlockStart, 1, 899)
+            : null,
+          action === "shift_interval"
+            ? numInput("jw-org-offset", "Offset (e.g. 10 or -25)", offset, setOffset, -898, 898)
+            : null,
+          action !== "shift_interval" && action !== "assign_group" ? h("div", { className: "jw-field" },
+            h("span", { className: "jw-field-label" }, "Order"),
+            h("div", { className: "jw-chip-row", role: "radiogroup", "aria-label": "Order" },
+              h("button", {
+                className: "jw-chip" + (order === "number" ? " jw-chip-active" : ""),
+                "aria-pressed": order === "number" ? "true" : "false",
+                onClick: () => setOrder("number"),
+              }, "Keep current number order"),
+              h("button", {
+                className: "jw-chip" + (order === "alpha" ? " jw-chip-active" : ""),
+                "aria-pressed": order === "alpha" ? "true" : "false",
+                onClick: () => setOrder("alpha"),
+              }, "Alphabetical (A–Z, ties by channel id)")),
+          ) : null,
+        ),
+        // ---- 4. Conflicts ----
+        h("section", { key: "s4", className: "jw-orgsec", "aria-label": "Conflicts" },
+          sectionHead("4", "Conflicts"),
+          action === "arrange_range" ? h("div", null,
+            h("div", { className: "jw-chip-row", role: "radiogroup", "aria-label": "Outsider strategy" },
+              h("button", {
+                className: "jw-chip" + (strategy === "useAvailable" ? " jw-chip-active" : ""),
+                "aria-pressed": strategy === "useAvailable" ? "true" : "false",
+                onClick: () => setStrategy("useAvailable"),
+              }, "Use available numbers"),
+              h("button", {
+                className: "jw-chip" + (strategy === "exclusive" ? " jw-chip-active" : ""),
+                "aria-pressed": strategy === "exclusive" ? "true" : "false",
+                onClick: () => setStrategy("exclusive"),
+              }, "Make this range exclusive (one time)")),
+            strategy === "useAvailable"
+              ? h("p", { className: "jw-hint" },
+                  "Channels already inside the range that are not in scope keep their numbers; the selection packs around them.")
+              : h("div", null,
+                  h("p", { className: "jw-hint" },
+                    "Every other channel in the range moves to a free number in the interval you choose. "
+                    + "This is a one-time arrangement, not a permanent reservation."),
+                  h("div", { className: "jw-fieldrow" },
+                    numInput("jw-org-ostart", "Relocate outsiders to: from", outStart, setOutStart, 1, 899),
+                    numInput("jw-org-oend", "to", outEnd, setOutEnd, 1, 899),
+                  ),
+                ),
+            capacityLine ? h("p", {
+              className: "jw-scope-line" + (capacity && capacity.shortfall ? " jw-error-text" : ""),
+              role: capacity && capacity.shortfall ? "alert" : undefined,
+            }, capacityLine) : null,
+          ) : h("p", { className: "jw-hint" },
+            action === "shift_interval"
+              ? "Shift never moves unselected blockers — collisions come back as typed errors you resolve one by one (for example with Move / insert…)."
+              : "Displaced channels keep their relative order and push through free numbers; every one of them is listed in the Review below."),
+        ),
+      ],
+      // ---- 5. Review ----
+      h("section", { className: "jw-orgsec", "aria-label": "Review" },
+        reviewStaged ? null : sectionHead("5", "Review"),
+        reviewStaged && reviewStaged.label ? h("p", { className: "jw-scope-line" }, reviewStaged.label) : null,
+        bandMixedError
+          ? h("div", { className: "jw-review-errors", role: "alert" },
+              h("div", { className: "jw-error-text" }, bandMixedError.message),
+              onSplitSelection ? h("div", { className: "jw-chip-row" },
+                h("button", {
+                  className: "jw-btn jw-btn-small",
+                  onClick: () => onSplitSelection("net"),
+                }, "Use the network channels only"),
+                h("button", {
+                  className: "jw-btn jw-btn-small",
+                  onClick: () => onSplitSelection("ch"),
+                }, "Use the My Channels rows only")) : null)
+          : null,
+        !bandMixedError && respErrors.length
+          ? h("div", { className: "jw-review-errors", role: "alert" },
+              respErrors.map((e, i) => h("div", { key: i, className: "jw-error-text" },
+                (e.path ? e.path + ": " : "") + (e.message || String(e.code || e)))))
+          : null,
+        warnings.length
+          ? h("div", { className: "jw-note-warn" },
+              warnings.map((w, i) => h("div", { key: i }, w.message || String(w.code || w))))
+          : null,
+        noop ? h("p", { className: "jw-hint" }, "Nothing would change with these settings.") : null,
+        !resp && busy ? h("p", { className: "jw-hint" }, "Planning…") : null,
+        !resp && !busy && !loadError && !intent && !reviewStaged
+          ? h("p", { className: "jw-hint" }, "Complete the sections above to preview the plan.")
+          : null,
+        loadError ? h("p", { className: "jw-error-text", role: "alert" }, loadError) : null,
+        resp && reviewRows.length
+          ? h("div", null,
+              h("div", { className: "jw-review-tools" },
+                h("input", {
+                  type: "search", className: "jw-input jw-chip-filter",
+                  placeholder: "Filter review rows…", "aria-label": "Filter review rows",
+                  value: reviewFilter, onChange: (e) => setReviewFilter(e.target.value),
+                }),
+                h("span", { className: "jw-hint" },
+                  reviewRows.length + " affected row" + (reviewRows.length === 1 ? "" : "s")
+                  + (reviewRows.some((r) => r.displaced)
+                      ? " · " + reviewRows.filter((r) => r.displaced).length + " displaced bystander"
+                        + (reviewRows.filter((r) => r.displaced).length === 1 ? "" : "s")
+                      : "")),
+              ),
+              // ONE horizontal scroller for head + rows: on narrow screens
+              // the table scrolls as a block (head never misaligns).
+              h("div", { className: "jw-review-xscroll" },
+              h("div", { className: "jw-review-head" },
+                h("span", { className: "jw-review-h-channel" }, "Channel"),
+                h("span", { className: "jw-review-h-move" }, "Number"),
+                h("span", { className: "jw-review-h-group" }, "Group"),
+                h("span", { className: "jw-review-h-reason" }, "Reason"),
+              ),
+              h(WindowedList, {
+                items: reviewRows, itemHeight: 36, ariaLabel: "Arrangement review",
+                className: "jw-review-list", resetKey: intentKey,
+                render: (r) => h("div", {
+                  key: r.key,
+                  className: "jw-review-row" + (r.displaced ? " jw-review-row-displaced" : ""),
+                  role: "option", "aria-selected": r.displaced ? "false" : "true",
+                },
+                  h(GlyphTile, { codepoint: r.glyph, color: r.color, size: 24, fallback: r.number ? r.number[1] : "—" }),
+                  h("span", { className: "jw-review-name" },
+                    r.name,
+                    r.isTemp ? h(StatusChip, { kind: "accent" }, "new") : null,
+                    r.hasDraft && !reviewStaged ? h("button", {
+                      className: "jw-link jw-review-optin",
+                      title: "This channel also has unsaved edits — include them in this Apply (its number is reconciled to the plan)",
+                      "aria-pressed": optIns.has(r.ref) ? "true" : "false",
+                      onClick: (e) => {
+                        e.stopPropagation();
+                        setOptIns((cur) => {
+                          const next = new Set(cur);
+                          if (next.has(r.ref)) next.delete(r.ref); else next.add(r.ref);
+                          return next;
+                        });
+                      },
+                    }, optIns.has(r.ref) ? "draft included ✓" : "include draft…") : null,
+                  ),
+                  h("span", { className: "jw-review-move" },
+                    r.number
+                      ? (r.number[0] != null ? String(r.number[0]) : "—") + " → " + (r.number[1] != null ? String(r.number[1]) : "—")
+                      : "·"),
+                  h("span", { className: "jw-review-group" },
+                    r.group ? groupName(r.group[0]) + " → " + groupName(r.group[1]) : "·"),
+                  h("span", { className: "jw-review-reason" },
+                    (r.displaced ? "displaced — " : "selected — ") + r.reasons.map(reasonText).join("; ")),
+                ),
+              }),
+              )
+            )
+          : null,
+      ),
+    );
+  }
+
+  // ------------------------------------------------------------------
+  // Arrangement bar: the scoped sticky bar for a staged arrangement.
+  // Scope stays explicit next to the editor's own Apply channel bar.
+  // ------------------------------------------------------------------
+
+  function ArrangementBar({ staged, pending, libRevision, busy, onApply, onReview, onDiscard, onUndo, onRedo, canUndo, canRedo, onReplan }) {
+    if (!staged) return null;
+    const ba = staged.beforeAfter || {};
+    const refs = Object.keys(ba);
+    const renumbered = refs.filter((r) => ba[r] && ba[r].number).length;
+    const displacedSet = new Set((((staged.response || {}).displaced) || [])
+      .map((nc) => nc.channelId || nc.tempRef));
+    if (!displacedSet.size) {
+      for (const nc of ((staged.response || {}).numberChanges) || []) {
+        if (nc.selected === false) displacedSet.add(nc.channelId || nc.tempRef);
+      }
+    }
+    const placed = Object.keys(staged.tempRefs || {}).length;
+    const staleBase = libRevision != null && staged.baseRevision != null && libRevision !== staged.baseRevision;
+    const parts = [];
+    if (renumbered) parts.push(renumbered + " channel" + (renumbered === 1 ? "" : "s") + " renumbered");
+    if (displacedSet.size) parts.push(displacedSet.size + " other channel" + (displacedSet.size === 1 ? "" : "s") + " relocated");
+    if (placed) parts.push(placed + " new channel" + (placed === 1 ? "" : "s") + " placed");
+    if (!parts.length) parts.push(staged.label || "Arrangement staged");
+    return h("div", { className: "jw-arrange-bar", role: "region", "aria-label": "Staged arrangement" },
+      h("span", { className: "jw-arrange-label" },
+        h("strong", null, parts.join(" · ")),
+        staged.label ? h("span", { className: "jw-arrange-sublabel" }, staged.label) : null),
+      staleBase
+        ? h("span", { className: "jw-note-warn jw-arrange-stale", role: "status" },
+            "Based on r" + staged.baseRevision + " — the library is now r" + libRevision + ".")
+        : null,
+      h("span", { style: { flex: 1 } }),
+      canUndo ? h("button", { className: "jw-btn jw-btn-ghost jw-btn-small", onClick: onUndo, title: "Undo (Ctrl+Z)" }, "Undo") : null,
+      canRedo ? h("button", { className: "jw-btn jw-btn-ghost jw-btn-small", onClick: onRedo, title: "Redo (Ctrl+Shift+Z)" }, "Redo") : null,
+      h("button", { className: "jw-btn jw-btn-small", onClick: onReview }, "Review…"),
+      h("button", {
+        className: "jw-btn jw-btn-ghost jw-btn-small", disabled: busy,
+        onClick: onDiscard,
+      }, "Discard"),
+      staleBase
+        ? h("button", { className: "jw-btn jw-btn-primary", onClick: onReplan }, "Reload and replan")
+        : h("button", {
+            className: "jw-btn jw-btn-primary", disabled: busy || !!pending,
+            onClick: onApply,
+          }, (pending || busy) ? "Applying…" : "Apply arrangement"),
     );
   }
 
@@ -1793,10 +3267,13 @@
   // ------------------------------------------------------------------
 
   function EditorPane({
-    channelId, lib, getRevision, drafts, confirm, toast,
+    channelId, lib, getRevision, drafts, confirm, toast, arrangement,
     submitOps, onApplied, onCreated, libraryVersion,
   }) {
     const isTemp = String(channelId).startsWith("temp-");
+    // arrangement = { available, staged, openResolution(subject) } — the
+    // number-resolution sheet entry point; null-guarded for old backends.
+    const arrange = arrangement || { available: false, staged: null, openResolution: null };
 
     const [stored, setStored] = useState(null);   // server definition (channel record)
     const [summary, setSummary] = useState([]);   // server plain-language lines
@@ -1817,7 +3294,6 @@
     const [menuOpen, setMenuOpen] = useState(false);
     const [glyphOpen, setGlyphOpen] = useState(false);
     const [picker, setPicker] = useState(null);   // {kind, title, facets...}
-    const [swapOpen, setSwapOpen] = useState(false);
     const [historyOpen, setHistoryOpen] = useState(false);
     const [loadError, setLoadError] = useState(null);
     const [nameTick, setNameTick] = useState(0);  // re-render chips after name resolution
@@ -2231,6 +3707,13 @@
       if (!name) errors.push({ field: "name", message: "Name can't be empty." });
       else if (name.length > MAX_NAME_LEN) errors.push({ field: "name", message: "Name must be " + MAX_NAME_LEN + " characters or fewer." });
       if (!d.groupId) errors.push({ field: "group", message: "Pick a group." });
+      else if (!(lib.groups || []).some((g) => g.id === d.groupId)) {
+        // Inline "Create group…" sentinel: the group is created in the same
+        // Apply packet — it needs a name.
+        if (!String(d.pendingGroupName || "").trim()) {
+          errors.push({ field: "group", message: "Name the new group." });
+        }
+      }
       const band = BANDS[d.kind || "net"];
       const num = d.number;
       if (!Number.isInteger(num) || num < band[0] || num > band[1]) {
@@ -2238,7 +3721,23 @@
       } else {
         const occupant = (lib.channels || []).find((c) => c.number === num && c.id !== channelId);
         if (occupant) {
-          errors.push({ field: "number", message: "Channel " + num + " is taken by “" + occupant.name + "”. Use Swap." });
+          // A staged arrangement that lands this channel on its intended
+          // number resolves the conflict — the arrangement Apply commits it.
+          let resolvedByStaging = false;
+          if (arrange.staged) {
+            const stagedBa = arrange.staged.beforeAfter ? arrange.staged.beforeAfter[channelId] : null;
+            resolvedByStaging = !!(stagedBa && Array.isArray(stagedBa.number) && stagedBa.number[1] === num);
+            if (!resolvedByStaging && arrange.staged.tempRefs && arrange.staged.tempRefs[channelId]) {
+              resolvedByStaging = arrange.staged.tempRefs[channelId].number === num;
+            }
+          }
+          if (!resolvedByStaging) {
+            errors.push({
+              field: "number",
+              message: "Channel " + num + " is taken by “" + occupant.name + "”."
+                + (arrange.available ? " Use Resolve conflict…" : " Pick a free number."),
+            });
+          }
         }
       }
       if (isRuleSource(d.source)) {
@@ -2284,20 +3783,35 @@
     }
 
     // ---- the Apply state machine ----
-    // NOTE: swap is NOT part of a draft transaction. This server build cannot
-    // statically validate channel.put onto a taken number (its swap-pair
-    // exemption crashes: library.py _check_channel_draft references an out-of-
-    // scope `swap_pairs`), so swapping numbers is its OWN immediate Apply —
-    // exactly the prototype's behavior. The draft never carries a taken number.
+    // Number conflicts are resolved through staged ARRANGEMENTS (the
+    // number-resolution sheet / Organize sheet), never through an immediate
+    // swap — the intended number stays in the draft while resolving.
     function buildOps(snapshot) {
+      const ops = [];
+      // A group created inline ("Create group…" sentinel) rides the SAME
+      // Apply packet ahead of the channel op — create+assign is atomic.
+      // (pendingGroupName is client plumbing, stripped from the wire
+      // channel by toWireChannel — read it from the draft itself.)
+      const liveDraft = draftRef.current;
+      if (liveDraft && liveDraft.pendingGroupName != null) {
+        const gid = liveDraft.groupId;
+        const name = String(liveDraft.pendingGroupName || "").trim();
+        if (gid && name && !(lib.groups || []).some((g) => g.id === gid)) {
+          const maxPos = Math.max(0, ...(lib.groups || []).map((g) => g.position || 0));
+          ops.push({ op: "group.put", group: { id: gid, name, position: maxPos + 1 } });
+        }
+      }
       if (isTemp) {
         const channel = clone(snapshot);
         delete channel.id;
         delete channel.seed;
         delete channel.provenance;
-        return [{ op: "channel.create", tempId: channelId, channel }];
+        ops.push({ op: "channel.create", tempId: channelId, channel });
+        return ops;
       }
-      return [{ op: "channel.put", channel: clone(snapshot) }];
+      const channel = clone(snapshot);
+      ops.push({ op: "channel.put", channel });
+      return ops;
     }
 
     async function doApply(expectedOverride) {
@@ -2537,40 +4051,18 @@
       copy.enabled = true;
       const tempId = newTempId();
       drafts.put(tempId, copy);
-      onCreated(tempId);
-      toast("Copy staged as a draft — Apply in the editor to commit it.", "");
-    };
-
-    // Swap numbers with another channel: one immediate Apply (a swap rides
-    // alone — the draft stays out of it and must be clean beforehand).
-    const doSwap = async (other) => {
-      setSwapOpen(false);
-      const d = draftRef.current;
-      if (!d || !d.number || d.number === other.number) return;
-      if (inFlightRef.current) { toast("An apply is in flight — wait for its receipt.", "err"); return; }
-      if (isDirty()) { toast("Apply or discard your draft first — a number swap is its own Apply.", "err"); return; }
-      const ok = await confirm({
-        title: "Swap numbers " + d.number + " ↔ " + other.number + "?",
-        message: "“" + (d.name || "This channel") + "” and “" + other.name + "” exchange numbers. "
-          + "This commits immediately as its own Apply — separate from any staged draft.",
-        confirmLabel: "Swap numbers",
+      // The lowest free number on the SERVER can still collide with another
+      // pending draft (the draft store is not part of lib.channels) — route
+      // that collision through the same NumberResolutionSheet as create
+      // (plan §3.2 lists duplicate as a sheet consumer).
+      const draftClash = drafts.ids().some((id) => {
+        if (id === tempId || id === channelId) return false;
+        const entry = drafts.get(id);
+        return !!(entry && entry.draft && entry.draft.number === number
+          && (entry.draft.kind || "net") === band);
       });
-      if (!ok) return;
-      const receipt = await submitOps(
-        [{ op: "channel.swap", a: channelId, b: other.id }],
-        { label: "Numbers swapped" },
-      );
-      if (receipt.status === "committed") {
-        try {
-          const def = await runOp("GetChannelDefinition", { channelId });
-          if (!aliveRef.current) return;
-          setStored(def.channel);
-          setSummary(def.summary || []);
-          const fresh = clone(def.channel);
-          draftRef.current = fresh;
-          setDraft(fresh);
-        } catch (e) { /* keep local state */ }
-      }
+      onCreated(tempId, draftClash ? { resolveNumber: number } : null);
+      toast("Copy staged as a draft — Apply in the editor to commit it.", "");
     };
 
     if (loadError) {
@@ -2627,10 +4119,27 @@
           occupant && !numberErr
             ? h("div", { className: "jw-hint" },
                 draft.number + " is “" + occupant.name + "”. ",
-                h("button", { className: "jw-link", onClick: () => void doSwap(occupant) }, "Swap numbers"))
+                arrange.available
+                  ? h("button", {
+                      className: "jw-link",
+                      onClick: () => arrange.openResolution({ ref: channelId, kind: draft.kind || "net", isNew: isTemp }, draft.number),
+                    }, "Resolve conflict…")
+                  : "Pick a free number in " + band[0] + "–" + band[1] + ".")
             : null,
-          h("div", { className: "jw-hint" },
-            h("button", { className: "jw-link", onClick: () => setSwapOpen(true) }, "Swap with a nearby channel…")),
+          arrange.available
+            ? h("div", { className: "jw-hint" },
+                h("button", {
+                  className: "jw-link",
+                  onClick: () => arrange.openResolution(
+                    { ref: channelId, kind: draft.kind || "net", isNew: isTemp },
+                    Number.isInteger(draft.number) ? draft.number : band[0]),
+                }, "Move / insert…"))
+            : null,
+          arrange.staged && arrange.staged.beforeAfter && arrange.staged.beforeAfter[channelId]
+            && arrange.staged.beforeAfter[channelId].number
+            ? h("div", { className: "jw-hint" },
+                "Number resolves through the staged arrangement — Apply arrangement commits it.")
+            : null,
         ),
       ),
       h("div", { className: "jw-field" },
@@ -2691,8 +4200,35 @@
         h("label", { className: "jw-field-label", htmlFor: "f-group" }, "Belongs to exactly one group"),
         h("select", {
           id: "f-group", className: "jw-input", value: draft.groupId || "",
-          onChange: (e) => edit((d) => { d.groupId = e.target.value; return d; }),
-        }, groups.map((g) => h("option", { key: g.id, value: g.id }, g.name))),
+          onChange: (e) => {
+            const v = e.target.value;
+            if (v === "__create__") {
+              // Inline group creation: the group rides the SAME Apply
+              // packet (buildOps prepends group.put) — never a second write.
+              const gid = newGroupId();
+              edit((d) => { d.groupId = gid; d.pendingGroupName = ""; return d; });
+            } else {
+              edit((d) => { d.groupId = v; delete d.pendingGroupName; return d; });
+            }
+          },
+        },
+          groups.map((g) => h("option", { key: g.id, value: g.id }, g.name)),
+          draft.pendingGroupName != null && !groups.some((g) => g.id === draft.groupId)
+            ? h("option", { value: draft.groupId },
+                String(draft.pendingGroupName || "").trim()
+                  ? "New group: " + String(draft.pendingGroupName).trim()
+                  : "New group (name it below)")
+            : null,
+          h("option", { value: "__create__" }, "Create group…"),
+        ),
+        draft.pendingGroupName != null && !groups.some((g) => g.id === draft.groupId)
+          ? h("input", {
+            className: "jw-input", style: { marginTop: "6px" },
+            placeholder: "New group name", "aria-label": "New group name",
+            value: draft.pendingGroupName || "",
+            onChange: (e) => edit((d) => { d.pendingGroupName = e.target.value; return d; }),
+          })
+          : null,
         fieldError("group") ? h("div", { className: "jw-error-text" }, fieldError("group")) : null,
         h("p", { className: "jw-hint" }, "Groups organize this library and the guide. Membership never changes what airs."),
       ),
@@ -3027,9 +4563,20 @@
       );
     })();
 
+    // Disclosure headers carry a one-line summary + an error badge, so a
+    // collapsed section never hides authored exclusions or error-bearing
+    // controls silently. Sections start OPEN — collapse is owner-chosen.
+    const rulesSummaryLine = (() => {
+      if (!isRuleSource(draft.source)) return null;
+      const head = summarizeLines(draft.source)[0] || "";
+      const excl = idsOf(draft.source.excludeTags).length
+        + idsOf(draft.source.excludePerformers).length
+        + idsOf(draft.source.excludeStudios).length;
+      return head.replace(/:$/, "") + (excl ? " · excludes " + excl : "");
+    })();
+    const rulesErrorCount = rErrors.length;
     const rulesCard = isRuleSource(draft.source)
-      ? h("div", { className: "jw-card" },
-          h("h3", { className: "jw-card-title" }, "What airs"),
+      ? h(Disclosure, { title: "What airs", summary: rulesSummaryLine, errorCount: rulesErrorCount },
           h("p", { className: "jw-hint" }, "Every row must hold at once. Within a row, ALL / ANY chooses how the picks combine — and the activity rule counts too."),
           ["tags", "performers", "studios"].map(facetRow),
           sceneDetailsRow,
@@ -3065,8 +4612,12 @@
       d.programming = fullProgramming(Object.assign({}, canonicalProgramming(d.programming), values));
       return d;
     });
-    const programmingCard = h("div", { className: "jw-card" },
-      h("h3", { className: "jw-card-title" }, "Programming"),
+    const progSummaryLine = (() => {
+      const sortLabel = (SORTS.find((s) => s.key === (draft.sort || "shuffle")) || {}).label || (draft.sort || "shuffle");
+      const modeLabel = { fixed: "Fixed loop", explore: "Explore", discovery: "Discovery", continuing: "Continuing" }[progMode] || progMode;
+      return modeLabel + " · " + sortLabel + (isNet ? "" : " · spacing " + canonicalProgramming(prog).spacing);
+    })();
+    const programmingCard = h(Disclosure, { title: "Programming", summary: progSummaryLine, errorCount: 0 },
       h("div", { className: "jw-fieldrow" },
         h("div", { className: "jw-field" },
           h("label", { className: "jw-field-label", htmlFor: "f-mode" }, "Mode"),
@@ -3318,6 +4869,14 @@
     // ---------- editor header + menu ----------
 
     const menuItems = [];
+    if (arrange.available) {
+      menuItems.push({
+        label: "Move / insert…",
+        action: () => arrange.openResolution(
+          { ref: channelId, kind: draft.kind || "net", isNew: isTemp },
+          Number.isInteger(draft.number) ? draft.number : BANDS[draft.kind || "net"][0]),
+      });
+    }
     menuItems.push({ label: "Duplicate…", action: duplicate });
     if (draft.paused) menuItems.push({ label: "Resume", action: () => patchChannel({ paused: false }, "Resumed") });
     else menuItems.push({ label: "Pause", action: () => patchChannel({ paused: true }, "Paused") });
@@ -3373,10 +4932,6 @@
         onClose: () => setPicker(null),
         onDone: (ids) => { picker.onDone(ids); },
       }) : null,
-      swapOpen ? h(SwapDialog, {
-        draft, lib, onClose: () => setSwapOpen(false),
-        onPick: (c) => { void doSwap(c); },
-      }) : null,
       historyOpen ? h(HistoryDialog, {
         channelId, channelName: draft.name || channelId,
         fetchPage: ({ offset: pageOffset, limit: pageLimit }) => runOp("GetChannelHistory", {
@@ -3412,30 +4967,75 @@
   }
 
   function DialRow({ ch, selected, bulkMode, checked, hasDraft, groupsById, onSelect, onCheck }) {
+    const shiftRef = useRef(false);
+    const ariaLabel = (ch.number != null ? ch.number + " · " : "") + ch.name
+      + (ch.archived ? ", archived" : ch.paused ? ", paused" : "") + (ch.staged ? ", staged number" : "");
     return h("div", {
       className: "jw-dial-row" + (selected ? " jw-dial-row-selected" : "") + (ch.paused || ch.archived ? " jw-dial-row-muted" : ""),
       style: selected ? { boxShadow: "inset 3px 0 0 " + (ch.color || "#455A64") } : null,
-      role: "option", "aria-selected": selected ? "true" : "false", tabIndex: 0,
-      onClick: () => onSelect(ch.id),
-      onKeyDown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(ch.id); } },
+      role: "option", "aria-selected": (bulkMode ? checked : selected) ? "true" : "false", tabIndex: 0,
+      "aria-label": ariaLabel,
+      onClick: (e) => (bulkMode ? onCheck(ch.id, !checked, e.shiftKey) : onSelect(ch.id)),
+      onKeyDown: (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          if (bulkMode) onCheck(ch.id, !checked, e.shiftKey);
+          else onSelect(ch.id);
+        }
+      },
     },
       bulkMode ? h("input", {
         type: "checkbox", "aria-label": "Select " + ch.name, checked,
-        onClick: (e) => e.stopPropagation(),
-        onChange: (e) => onCheck(ch.id, e.target.checked),
+        onClick: (e) => { e.stopPropagation(); shiftRef.current = e.shiftKey; },
+        onChange: (e) => onCheck(ch.id, e.target.checked, shiftRef.current),
       }) : null,
-      h("div", { className: "jw-dial-number" }, ch.number != null ? String(ch.number) : "—"),
+      h("div", {
+        className: "jw-dial-number" + (ch.staged ? " jw-dial-number-staged" : ""),
+        title: ch.staged ? "Staged — becomes this number when you Apply the arrangement" : undefined,
+      }, ch.number != null ? String(ch.number) : "—"),
       h(GlyphTile, { codepoint: ch.glyph, color: ch.color, size: 30, fallback: ch.number }),
       h("div", { className: "jw-dial-meta" },
-        h("div", { className: "jw-dial-name" }, ch.number != null ? ch.number + " · " + ch.name : ch.name),
+        // The number cell carries the number — never duplicated in the name
+        // (the full "N · Name" stays in storage and the row aria-label).
+        h("div", { className: "jw-dial-name" }, ch.name),
         h("div", { className: "jw-dial-sub" }, describeRow(ch, groupsById)),
       ),
       h("div", { className: "jw-dial-badges" },
         hasDraft ? h(StatusChip, { kind: "warn" }, "draft") : null,
+        ch.staged ? h(StatusChip, { kind: "accent" }, "staged") : null,
         ch.archived ? h(StatusChip, { kind: "dim" }, "archived") : null,
         !ch.archived && ch.paused ? h(StatusChip, { kind: "dim" }, "paused") : null,
         ch.temp ? h(StatusChip, { kind: "accent" }, "new") : null,
       ),
+    );
+  }
+
+  // Group-header contextual actions (plan §3.1): Select group /
+  // Arrange numbers… / Edit group…. 28 px inside the 44 px row — the dial
+  // geometry is untouched.
+  function GroupHeaderMenu({ group, arrangeAvailable, onAction }) {
+    const [open, setOpen] = useState(false);
+    const ref = useOutsideClose(open, () => setOpen(false));
+    const item = (label, fn) => h("button", {
+      key: label, role: "menuitem", className: "jw-menu-item",
+      onClick: (e) => { e.stopPropagation(); setOpen(false); fn(); },
+    }, label);
+    return h("span", {
+      className: "jw-menu-host jw-group-menu-host", ref,
+      onClick: (e) => e.stopPropagation(),
+      onKeyDown: (e) => e.stopPropagation(),
+    },
+      h("button", {
+        className: "jw-btn jw-btn-ghost jw-group-menu-btn",
+        "aria-haspopup": "menu", "aria-expanded": open ? "true" : "false",
+        "aria-label": "Actions for group " + group.name,
+        onClick: (e) => { e.stopPropagation(); setOpen((v) => !v); },
+      }, "⋯"),
+      open ? h("span", { className: "jw-menu jw-group-menu", role: "menu" },
+        item("Select group", () => onAction("select")),
+        arrangeAvailable ? item("Arrange numbers…", () => onAction("arrange")) : null,
+        item("Edit group…", () => onAction("edit")),
+      ) : null,
     );
   }
 
@@ -3452,9 +5052,18 @@
     const [collapsed, setCollapsed] = useState(() => new Set());
     const [bulkMode, setBulkMode] = useState(false);
     const [bulkSelected, setBulkSelected] = useState(() => new Set());
+    const [bulkAnchor, setBulkAnchor] = useState(null);
+    const [features, setFeatures] = useState(null); // Capabilities.features (null = old plugin)
+    const [numRes, setNumRes] = useState(null);     // {subject, target, onStaged}
+    const [organize, setOrganize] = useState(null); // {scope?, intent?, reviewStaged?}
+    const [orgTick, setOrgTick] = useState(0);
+    const [arrBusy, setArrBusy] = useState(false);
+    const [live, setLive] = useState(null);         // aria-live announcements
     const [dialog, setDialog] = useState(null); // "groups" | "new" | "shortcuts"
     const [moreOpen, setMoreOpen] = useState(false);
     const moreRef = useOutsideClose(moreOpen, () => setMoreOpen(false));
+    const [actionsOpen, setActionsOpen] = useState(false);
+    const actionsRef = useOutsideClose(actionsOpen, () => setActionsOpen(false));
     const [confirmSpec, setConfirmSpec] = useState(null);
     const [toasts, setToasts] = useState([]);
     const [inflights, setInflights] = useState([]); // [{channelId, name}] — background applies
@@ -3470,15 +5079,24 @@
     const selectedIdRef = useRef(null);
     const searchInputRef = useRef(null);
     const toastSeq = useRef(0);
+    const orgRef = useRef(null);          // makeOrgStore(libraryId), created at boot
+    const liveSeq = useRef(0);
 
     libRef.current = lib;
     selectedIdRef.current = selectedId;
 
-    const toast = useCallback((message, kind) => {
+    const announce = useCallback((message) => {
+      liveSeq.current += 1;
+      setLive({ n: liveSeq.current, message });
+    }, []);
+
+    const toast = useCallback((message, kind, opts) => {
       const id = ++toastSeq.current;
-      setToasts((cur) => [...cur, { id, message, kind }]);
+      setToasts((cur) => [...cur, { id, message, kind, action: opts && opts.action }]);
       setTimeout(() => setToasts((cur) => cur.filter((t) => t.id !== id)), kind === "err" ? 7000 : 4200);
     }, []);
+
+    const arrangementAvailable = !!(features && features.arrangement);
 
     const confirm = useCallback((spec) => new Promise((resolve) => {
       setConfirmSpec(Object.assign({}, spec, { resolve: (ok) => { setConfirmSpec(null); resolve(ok); } }));
@@ -3502,20 +5120,58 @@
       let alive = true;
       (async () => {
         try {
+          // Capability handshake rides the boot: features.arrangement gates
+          // the organize surface; absent/failed -> basic editing only.
+          fetchCapabilities().then((caps) => {
+            if (alive) setFeatures(caps && caps.features ? caps.features : null);
+          });
           const data = await fetchLibrary();
           if (!alive) return;
-          draftsRef.current = makeDraftStore(data.libraryId || "default");
+          const libraryId = data.libraryId || "default";
+          draftsRef.current = makeDraftStore(libraryId);
           draftsRef.current.subscribe(() => setDraftCount(draftsRef.current.count()));
           setDraftCount(draftsRef.current.count());
+          orgRef.current = makeOrgStore(libraryId);
+          orgRef.current.subscribe(() => setOrgTick((x) => x + 1));
+          setOrgTick((x) => x + 1);
           setLib(data);
           const first = (data.channels || [])[0];
           if (first) setSelectedId(first.id);
+          recoverPending(libraryId);
         } catch (e) {
           if (alive) setBootError(String((e && e.message) || e));
         }
       })();
       return () => { alive = false; };
     }, [fetchLibrary]);
+
+    // Receipt recovery after a reload (both scopes share the one pending
+    // slot, frozen contract decision 6): an in-flight Apply at reload time
+    // resolves to exactly one commit — never a duplicated resubmission.
+    const recoverPending = useCallback((libraryId) => {
+      const entry = readOpsPending(libraryId);
+      if (!entry || !entry.requestId) return;
+      void entry.expected; // the receipt carries the truth
+      pollApplyReceipt(entry.requestId).then(async (receipt) => {
+        if (!receipt || receipt.status === "unknown") return; // keep for a manual retry
+        clearOpsPending(libraryId);
+        if (receipt.status === "committed") {
+          const org = orgRef.current;
+          const staged = org ? org.get().staged : null;
+          if (entry.scope === "arrangement" && org && org.get().pending
+              && org.get().pending.requestId === entry.requestId) {
+            finishArrangementCommit(receipt, staged);
+          } else {
+            await refreshLibrary();
+            toast((entry.label || "Apply") + " — committed at r" + receipt.revision + " (recovered).", "ok");
+          }
+        } else if (receipt.error === "revision_conflict") {
+          await refreshLibrary();
+          toast("A queued Apply hit a revision conflict while away — nothing changed; review and Apply again.", "err");
+        }
+      }).catch(() => { /* offline: the pending record stays for the next visit */ });
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     // "/" focuses search; beforeunload guards drafts
     useEffect(() => {
@@ -3557,17 +5213,26 @@
     // identity is persisted through reload, an identical retry reuses it
     // (exactly one commit), and a transport failure is UNKNOWN — never
     // announced as "nothing changed".
-    const submitOps = useCallback(async (ops, opts) => {
+    // Submissions serialize per tab (frozen contract decision 6) — a second
+    // Apply waits for the first RECEIPT, so expectedRevision is never
+    // guessed. Editing during flight stays free; newer edits remain dirty.
+    const submitOps = useCallback((ops, opts) => enqueueSubmit(async () => {
       const options = opts || {};
       const libraryId = libRef.current ? (libRef.current.libraryId || "default") : "default";
-      const expected = libRef.current ? libRef.current.revision : 0;
+      const expected = options.expectedOverride != null
+        ? options.expectedOverride
+        : (libRef.current ? libRef.current.revision : 0);
       const opsDigest = JSON.stringify(ops);
       const pending = readOpsPending(libraryId);
-      const requestId = pending && pending.opsDigest === opsDigest
-        && pending.expected === expected
-        ? pending.requestId : newRequestId();
+      const requestId = options.requestIdOverride
+        || (pending && pending.opsDigest === opsDigest && pending.expected === expected
+          ? pending.requestId : newRequestId());
       if (!pending || pending.requestId !== requestId) {
-        writeOpsPending(libraryId, { requestId, expected, opsDigest, label: options.label || "" });
+        writeOpsPending(libraryId, {
+          requestId, expected, opsDigest,
+          label: options.label || "",
+          scope: options.scope || "channel",
+        });
       }
       let receipt;
       try {
@@ -3579,10 +5244,14 @@
       }
       clearOpsPending(libraryId);
       if (receipt.status === "committed") {
-        const affected = countAffected(ops);
-        toast((options.label || "Applied") + (affected ? " (" + affected + " channel" + (affected === 1 ? "" : "s") + ")" : "")
-          + " — committed at r" + receipt.revision + ".", "ok");
-        await refreshLibrary();
+        if (options.scope === "arrangement") {
+          // finishArrangementCommit announces, rebases and refreshes.
+        } else {
+          const affected = countAffected(ops);
+          toast((options.label || "Applied") + (affected ? " (" + affected + " channel" + (affected === 1 ? "" : "s") + ")" : "")
+            + " — committed at r" + receipt.revision + ".", "ok");
+          await refreshLibrary();
+        }
       } else if (receipt.error === "revision_conflict") {
         await refreshLibrary();
         toast("Revision conflict — the library moved to r" + receipt.currentRevision + ". Nothing changed; try again.", "err");
@@ -3592,7 +5261,139 @@
         toast("Rejected: " + (receipt.message || receipt.error || "unknown error"), "err");
       }
       return receipt;
-    }, [refreshLibrary, toast]);
+    }), [refreshLibrary, toast]);
+
+    // ---- arrangement Apply (scope: "arrangement") ----
+    // Joins the SAME coordinator: the frozen packet is submitted verbatim,
+    // an identical retry reuses the same requestId (exactly-once), and the
+    // durable receipt is the only success signal.
+    const finishArrangementCommit = useCallback(async (receipt, staged) => {
+      const org = orgRef.current;
+      if (org) {
+        // receipt.idMap reconciles temp creations; drop their drafts and
+        // follow the new id when the editor sits on it.
+        const idMap = receipt.idMap || {};
+        for (const op of (staged && staged.packet ? staged.packet.ops : [])) {
+          if (op.op === "channel.create" && op.tempId && idMap[op.tempId]) {
+            if (draftsRef.current) draftsRef.current.drop(op.tempId);
+            if (selectedIdRef.current === op.tempId) setSelectedId(idMap[op.tempId]);
+          }
+        }
+        // Field-level rebase for bystander content drafts (never a
+        // wholesale channel.put).
+        if (staged && staged.beforeAfter) rebaseDraftsAfterArrangement(draftsRef.current, staged.beforeAfter);
+        org.clearPending();
+        org.clearStagedOnly();
+      }
+      await refreshLibrary();
+      announce("Arrangement applied at r" + receipt.revision + ".");
+      studioEmit("applied", { scope: "arrangement", revision: receipt.revision });
+      // Post-commit Stage reversal: inverse map + FRESH validation + a NEW
+      // Apply — never a blind replay, created rows never auto-deleted.
+      const stagedSnapshot = staged;
+      toast("Arrangement applied at r" + receipt.revision + ".", "ok", {
+        action: stagedSnapshot ? {
+          label: "Stage reversal",
+          onClick: () => { void stageReversal(stagedSnapshot); },
+        } : null,
+      });
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [refreshLibrary, toast, announce]);
+
+    const stageReversal = useCallback(async (staged) => {
+      const cur = libRef.current;
+      if (!cur || !orgRef.current) return;
+      const rev = buildReversal(staged, cur.channels || []);
+      if (!rev.ops.length) {
+        toast("Nothing to reverse — every touched row has moved since (created channels and groups are kept; remove them from their editors if unwanted).", "");
+        return;
+      }
+      // Fresh validation against the CURRENT revision before staging the
+      // reversal — later edits may collide; the server decides.
+      try {
+        const check = await runOp("ValidateChannelChanges", { ops: JSON.stringify(rev.ops) });
+        if (check && check.valid === false && (check.errors || []).length) {
+          toast("The reversal no longer applies cleanly: " + check.errors[0].message, "err");
+          return;
+        }
+      } catch (e) { /* pre-check unavailable — Apply validates at commit */ }
+      const skipped = rev.skippedMoved.length
+        ? " · " + rev.skippedMoved.length + " row" + (rev.skippedMoved.length === 1 ? "" : "s") + " moved since and stay as they are"
+        : "";
+      const created = rev.createdCount
+        ? " · " + rev.createdCount + " created channel" + (rev.createdCount === 1 ? "" : "s") + " kept (never auto-deleted)"
+        : "";
+      // Synthesize review rows from the inverse map so the bar's Review
+      // shows the reversal's full before/after, like any other plan.
+      const reviewChanges = [];
+      const reviewGroups = [];
+      for (const ref of Object.keys(rev.beforeAfter)) {
+        const ba = rev.beforeAfter[ref];
+        if (ba.number) {
+          reviewChanges.push({ channelId: ref, tempRef: null, from: ba.number[0], to: ba.number[1], selected: true, reason: "relocate" });
+        }
+        if (ba.group) reviewGroups.push({ channelId: ref, tempRef: null, from: ba.group[0], to: ba.group[1] });
+      }
+      orgRef.current.stage({
+        baseRevision: cur.revision,
+        correlationToken: newCorrelationToken(),
+        label: "Reversal of: " + (staged.label || "arrangement") + skipped + created,
+        intent: { type: "reversal" },
+        response: {
+          revision: cur.revision, numberChanges: reviewChanges, groupChanges: reviewGroups,
+          created: [], displaced: [], warnings: [], errors: [], valid: true, noop: false,
+        },
+        packet: { expectedRevision: cur.revision, ops: rev.ops, requestId: newRequestId() },
+        beforeAfter: rev.beforeAfter,
+        tempRefs: {},
+        stagedAt: Date.now(),
+      });
+      announce("Reversal staged — review and Apply arrangement.");
+    }, [toast, announce]);
+
+    const submitArrangement = useCallback(async () => {
+      const org = orgRef.current;
+      const staged = org ? org.get().staged : null;
+      if (!org || !staged || !staged.packet) return;
+      const ops = clone(staged.packet.ops);
+      const expected = staged.packet.expectedRevision;
+      const opsDigest = JSON.stringify(ops);
+      // Exact frozen retry: same ops/revision/requestId, byte-identical.
+      const priorPending = org.get().pending;
+      const requestId = priorPending && priorPending.opsDigest === opsDigest && priorPending.expected === expected
+        ? priorPending.requestId
+        : (staged.packet.requestId || newRequestId());
+      setArrBusy(true);
+      try {
+        org.setPending({
+          requestId, expected, opsDigest,
+          correlationToken: staged.correlationToken,
+          beforeAfter: staged.beforeAfter,
+          submittedAt: Date.now(),
+        });
+        announce("Applying arrangement…");
+        const receipt = await submitOps(ops, {
+          label: staged.label || "Arrangement",
+          scope: "arrangement",
+          expectedOverride: expected,
+          requestIdOverride: requestId,
+        });
+        if (receipt.status === "committed") {
+          await finishArrangementCommit(receipt, org.get().staged || staged);
+        } else if (receipt.error === "revision_conflict") {
+          // Drafts retained; the bar offers Reload and replan (the base
+          // revision no longer matches — never blindly replay the old map).
+          org.clearPending();
+          toast("Revision conflict — the staged arrangement is intact. Reload and replan to re-preview against r"
+            + (receipt.currentRevision != null ? receipt.currentRevision : "the current revision") + ".", "err");
+        } else if (receipt.status !== "transport") {
+          org.clearPending();
+        }
+      } finally {
+        setArrBusy(false);
+      }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [submitOps, finishArrangementCommit, toast, announce]);
 
     function countAffected(ops) {
       let n = 0;
@@ -3618,13 +5419,80 @@
     }, [refreshLibrary, toast]);
 
     const handleCreated = useCallback((tempId, discardedId) => {
-      if (tempId) setSelectedId(tempId);
-      else if (discardedId) {
+      if (tempId) {
+        setSelectedId(tempId);
+        // Create at an occupied number: the draft keeps the intended number
+        // and the resolution sheet opens right away (never an auto-swap).
+        if (discardedId && discardedId.resolveNumber && orgRef.current) {
+          setNumRes({
+            subject: { ref: tempId, isNew: true },
+            target: discardedId.resolveNumber,
+          });
+        }
+      } else if (discardedId) {
         // temp draft discarded: select the first real channel
         const first = (libRef.current && libRef.current.channels || [])[0];
         setSelectedId(first ? first.id : null);
       }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
+
+    // ---- organization glue ----
+
+    const stageArrangement = useCallback((staged, subjectFinalNumber) => {
+      if (!orgRef.current) return;
+      orgRef.current.stage(staged);
+      studioEmit("staged", { label: staged.label, baseRevision: staged.baseRevision });
+      announce("Arrangement staged: " + (staged.label || "review and Apply when ready.") + " Nothing is written until Apply arrangement.");
+      // A number-resolution staged for a draft channel: the subject's final
+      // number lands in its draft so a later channel Apply agrees with the
+      // committed renumber map.
+      if (subjectFinalNumber != null && staged.intent && staged.intent.subject && draftsRef.current) {
+        const ref = staged.intent.subject;
+        const entry = draftsRef.current.get(ref);
+        if (entry && entry.draft && entry.draft.number !== subjectFinalNumber) {
+          draftsRef.current.put(ref, Object.assign({}, entry.draft, { number: subjectFinalNumber }));
+        }
+      }
+      setNumRes(null);
+      setOrganize(null);
+    }, [announce]);
+
+    const openResolution = useCallback((subject, target) => {
+      setNumRes({ subject, target });
+    }, []);
+
+    const discardStaged = useCallback(async () => {
+      const org = orgRef.current;
+      if (!org || !org.get().staged) return;
+      const ok = await confirm({
+        title: "Discard the staged arrangement?",
+        message: "The staged number/group changes are thrown away. Channel drafts are unaffected. (Undo can bring it back until you stage something else.)",
+        confirmLabel: "Discard", danger: true,
+      });
+      if (ok) { org.discardStaged(); announce("Staged arrangement discarded."); }
+    }, [confirm, announce]);
+
+    const replanStaged = useCallback(async () => {
+      const org = orgRef.current;
+      const staged = org ? org.get().staged : null;
+      if (!staged) return;
+      await refreshLibrary();
+      // Re-run the SAME intent against the fresh revision — the new
+      // displacement review shows before any re-Apply.
+      if (staged.intent && staged.intent.type === "reversal") {
+        toast("Reversal staged — its packet was validated against the current revision already.", "");
+        return;
+      }
+      if (staged.intent && staged.intent.type === "number-resolution") {
+        setNumRes({
+          subject: { ref: staged.intent.subject, isNew: String(staged.intent.subject).startsWith("temp-") },
+          target: staged.intent.number,
+        });
+        return;
+      }
+      setOrganize({ intent: staged.intent || null });
+    }, [refreshLibrary, toast]);
 
     const selectChannel = useCallback((id) => {
       if (id === selectedId) return;
@@ -3643,8 +5511,36 @@
       setQuery("");
       setGroupFilter("");
     }, [applyQuery]);
-    const groupsSorted = lib ? (lib.groups || []).slice().sort((a, b) => a.position - b.position) : [];
-    const groupsById = useMemo(() => new Map(groupsSorted.map((g) => [g.id, g])), [lib]);
+    // Groups staged inline ("Create group…" sentinel in a draft) show on the
+    // dial before they exist server-side — the Apply packet creates them.
+    const pendingGroups = useMemo(() => {
+      if (!draftsRef.current) return [];
+      const seen = new Set();
+      const out = [];
+      for (const id of draftsRef.current.ids()) {
+        const entry = draftsRef.current.get(id);
+        const d = entry && entry.draft;
+        if (d && d.pendingGroupName != null && d.groupId && !seen.has(d.groupId)) {
+          seen.add(d.groupId);
+          out.push({ id: d.groupId, name: String(d.pendingGroupName || "").trim() || "(new group)", position: 9000, staged: true });
+        }
+      }
+      return out;
+      // recompute on draft count changes
+    }, [draftCount, lib]);
+
+    const groupsSorted = useMemo(() => {
+      const base = lib ? (lib.groups || []).slice().sort((a, b) => a.position - b.position) : [];
+      return base.concat(pendingGroups);
+    }, [lib, pendingGroups]);
+    const groupsById = useMemo(() => new Map(groupsSorted.map((g) => [g.id, g])), [groupsSorted]);
+
+    // The staged arrangement overlays number/group on the dial preview —
+    // selection and reveal track ID, never number (a renumber never loses
+    // the selected row), and the WindowedList resetKey does NOT change.
+    const orgState = orgRef.current ? orgRef.current.get() : { staged: null, pending: null, undo: [], redo: [] };
+    void orgTick; // re-renders on org store changes
+    const orgOverlay = useMemo(() => orgOverlayOf(orgState.staged), [orgState.staged]);
 
     const visibleChannels = useMemo(() => {
       if (!lib) return [];
@@ -3676,7 +5572,7 @@
       // recompute on draft count changes
     }, [draftCount, lib]);
 
-    const allRows = useMemo(() => {
+    const allRowsBase = useMemo(() => {
       const seen = new Set();
       const rows = [];
       for (const c of visibleChannels) { rows.push(c); seen.add(c.id); }
@@ -3689,11 +5585,161 @@
       return rows;
     }, [visibleChannels, tempChannels, groupFilter, query]);
 
+    const allRows = useMemo(() => {
+      if (!orgOverlay) return allRowsBase;
+      const rows = allRowsBase.map((c) => {
+        const num = orgOverlay.numbers.get(c.id);
+        const grp = orgOverlay.groups.get(c.id);
+        if (num == null && grp == null) return c;
+        return Object.assign({}, c, {
+          number: num != null ? num : c.number,
+          groupId: grp != null ? grp : c.groupId,
+          staged: true,
+        });
+      });
+      return rows.slice().sort((a, b) => (a.number != null ? a.number : Infinity) - (b.number != null ? b.number : Infinity));
+    }, [allRowsBase, orgOverlay]);
+
+    // The FULL filtered collection as an ordered id list — the selection
+    // model's range basis (virtualization is irrelevant to selection math).
+    const filteredIds = useMemo(() => allRows.map((c) => c.id), [allRows]);
+    const filteredIdsRef = useRef(filteredIds);
+    filteredIdsRef.current = filteredIds;
+
     const dialItems = useMemo(() => buildDialItems({
       channels: allRows, groups: groupsSorted, query, groupFilter, collapsed,
     }), [allRows, groupsSorted, query, groupFilter, collapsed]);
 
     const hasDraft = (id) => !!(draftsRef.current && draftsRef.current.get(id));
+
+    // ---- selection model (Set<channelId> + anchor over the filtered id
+    // list — ID-keyed, never DOM nodes or dial row indexes) ----
+    const toggleSelect = useCallback((id, checked, shiftKey) => {
+      const ids = filteredIdsRef.current;
+      setBulkSelected((cur) => {
+        const next = new Set(cur);
+        if (shiftKey && bulkAnchor && ids.includes(bulkAnchor) && ids.includes(id)) {
+          const a = ids.indexOf(bulkAnchor);
+          const b = ids.indexOf(id);
+          const lo = Math.min(a, b);
+          const hi = Math.max(a, b);
+          for (const rid of ids.slice(lo, hi + 1)) {
+            if (checked) next.add(rid);
+            else next.delete(rid);
+          }
+        } else if (checked) next.add(id);
+        else next.delete(id);
+        return next;
+      });
+      if (!shiftKey) setBulkAnchor(id);
+    }, [bulkAnchor]);
+
+    const selectAllMatching = useCallback(() => {
+      // Temp rows are excluded — new drafts have no number on the server
+      // yet; Apply them first. (A temp row can still be a range anchor.)
+      const temps = allRows.filter((c) => c.temp).length;
+      setBulkSelected(new Set(allRows.filter((c) => !c.temp).map((c) => c.id)));
+      if (temps) toast(temps + " new draft" + (temps === 1 ? "" : "s") + " left out — Apply them first.", "");
+    }, [allRows, toast]);
+
+    // Hidden selections are never silently dropped by filtering: they stay
+    // in the count with an explicit Show / Clear hidden.
+    const hiddenSelected = useMemo(() => {
+      const shown = new Set(filteredIds);
+      return [...bulkSelected].filter((id) => !shown.has(id));
+    }, [bulkSelected, filteredIds]);
+
+    // Group-header actions: Select group / Arrange numbers… / Edit group….
+    const groupHeaderAction = useCallback((g, action) => {
+      if (action === "select") {
+        setBulkMode(true);
+        const memberIds = allRows.filter((c) => c.groupId === g.id && !c.temp).map((c) => c.id);
+        setBulkSelected((cur) => new Set([...cur, ...memberIds]));
+        if (memberIds.length) setBulkAnchor(memberIds[0]);
+      } else if (action === "arrange") {
+        setOrganize({ scope: { type: "group", groupId: g.id } });
+      } else if (action === "edit") {
+        setDialog("groups");
+      }
+    }, [allRows]);
+
+    // Keyboard: Ctrl/Cmd+Z undo / Ctrl+Shift+Z redo while the staged bar
+    // holds focus or the organize sheet is open; Ctrl/Cmd+A selects all
+    // matching from the dial; Escape exits Select mode (drafts unaffected).
+    useEffect(() => {
+      const onKey = (e) => {
+        const tag = document.activeElement && document.activeElement.tagName;
+        const typing = tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA";
+        if ((e.ctrlKey || e.metaKey) && !typing && (e.key === "z" || e.key === "Z")) {
+          const inBar = document.activeElement && document.activeElement.closest
+            && document.activeElement.closest(".jw-arrange-bar");
+          if (!organize && !inBar) return;
+          if (!orgRef.current) return;
+          e.preventDefault();
+          if (e.shiftKey) orgRef.current.redo();
+          else orgRef.current.undo();
+          return;
+        }
+        // Ctrl/Cmd+A while the dial has focus: select all matching channels.
+        if ((e.ctrlKey || e.metaKey) && !typing && (e.key === "a" || e.key === "A") && bulkMode) {
+          const inDial = document.activeElement && document.activeElement.closest
+            && document.activeElement.closest(".jw-dial");
+          if (!inDial) return;
+          e.preventDefault();
+          selectAllMatching();
+          return;
+        }
+        // Escape exits Select mode — drafts and staged arrangements are
+        // untouched; dialogs consume their own Escape first.
+        if (e.key === "Escape" && bulkMode && !typing) {
+          if (typeof document.querySelector === "function" && document.querySelector(".jw-overlay")) return;
+          setBulkMode(false);
+          setBulkSelected(new Set());
+          setBulkAnchor(null);
+        }
+      };
+      document.addEventListener("keydown", onKey);
+      return () => document.removeEventListener("keydown", onKey);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [organize, bulkMode, selectAllMatching]);
+
+    // Selection announcements + the extension hook's "selection" event.
+    useEffect(() => {
+      if (!bulkMode) return;
+      studioEmit("selection", { count: bulkSelected.size });
+    }, [bulkSelected, bulkMode]);
+
+    // Extension hook context (extras/): view notifications + announce only.
+    // No mutation surface exists — snippets can never bypass Apply.
+    useEffect(() => {
+      studioCtxRef.current = {
+        route: ROUTE_PATH,
+        on(event, cb) {
+          const set = studioExt.listeners[event];
+          if (!set) return () => {};
+          set.add(cb);
+          return () => set.delete(cb);
+        },
+        getViewState() {
+          const l = libRef.current;
+          const org = orgRef.current ? orgRef.current.get() : null;
+          return {
+            route: ROUTE_PATH,
+            revision: l ? l.revision : null,
+            channelCount: l ? (l.channels || []).length : 0,
+            selection: bulkSelected.size,
+            stagedArrangement: !!(org && org.staged),
+            arrangementAvailable: !!(features && features.arrangement),
+          };
+        },
+        announce,
+      };
+      return () => {
+        studioCtxRef.current = null;
+        studioRunCleanups(); // route leave: every extension cleans up
+      };
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [features, bulkSelected]);
 
     // ---- bulk actions ----
     const bulkIds = [...bulkSelected];
@@ -3775,6 +5821,14 @@
           }
         }
         setBulkSelected(new Set());
+        if (arrangementAvailable) {
+          toast("Moved. Arrange the group's numbers next if you like.", "", {
+            action: {
+              label: "Arrange numbers…",
+              onClick: () => setOrganize({ scope: { type: "group", groupId: target } }),
+            },
+          });
+        }
       }
     };
 
@@ -3881,6 +5935,10 @@
           },
             h("span", null, item.g.name),
             h("span", { className: "jw-group-count" }, String(item.count)),
+            h(GroupHeaderMenu, {
+              group: item.g, arrangeAvailable: arrangementAvailable,
+              onAction: (action) => groupHeaderAction(item.g, action),
+            }),
           );
         }
         const ch = item.c;
@@ -3892,12 +5950,7 @@
           hasDraft: hasDraft(ch.id),
           groupsById,
           onSelect: (id) => { void selectChannel(id); },
-          onCheck: (id, checked) => setBulkSelected((cur) => {
-            const next = new Set(cur);
-            if (checked) next.add(id);
-            else next.delete(id);
-            return next;
-          }),
+          onCheck: toggleSelect,
         });
       },
     });
@@ -3912,6 +5965,11 @@
           drafts: draftsRef.current,
           confirm,
           toast,
+          arrangement: {
+            available: arrangementAvailable,
+            staged: orgState.staged,
+            openResolution,
+          },
           submitOps,
           onApplied: handleApplied,
           onCreated: handleCreated,
@@ -3940,20 +5998,58 @@
           h("option", { value: "" }, "All groups"),
           groupsSorted.map((g) => h("option", { key: g.id, value: g.id }, g.name))),
         h("div", { className: "jw-topbar-side" },
+          // Wide chrome: every organization action is a plain labeled
+          // button — never hidden behind an unlabeled ellipsis again.
+          h("span", { className: "jw-topbar-wide-actions" },
+            h("button", {
+              className: "jw-btn jw-btn-primary", onClick: () => setDialog("new"),
+            }, "+ New channel"),
+            h("button", {
+              className: "jw-btn" + (bulkMode ? " jw-btn-primary" : ""),
+              "aria-pressed": bulkMode ? "true" : "false",
+              onClick: () => { setBulkMode((v) => !v); setBulkSelected(new Set()); setBulkAnchor(null); },
+            }, bulkMode ? "Done selecting" : "Select channels"),
+            arrangementAvailable
+              ? h("button", {
+                  className: "jw-btn",
+                  onClick: () => setOrganize({ scope: bulkSelected.size ? { type: "selection" } : null }),
+                }, "Organize channels…")
+              : h("span", {
+                  className: "jw-pill jw-pill-clean jw-arrange-gate",
+                  title: "Arrangement tools need a plugin update — basic editing (numbers, groups, rules) still works.",
+                }, "Arrangement needs a plugin update"),
+            h("button", { className: "jw-btn", onClick: () => setDialog("groups") }, "Groups…"),
+          ),
+          // Narrow chrome (CSS shows these under 761px): creation stays
+          // visible; organization actions live in ONE labeled menu — never
+          // an unlabeled ellipsis.
           h("button", {
-            className: "jw-btn" + (bulkMode ? " jw-btn-primary" : ""),
-            "aria-pressed": bulkMode ? "true" : "false",
-            onClick: () => { setBulkMode((v) => !v); setBulkSelected(new Set()); },
-          }, bulkMode ? "Done" : "Select…"),
+            className: "jw-btn jw-btn-primary jw-topbar-new", onClick: () => setDialog("new"),
+          }, "+ New channel"),
+          h("div", { className: "jw-menu-host jw-actions-menu-host", ref: actionsRef },
+            h("button", {
+              className: "jw-btn", "aria-haspopup": "menu",
+              "aria-expanded": actionsOpen ? "true" : "false",
+              onClick: () => setActionsOpen((v) => !v),
+            }, "Actions ▾"),
+            actionsOpen ? h("div", { className: "jw-menu", role: "menu" },
+              [
+                [bulkMode ? "Done selecting" : "Select channels", () => { setBulkMode((v) => !v); setBulkSelected(new Set()); setBulkAnchor(null); }],
+                arrangementAvailable ? ["Organize channels…", () => setOrganize({ scope: bulkSelected.size ? { type: "selection" } : null })] : null,
+                ["Groups…", () => setDialog("groups")],
+              ].filter(Boolean).map(([label, fn]) => h("button", {
+                key: label, className: "jw-menu-item", role: "menuitem",
+                onClick: () => { setActionsOpen(false); fn(); },
+              }, label))) : null,
+          ),
           h("div", { className: "jw-menu-host", ref: moreRef },
             h("button", {
               className: "jw-btn", "aria-haspopup": "menu",
               "aria-expanded": moreOpen ? "true" : "false", "aria-label": "More actions",
-              title: "Groups, export, diagnostics, reload",
+              title: "Export, shortcuts, diagnostics, reload",
               onClick: () => setMoreOpen((v) => !v),
             }, "⋯"),
             moreOpen ? h("div", { className: "jw-menu", role: "menu" }, [
-              ["Groups…", () => setDialog("groups")],
               ["Export CSV", () => void exportCsv()],
               ["Keyboard shortcuts…", () => setDialog("shortcuts")],
               ["Download diagnostics", () => downloadDiagnostics()],
@@ -3968,13 +6064,37 @@
           applyingPill,
         ),
       ),
-      bulkMode ? h("div", { className: "jw-bulk-bar", role: "toolbar", "aria-label": "Bulk actions" },
+      bulkMode ? h("div", { className: "jw-bulk-bar", role: "toolbar", "aria-label": "Selection actions" },
         h("strong", null, bulkSelected.size + " selected"),
+        h("span", { className: "jw-scope-line" },
+          "of " + filteredIds.length + " shown"
+          + (filtering ? " (filter: " + (groupFilter ? (groupsById.get(groupFilter) || {}).name || "group" : "search") + ")" : "")
+          + (hiddenSelected.length ? " · includes " + hiddenSelected.length + " hidden by the current filter" : "")),
+        hiddenSelected.length
+          ? h("span", { className: "jw-hidden-note" },
+              hiddenSelected.length + " selected " + (hiddenSelected.length === 1 ? "is" : "are") + " hidden by the current filter",
+              h("button", { className: "jw-link", onClick: clearFilters }, "Show"),
+              h("button", {
+                className: "jw-link",
+                onClick: () => setBulkSelected((cur) => {
+                  const next = new Set(cur);
+                  for (const id of hiddenSelected) next.delete(id);
+                  return next;
+                }),
+              }, "Clear hidden"))
+          : null,
         h("button", {
           className: "jw-btn jw-btn-small", disabled: !allRows.length,
-          title: "Select every channel in the current search/filter",
-          onClick: () => setBulkSelected(new Set(allRows.filter((c) => !c.temp).map((c) => c.id))),
-        }, "Select all"),
+          title: "Select every channel in the current search/filter (new drafts stay out — Apply them first)",
+          onClick: selectAllMatching,
+        }, "Select all " + allRows.filter((c) => !c.temp).length + " matching channels"),
+        arrangementAvailable
+          ? h("button", {
+              className: "jw-btn jw-btn-small", disabled: !bulkSelected.size,
+              title: "Arrange numbers or assign a group for the selection",
+              onClick: () => setOrganize({ scope: { type: "selection" } }),
+            }, "Organize selection…")
+          : null,
         h("button", { className: "jw-btn jw-btn-small", disabled: !bulkSelected.size, onClick: () => void moveDialog() }, "Move to group…"),
         h("button", {
           className: "jw-btn jw-btn-small", disabled: !bulkSelected.size,
@@ -3994,6 +6114,20 @@
         }, "Restore"),
         h("button", { className: "jw-btn jw-btn-ghost jw-btn-small", onClick: () => setBulkSelected(new Set()) }, "Clear"),
       ) : null,
+      h(ArrangementBar, {
+        staged: orgState.staged,
+        pending: orgState.pending,
+        libRevision: lib.revision,
+        busy: arrBusy,
+        canUndo: !!(orgState.undo && orgState.undo.length),
+        canRedo: !!(orgState.redo && orgState.redo.length),
+        onApply: () => void submitArrangement(),
+        onReview: () => orgState.staged && setOrganize({ reviewStaged: orgState.staged }),
+        onDiscard: () => void discardStaged(),
+        onUndo: () => orgRef.current && orgRef.current.undo(),
+        onRedo: () => orgRef.current && orgRef.current.redo(),
+        onReplan: () => void replanStaged(),
+      }),
       h("main", { className: "jw-columns" },
         h("section", { className: "jw-dial", "aria-label": "Channel dial" },
           h("div", { className: "jw-dial-tools" },
@@ -4035,8 +6169,55 @@
         : null,
       dialog === "new"
         ? h(NewChannelDialog, {
-            lib, drafts: draftsRef.current, onClose: () => setDialog(null),
-            onCreate: (tempId) => { setDialog(null); handleCreated(tempId); },
+            lib, drafts: draftsRef.current, arrangementAvailable,
+            onClose: () => setDialog(null),
+            onCreate: (tempId, opts) => { setDialog(null); handleCreated(tempId, opts); },
+          })
+        : null,
+      numRes
+        ? h(NumberResolutionSheet, {
+            lib, drafts: draftsRef.current,
+            subject: numRes.subject, target: numRes.target,
+            onStage: stageArrangement,
+            onClose: () => setNumRes(null),
+          })
+        : null,
+      organize
+        ? h(OrganizeSheet, {
+            lib, drafts: draftsRef.current, groups: groupsSorted,
+            tempRows: tempChannels, filteredIds, selectionIds: bulkSelected,
+            initialScope: organize.scope || null,
+            initialIntent: organize.intent || null,
+            reviewStaged: organize.reviewStaged || null,
+            onStage: stageArrangement,
+            onSplitSelection: (kind) => {
+              // band_mixed split: re-scope through Select channels so the
+              // dial and bar reflect the narrower selection explicitly.
+              // Kind resolves for committed AND temp rows (a draft row can
+              // sit in the selection); every dropped row is counted and
+              // announced — the other band never leaves the scope silently.
+              const kindOf = (id) => {
+                const c = (lib.channels || []).find((x) => x.id === id);
+                if (c) return c.kind || "net";
+                const t = tempChannels.find((x) => x.id === id);
+                return t ? (t.kind || "net") : null;
+              };
+              const keep = new Set([...bulkSelected].filter((id) => kindOf(id) === kind));
+              const dropped = bulkSelected.size - keep.size;
+              setBulkMode(true);
+              setBulkSelected(keep);
+              setOrganize({ scope: { type: "selection" } });
+              const keptBand = kind === "ch" ? "My Channels (1–99)" : "network (100–899)";
+              const droppedBand = kind === "ch" ? "network" : "My Channels";
+              const msg = "Scope narrowed to " + keep.size + " " + keptBand + " row" + (keep.size === 1 ? "" : "s")
+                + (dropped
+                    ? " — " + dropped + " " + droppedBand + " row" + (dropped === 1 ? "" : "s")
+                      + " left the selection (re-select to arrange that band)."
+                    : ".");
+              toast(msg, dropped ? "" : "ok");
+              announce(msg);
+            },
+            onClose: () => setOrganize(null),
           })
         : null,
       dialog === "shortcuts"
@@ -4051,6 +6232,9 @@
         : null,
       h(ConfirmDialog, { spec: confirmSpec }),
       h(Toasts, { items: toasts, onDismiss: (id) => setToasts((cur) => cur.filter((t) => t.id !== id)) }),
+      live ? h("div", {
+        key: live.n, className: "jw-visually-hidden", role: "status", "aria-live": "polite",
+      }, live.message) : null,
     );
   }
 

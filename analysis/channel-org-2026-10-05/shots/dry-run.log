@@ -1,0 +1,159 @@
+
+== flow 1: create-at-occupied + shift chain + downward mirror
+    ok   occupied hint offers placement
+    ok   sheet title names the subject at 300
+    ok   no Swap choice for a new channel
+    ok   shift-up preselected with the real chain (3 move, stops at 303)
+    ok   review lists the 300→303 chain + the new row
+    ok   staged bar names the placement
+    ok   revision advanced to 13
+    ok   exactly ONE apply for the whole chain
+    ok   dial renumbered: Fresh Cut at 300
+    ok   Occupied 302 pushed to 303
+    ok   created channel carries the authored rule + provenance
+    ok   downward chain shifts 5 (stops at 296)
+    ok   revision advanced to 14
+    ok   Deep Cut at 301 / Fresh Cut pushed to 299
+    ok   still one apply per arrangement
+    ok   no page errors
+   (11s)
+
+== flow 2: existing 299 → 300 with dirty name (opt-in put + renumber)
+    ok   editor shows the unsaved draft
+    ok   existing row gets a Swap choice
+    ok   selection scope active (1)
+    ok   displaced occupant listed in review
+    ok   review meta counts 1 displaced bystander
+    ok   draft opt-in latches
+    ok   bar summarizes 2 renumbered + 1 relocated
+    ok   revision advanced to 13
+    ok   ONE packet committed it
+    ok   renumber + dirty name committed together (299→300)
+    ok   displaced occupant landed at 303
+    ok   wire put carries the final number (agreement rule)
+    ok   no page errors
+   (5s)
+
+== flow 3: block 171/173/180 → 300 with bystanders
+    ok   review lists all 6 rows / 3 displaced bystanders
+    ok   displaced row reviewed: Occupied 300
+    ok   displaced row reviewed: Occupied 301
+    ok   displaced row reviewed: Occupied 302
+    ok   revision advanced to 13
+    ok   one apply committed the whole block
+    ok   block landed consecutively at 300-302
+    ok   displaced trio pushed consecutively to 303-305
+    ok   no page errors
+   (4s)
+
+== flow 4: Performers 300-699 useAvailable + capacity + shortfall
+    ok   group scope preselected (2 channels)
+    ok   capacity line exact
+    ok   outsiders 320/450 untouched in review
+    known(F6) F6: alphabetical arrange_range plans by name (Alpha Net first) — "intent.order: order must be 'number' or 'name'"
+    ok   revision advanced to 13
+    ok   number-order pack: Zulu 310→303, Alpha 311→304; outsiders stay
+    ok   shortfall line carries the exact number
+    ok   staging refused while short
+    ok   nothing staged by the refused plan
+    ok   no page errors
+   (8s)
+
+== flow 5: exclusive range with outside interval
+    ok   one-time copy present
+    ok   exclusive capacity line
+    ok   outsider relocated via exclusive rule
+    ok   revision advanced to 13
+    ok   all outsiders relocated, block packed
+    ok   no page errors
+   (5s)
+
+== flow 6: create group + assign in one Apply (F1)
+    known(F1) F1: editor Create group… commits in one Apply — "1 server validation error(s) — shown under the fields. Draft intact."
+    known(F1) F1(+residual): occupied create with a new group previews + stages its placement — {"errors":["no group 'grp3ae8d30029'"],"stageable":false}
+    ok   no page errors
+   (5s)
+
+== flow 7: revision conflict + lost-response replay
+    ok   conflict receipt recorded
+    ok   other writer bumped the revision
+    ok   bar shows stale base + Reload and replan
+    ok   content drafts retained through the conflict
+    ok   replan re-previews at the new revision
+    ok   re-staged against the fresh revision with a NEW requestId
+    known(F3) F3: after a transport failure the bar re-enables for the frozen retry — "Apply arrangement disabled + labelled \"Applying…\" 3s after the transport abort (pending never cleared)"
+    ok   no page errors
+   (7s)
+
+== flow 8: edit-in-flight, undo/redo, rebase, reversal, stage-in-flight
+    ok   first snapshot committed, second edit still draft
+    known(F5) F5: no self-inflicted revision conflict inside one tab — {"bulkConflictToast":1,"editorConflictBar":0,"note":"the second submission ran against an un-refreshed revision instead of waiting for the first receipt"}
+    ok   undo clears the staging bar
+    ok   redo restores the staged bar
+    ok   bystander draft number silently rebased (299→302)
+    ok   no rebase notice for a non-conflicting rebase
+    ok   reversal restored 299/302
+    ok   reversal rebased the bystander draft back
+    ok   same-field conflict names itself
+    ok   draft keeps the local value
+    ok   server committed the ORIGINAL in-flight plan
+    known(F4) F4: staging during flight does not corrupt drafts with the never-committed plan — {"draftNumber":401,"serverTruth":299,"note":"draft was rebased by the SECOND (discarded) staging beforeAfter"}
+    ok   no page errors
+   (61s)
+
+== flow 9: capability gating fallback
+    ok   gate pill explains the old backend
+    ok   no organize entries
+    ok   group menu lacks Arrange numbers…
+    ok   occupied number explains without Resolve
+    ok   no Resolve conflict… link
+    ok   no Move / insert… entry
+    ok   new-channel refuses occupied numbers when gated
+    ok   basic editing still applies
+    ok   groups still apply
+    ok   no page errors
+   (7s)
+
+== flow 10: visual sweep + geometry + keyboard
+    shot dark-01-main
+    ok   dial rows render at 44px
+    shot dark-02-numres-sheet
+    ok   focus starts inside the sheet
+    ok   focus stays trapped in the sheet after 5 Tabs
+    shot dark-03-organize-review
+    shot dark-04-staged-bar
+    shot dark-05-narrow-actions
+    shot dark-06-zoom-200
+    ok   no page errors (dark sweep)
+    shot light-01-main
+    shot light-02-organize-review
+    shot light-03-staged-bar
+    ok   no page errors (light sweep)
+   (8s)
+
+== flow 11: extras snippet lifecycle
+    ok   hook announces the page state
+    ok   snippet sees the staged event
+    ok   snippet badges the body
+    ok   removal clears the badge
+    ok   removed snippet receives no further events
+    ok   revision advanced to 13
+    ok   core arrangement Apply committed through the coordinator
+    ok   no page errors
+   (5s)
+
+================ DRY-RUN SUMMARY ================
+flow 1: pass
+flow 2: pass
+flow 3: pass
+flow 4: pass-with-known-failures(F6)
+flow 5: pass
+flow 6: pass-with-known-failures(F1)
+flow 7: pass-with-known-failures(F3)
+flow 8: pass-with-known-failures(F5,F4)
+flow 9: pass
+flow 10: pass
+flow 11: pass
+known-unfixed failures: {"F6":1,"F1":2,"F3":1,"F5":1,"F4":1}
+new findings: 0; harness crashes: 0; notes: 5; shots: 9
+report + screenshots in /home/shahram/dev/stash-justwatch/analysis/channel-org-2026-10-05/shots

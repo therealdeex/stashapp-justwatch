@@ -247,3 +247,284 @@ def test_put_onto_taken_number_is_a_typed_error_not_a_crash(data_dir):
             library.load(data_dir)["channels"][0])), "number": 2}}])
     assert result["status"] == "rejected"
     assert result["errors"][0]["code"] == "duplicate_number"
+
+
+# ---------------------------------------------------------------------------
+# channels.renumber (the arrangement opcode) + final-occupancy validation
+# ---------------------------------------------------------------------------
+
+
+def net_doc() -> dict:
+    """Three consecutive networks at 300-302 plus one custom at 12."""
+    doc = base_library()
+    for i, number in enumerate((300, 301, 302)):
+        doc["channels"].append({
+            "id": f"net_aaaa000{i + 1}", "kind": "net", "number": number,
+            "name": f"Net {number}", "glyph": None, "color": "#112233",
+            "groupId": "grp_general", "sort": "shuffle", "seed": 100 + i,
+            "enabled": True, "archived": False, "paused": False,
+            "source": {"type": "tag", "id": "5", "ids": ["5"]},
+            "sourceLabel": "", "programming": {"mode": "fixed"},
+            "provenance": {"origin": "custom"}})
+    return doc
+
+
+@pytest.fixture
+def net_dir(tmp_path):
+    library.save(tmp_path, net_doc())
+    return tmp_path
+
+
+NET1, NET2, NET3 = "net_aaaa0001", "net_aaaa0002", "net_aaaa0003"
+
+
+def numbers_of(data_dir):
+    return {c["id"]: c["number"] for c in library.load(data_dir)["channels"]}
+
+
+def test_renumber_cycles_and_swaps_are_legal(net_dir):
+    """A simultaneous final-number map: rotations and 2-cycles pass without
+    any clean-draft prerequisite."""
+    receipt = library.apply_transaction(
+        net_dir, expected_revision=1, request_id="cycle",
+        ops=[{"op": "channels.renumber", "assignments": [
+            {"channelId": NET1, "number": 302},
+            {"channelId": NET2, "number": 300},
+            {"channelId": NET3, "number": 301}]}])
+    assert receipt["status"] == "committed"
+    numbers = numbers_of(net_dir)
+    assert [numbers[NET1], numbers[NET2], numbers[NET3]] == [302, 300, 301]
+    # a renumber 2-cycle is a swap without the swap opcode
+    receipt = library.apply_transaction(
+        net_dir, expected_revision=2, request_id="pair",
+        ops=[{"op": "channels.renumber", "assignments": [
+            {"channelId": NET2, "number": 301},
+            {"channelId": NET3, "number": 300}]}])
+    assert receipt["status"] == "committed"
+    numbers = numbers_of(net_dir)
+    assert numbers[NET2] == 301 and numbers[NET3] == 300
+
+
+def test_renumber_standalone_swap_shape_alone_still_works(data_dir):
+    receipt = library.apply_transaction(
+        data_dir, expected_revision=1, request_id="swap",
+        ops=[{"op": "channel.swap", "a": "ch_11111111", "b": "ch_22222222"}])
+    assert receipt["status"] == "committed", "the opcode stays supported"
+
+
+def test_final_occupancy_rejects_untouched_holders_and_duplicates(net_dir):
+    occupied = library.apply_transaction(
+        net_dir, expected_revision=1, request_id="held",
+        ops=[{"op": "channels.renumber", "assignments": [
+            {"channelId": NET1, "number": 302}]}])
+    assert occupied["status"] == "rejected"
+    assert occupied["errors"][0]["code"] == "destination_occupied"
+    assert "Net 302" in occupied["errors"][0]["message"]
+    # the packet CAN resolve it: move the holder away in the same transaction
+    resolved = library.apply_transaction(
+        net_dir, expected_revision=1, request_id="held-ok",
+        ops=[{"op": "channels.renumber", "assignments": [
+            {"channelId": NET1, "number": 302},
+            {"channelId": NET3, "number": 303}]}])
+    assert resolved["status"] == "committed"
+    dup = library.apply_transaction(
+        net_dir, expected_revision=2, request_id="dup",
+        ops=[{"op": "channels.renumber", "assignments": [
+            {"channelId": NET2, "number": 303},
+            {"channelId": NET3, "number": 303}]}])
+    assert dup["status"] == "rejected"
+    codes = [e["code"] for e in dup["errors"]]
+    assert "duplicate_destination" in codes
+    # a rejected packet leaves definitions and revision byte-identical
+    assert library.load(net_dir)["revision"] == 2
+
+
+def test_renumber_bad_payloads_are_typed(net_dir):
+    def attempt(rid, ops):
+        return library.apply_transaction(
+            net_dir, expected_revision=1, request_id=rid, ops=ops)
+
+    r = attempt("e1", [{"op": "channels.renumber", "assignments": []}])
+    assert r["errors"][0]["code"] == "empty_assignment"
+    r = attempt("e2", [{"op": "channels.renumber"}])
+    assert r["errors"][0]["code"] == "empty_assignment"
+    r = attempt("e3", [{"op": "channels.renumber",
+                        "assignments": [{"channelId": NET1, "number": 300,
+                                         "why": 1}]}])
+    assert r["errors"][0]["code"] == "bad_assignment"
+    r = attempt("e4", [{"op": "channels.renumber", "assignments": ["nope"]}])
+    assert r["errors"][0]["code"] == "bad_assignment"
+    r = attempt("e5", [{"op": "channels.renumber",
+                        "assignments": [{"channelId": "net_00000000",
+                                         "number": 300}]}])
+    assert r["errors"][0]["code"] == "unknown_channel"
+    r = attempt("e6", [{"op": "channels.renumber",
+                        "assignments": [{"channelId": NET1, "number": True}]}])
+    assert r["errors"][0]["code"] == "bad_number"
+    r = attempt("e7", [{"op": "channels.renumber",
+                        "assignments": [{"channelId": NET1, "number": 12}]}])
+    assert r["errors"][0]["code"] == "cross_band"
+    r = attempt("e8", [{"op": "channels.renumber", "assignments": [
+        {"channelId": NET1, "number": 303},
+        {"channelId": NET1, "number": 304}]}])
+    assert r["errors"][0]["code"] == "ambiguous_assignment"
+    r = attempt("e9", [{"op": "channel.swap", "a": NET1, "b": NET2},
+                       {"op": "channels.renumber", "assignments": [
+                           {"channelId": NET1, "number": 305}]}])
+    assert r["errors"][0]["code"] == "ambiguous_assignment"
+    stored = next(c for c in library.load(net_dir)["channels"]
+                  if c["id"] == NET1)
+    r = attempt("e10", [
+        {"op": "channel.put", "channel": {**json.loads(json.dumps(stored)),
+                                          "number": 306}},
+        {"op": "channels.renumber", "assignments": [
+            {"channelId": NET1, "number": 305}]}])
+    assert r["errors"][0]["code"] == "ambiguous_assignment"
+    # agreement is redundant-but-consistent: accepted
+    r = attempt("e11", [
+        {"op": "channel.put", "channel": {**json.loads(json.dumps(stored)),
+                                          "number": 305}},
+        {"op": "channels.renumber", "assignments": [
+            {"channelId": NET1, "number": 305}]}])
+    assert r["status"] == "committed"
+
+
+def test_create_into_number_vacated_by_same_packet_renumber(net_dir):
+    """Create at occupied 300 while the run shifts up: ONE Apply, ONE
+    revision — the arrangement row of the acceptance matrix."""
+    ops = [
+        {"op": "channel.create", "tempId": "temp-1", "channel": {
+            "kind": "net", "number": 300, "name": "Fresh",
+            "groupId": "grp_general",
+            "source": {"type": "criteria", "tagsAny": ["3"]}}},
+        {"op": "channels.renumber", "assignments": [
+            {"channelId": NET1, "number": 301},
+            {"channelId": NET2, "number": 302},
+            {"channelId": NET3, "number": 303}]},
+    ]
+    receipt = library.apply_transaction(
+        net_dir, expected_revision=1, request_id="insert-300", ops=ops)
+    assert receipt["status"] == "committed"
+    assert receipt["revision"] == 2, "exactly one revision increment"
+    new_id = receipt["idMap"]["temp-1"]
+    numbers = numbers_of(net_dir)
+    assert numbers[new_id] == 300
+    assert numbers[NET1] == 301 and numbers[NET2] == 302 and numbers[NET3] == 303
+    # ...and the mirror: validate agrees with apply on the same shape
+    check = library._check_ops(library.load(net_dir), [
+        {"op": "channels.renumber", "assignments": [
+            {"channelId": new_id, "number": 299},
+            {"channelId": NET1, "number": 300}]}])
+    assert check == [], "validate and apply see the same final plan"
+
+
+def test_put_name_plus_renumber_swap_in_one_packet(net_dir):
+    """The dirty-name channel trades numbers with a neighbour through ONE
+    packet: the put carries the edit, renumber carries the map — no
+    clean-draft prerequisite, no swap opcode."""
+    stored = {c["id"]: c for c in library.load(net_dir)["channels"]}
+    draft = {**json.loads(json.dumps(stored[NET1])),
+             "name": "Dirty Name", "number": 302}
+    ops = [
+        {"op": "channel.put", "channel": draft},
+        {"op": "channels.renumber", "assignments": [
+            {"channelId": NET3, "number": 300}]},
+    ]
+    # final map: NET1=302, NET2=301, NET3=300 — each destination's original
+    # holder moves away in the same packet, so nothing is "taken".
+    receipt = library.apply_transaction(
+        net_dir, expected_revision=1, request_id="dirty-swap", ops=ops)
+    assert receipt["status"] == "committed"
+    numbers = numbers_of(net_dir)
+    assert numbers[NET1] == 302 and numbers[NET3] == 300
+    names = {c["id"]: c["name"] for c in library.load(net_dir)["channels"]}
+    assert names[NET1] == "Dirty Name"
+
+
+def test_group_create_move_renumber_atomic_and_rejection_clean(net_dir):
+    ops = [
+        {"op": "group.put", "group": {"id": "grp_performers",
+                                      "name": "Performers", "position": 3}},
+        {"op": "channels.move", "channelIds": [NET1, NET2],
+         "groupId": "grp_performers"},
+        {"op": "channels.renumber", "assignments": [
+            {"channelId": NET1, "number": 310},
+            {"channelId": NET2, "number": 311}]},
+    ]
+    receipt = library.apply_transaction(
+        net_dir, expected_revision=1, request_id="combo", ops=ops)
+    assert receipt["status"] == "committed"
+    doc = library.load(net_dir)
+    groups = {g["name"]: g["id"] for g in doc["groups"]}
+    assert "Performers" in groups
+    moved = {c["id"]: (c["groupId"], c["number"]) for c in doc["channels"]}
+    assert moved[NET1] == (groups["Performers"], 310)
+    assert moved[NET2] == (groups["Performers"], 311)
+    assert moved[NET3] == ("grp_general", 302)
+    # rejection mid-combination: nothing moves, revision unchanged
+    bad = [
+        {"op": "group.put", "group": {"id": "grp_later", "name": "Later",
+                                      "position": 4}},
+        {"op": "channels.move", "channelIds": [NET3],
+         "groupId": "grp_later"},
+        {"op": "channels.renumber", "assignments": [
+            {"channelId": NET3, "number": 1}]},
+    ]
+    rejected = library.apply_transaction(
+        net_dir, expected_revision=2, request_id="combo-bad", ops=bad)
+    assert rejected["status"] == "rejected"
+    assert rejected["errors"][0]["code"] == "cross_band"
+    doc = library.load(net_dir)
+    assert doc["revision"] == 2
+    assert all(g["name"] != "Later" for g in doc["groups"]), "no partial commit"
+
+
+def test_renumber_replay_and_conflict(net_dir):
+    ops = [{"op": "channels.renumber", "assignments": [
+        {"channelId": NET1, "number": 305}]}]
+    first = library.apply_transaction(
+        net_dir, expected_revision=1, request_id="same", ops=ops)
+    assert first["status"] == "committed"
+    replay = library.apply_transaction(
+        net_dir, expected_revision=1, request_id="same", ops=ops)
+    assert replay == first, "exact retry replays the stored receipt"
+    assert library.load(net_dir)["revision"] == 2
+    conflict = library.apply_transaction(
+        net_dir, expected_revision=1, request_id="other", ops=ops)
+    assert conflict["status"] == "rejected"
+    assert conflict["error"] == "revision_conflict"
+    assert conflict["currentRevision"] == 2
+    changed = [{"op": "channels.renumber", "assignments": [
+        {"channelId": NET1, "number": 306}]}]
+    diverged = library.apply_transaction(
+        net_dir, expected_revision=2, request_id="same", ops=changed)
+    assert diverged["error"] == "request_replayed_with_different_content"
+
+
+def test_renumber_multi_band_single_op(net_dir):
+    """Frozen decision: ONE renumber op carries per-band assignments; each
+    channel is band-checked against its OWN kind."""
+    ops = [{"op": "channels.renumber", "assignments": [
+        {"channelId": "ch_11111111", "number": 12},
+        {"channelId": NET1, "number": 299}]}]
+    receipt = library.apply_transaction(
+        net_dir, expected_revision=1, request_id="bands", ops=ops)
+    assert receipt["status"] == "committed"
+    numbers = numbers_of(net_dir)
+    assert numbers["ch_11111111"] == 12 and numbers[NET1] == 299
+
+
+def test_put_with_unknown_id_is_a_typed_error(net_dir):
+    """Regression guard: a put naming a nonexistent id at a FREE number used
+    to pass validation and crash staging with a KeyError."""
+    ops = [{"op": "channel.put", "channel": {
+        "id": "net_00000000", "kind": "net", "number": 305, "name": "Ghost",
+        "groupId": "grp_general", "sort": "shuffle",
+        "source": {"type": "tag", "id": "5", "ids": ["5"]}}}]
+
+    errors = library._check_ops(library.load(net_dir), ops)
+    assert [e["code"] for e in errors] == ["unknown_channel"]
+    result = library.apply_transaction(
+        net_dir, expected_revision=1, request_id="ghost", ops=ops)
+    assert result["status"] == "rejected"
+    assert result["errors"][0]["code"] == "unknown_channel"

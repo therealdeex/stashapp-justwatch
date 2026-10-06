@@ -105,6 +105,7 @@ OPERATIONS: dict[str, str] = {
     "getChannelHistory": "GetChannelHistory",
     "getChannelRefreshStatus": "GetChannelRefreshStatus",
     "requeueChannelRefresh": "RequeueChannelRefresh",
+    "previewChannelArrangement": "PreviewChannelArrangement",
 }
 
 #: Operations a sync ``runPluginOperation`` may address (fast, bounded). The
@@ -116,7 +117,8 @@ SYNC_OPERATIONS = ("capabilities", "directory", "lineup", "previewLineup",
                    "getChannelLibrary", "getChannelDirectory", "getChannelDefinition",
                    "validateChannelChanges", "previewChannelPool",
                    "getChannelApplyResult", "getChannelHistory",
-                   "getChannelRefreshStatus", "requeueChannelRefresh")
+                   "getChannelRefreshStatus", "requeueChannelRefresh",
+                   "previewChannelArrangement")
 
 
 def capabilities(plugin_version: str) -> dict:
@@ -176,6 +178,18 @@ def capabilities(plugin_version: str) -> dict:
                 "requeueOperation": "RequeueChannelRefresh",
             },
             "poolPreview": {"version": 1, "operation": "PreviewChannelPool"},
+            # Deterministic arrangement planning (additive v1): the pure
+            # planner behind the Channel Studio's organize/insert flows. The
+            # preview is read-only and correlated; commits ride the existing
+            # ApplyChannelChanges task via the channels.renumber opcode. Old
+            # clients never read this; new UI on an old plugin keeps basic
+            # editing (put/swap/move/patch) — channelLibrary alone does NOT
+            # imply the opcode.
+            "arrangement": {
+                "version": 1,
+                "previewOperation": "PreviewChannelArrangement",
+                "renumberOpcode": "channels.renumber",
+            },
             # The plugin exposes tuning settings, but they govern its own
             # computed directory, not the TV app's generated channels.
             "globalSettings": True,

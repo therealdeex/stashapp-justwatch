@@ -308,3 +308,165 @@ def test_dynamic_rows_summary_and_signature():
     a = criteria.source_signature({"type": "criteria", "studioSceneCount": {"max": 2}})
     b = criteria.source_signature({"type": "criteria", "studioSceneCount": {"max": 3}})
     assert a != b
+
+
+# ---------------------------------------------------------------------------
+# channel organization: PreviewChannelArrangement + the renumber opcode
+# ---------------------------------------------------------------------------
+
+
+def arrangement_library(tmp_path):
+    """Three consecutive networks (300-302) + one custom at 12."""
+    doc = {
+        "schemaVersion": library_mod.STORAGE_VERSION,
+        "libraryId": "lib_arrange0",
+        "revision": 12,
+        "groups": [
+            {"id": "grp_my", "name": "My Channels", "position": 1, "legacySection": None},
+            {"id": "grp_net", "name": "Networks", "position": 2, "legacySection": None},
+        ],
+        "channels": [
+            {"id": "ch_11111111", "kind": "ch", "number": 12, "name": "Custom",
+             "glyph": None, "color": "#112233", "groupId": "grp_my",
+             "sort": "shuffle", "seed": 9, "enabled": True, "archived": False,
+             "paused": False, "source": {"type": "tag", "id": "5", "ids": ["5"]},
+             "sourceLabel": "tag", "programming": {"mode": "fixed"},
+             "provenance": {"origin": "custom"}},
+        ],
+        "recentRequests": [],
+    }
+    for i, (cid, number) in enumerate((
+            ("net_aaaa0001", 300), ("net_aaaa0002", 301), ("net_aaaa0003", 302))):
+        doc["channels"].append({
+            "id": cid, "kind": "net", "number": number, "name": f"Net {number}",
+            "glyph": "", "color": "#445566", "groupId": "grp_net",
+            "sort": "newest", "seed": 1000 + i, "enabled": True,
+            "archived": False, "paused": False,
+            "source": {"type": "criteria", "studiosAny": [str(10 + i)]},
+            "sourceLabel": "", "programming": {"mode": "fixed"},
+            "provenance": {"origin": "v4-final-proposal"}})
+    library_mod.save(tmp_path, doc)
+    return doc
+
+
+def test_renumber_only_apply_is_fully_cosmetic(tmp_path):
+    """An arrangement moves numbers and NOTHING else: no refresh journal, no
+    rotation churn, no publication rewrite, membership stable, presentation
+    moved."""
+    from justwatch import channel_service, contract, lineup
+    doc = arrangement_library(tmp_path)
+    nets = [c for c in doc["channels"] if c["kind"] == "net"]
+    before = {c["id"]: {
+        "rotation": lineup.rotation_version(c["source"], c["sort"], c["seed"],
+                                            contract.ROTATION_SIZE),
+        "membership": criteria.source_signature(c["source"]),
+        "presentation": channel_service.presentation_signature(c),
+    } for c in nets}
+    pub = tmp_path / "programming" / "net_aaaa0001.json"
+    pub.parent.mkdir()
+    pub.write_text('{"published": true}', encoding="utf-8")
+
+    ctx = Ctx(tmp_path, FakeClient(), {})
+    ctx.args = {"requestId": "arrange-1", "expectedRevision": 12, "ops": [
+        {"op": "channels.renumber", "assignments": [
+            {"channelId": "net_aaaa0001", "number": 303},
+            {"channelId": "net_aaaa0002", "number": 304},
+            {"channelId": "net_aaaa0003", "number": 305}]}]}
+    receipt = channel_ops.op_apply_channel_changes(ctx)
+    assert receipt["status"] == "committed"
+    assert receipt["refresh"] == {}, "a renumber must never reindex"
+    assert refresh.read_pending(tmp_path) == []
+    after = {c["id"]: c for c in library_mod.load(tmp_path)["channels"]}
+    for cid, was in before.items():
+        channel = after[cid]
+        assert channel["number"] != next(
+            c["number"] for c in nets if c["id"] == cid), "sanity: it moved"
+        assert lineup.rotation_version(channel["source"], channel["sort"],
+                                       channel["seed"], contract.ROTATION_SIZE) \
+            == was["rotation"], "rotation identity unchanged"
+        assert criteria.source_signature(channel["source"]) == was["membership"]
+        assert channel_service.presentation_signature(channel) \
+            != was["presentation"], "presentation moves by design"
+        assert channel["seed"] == next(
+            c["seed"] for c in nets if c["id"] == cid), "seed untouched"
+    assert pub.read_text(encoding="utf-8") == '{"published": true}', \
+        "publications are keyed by id and never rewritten by an arrangement"
+
+
+def test_preview_arrangement_read_only_and_correlated(tmp_path):
+    from justwatch import channel_service
+    arrangement_library(tmp_path)
+    library_file = tmp_path / "channel-library.json"
+    before = library_file.read_bytes()
+    intent = {"type": "insert", "channelId": "net_aaaa0002", "number": 300}
+
+    stale = channel_ops.op_preview_channel_arrangement(Ctx(
+        tmp_path, FakeClient(),
+        {"expectedRevision": 11, "correlationToken": "org-tok",
+         "intent": intent}))
+    assert stale["valid"] is False
+    assert stale["errors"][0]["code"] == "stale_revision"
+    assert stale["errors"][0]["currentRevision"] == 12
+    assert stale["correlationToken"] == "org-tok", "token echoed verbatim"
+
+    body = channel_ops.op_preview_channel_arrangement(Ctx(
+        tmp_path, FakeClient(),
+        {"expectedRevision": 12, "correlationToken": "org-tok",
+         "intent": intent, "explain": True}))
+    assert body["valid"] and not body["noop"]
+    assert body["revision"] == 12 and body["correlationToken"] == "org-tok"
+    got = {(c["channelId"] or c["tempRef"]): (c["from"], c["to"])
+           for c in body["numberChanges"]}
+    # the 301 row inserts at 300: its own old slot is the first free number
+    # above, so only the 300 holder shifts (mover removed from occupancy)
+    assert got["net_aaaa0002"] == (301, 300)
+    assert got["net_aaaa0001"] == (300, 301)
+    assert body["choices"]["swap"]["withName"] == "Net 300"
+    assert library_file.read_bytes() == before, "zero writes on preview"
+    doc = library_mod.load(tmp_path)
+    assert [c["id"] for c in doc["channels"]] == \
+        [c["id"] for c in arrangement_library(tmp_path)["channels"]], \
+        "no identity allocation, no reorder"
+    assert doc["revision"] == 12 and doc["recentRequests"] == []
+
+    with pytest.raises(ValueError):
+        channel_ops.op_preview_channel_arrangement(Ctx(
+            tmp_path, FakeClient(),
+            {"expectedRevision": 12, "correlationToken": "", "intent": intent}))
+
+
+def test_preview_arrangement_requires_migrated_library(tmp_path):
+    with pytest.raises(ValueError):
+        channel_ops.op_preview_channel_arrangement(Ctx(
+            tmp_path, FakeClient(),
+            {"expectedRevision": 1, "correlationToken": "t",
+             "intent": {"type": "swap", "a": "ch_11111111",
+                        "b": "ch_22222222"}}))
+
+
+def test_effect_summary_renumber_is_metadata(tmp_path):
+    arrangement_library(tmp_path)
+    ctx = Ctx(tmp_path, FakeClient(), {"ops": [
+        {"op": "channels.renumber", "assignments": [
+            {"channelId": "net_aaaa0001", "number": 303},
+            {"channelId": "net_aaaa0003", "number": 300}]}]})
+    result = channel_ops.op_validate_channel_changes(ctx)
+    assert result["valid"] is True, result["errors"]
+    effects = [e for e in result["effects"] if e["op"] == "channels.renumber"]
+    assert effects == [{"op": "channels.renumber", "kind": "metadata",
+                        "reindex": False, "count": 2}]
+    assert len(ctx.client.queries) == 0, \
+        "organization-only validation never queries Stash"
+
+
+def test_capabilities_advertise_arrangement():
+    from justwatch import contract
+    features = contract.capabilities("0.0.0-test")["features"]
+    assert features["arrangement"] == {
+        "version": 1,
+        "previewOperation": "PreviewChannelArrangement",
+        "renumberOpcode": "channels.renumber",
+    }
+    assert contract.OPERATIONS["previewChannelArrangement"] == \
+        "PreviewChannelArrangement"
+    assert "previewChannelArrangement" in contract.SYNC_OPERATIONS

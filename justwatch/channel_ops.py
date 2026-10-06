@@ -10,6 +10,7 @@ the EDITING and DIRECTORY-DISCOVERY surface:
 * GetChannelDefinition   sync   one full editable record
 * ValidateChannelChanges sync   typed errors + effect summary, no writes
 * PreviewChannelPool     sync   draft-correlated count + bounded sample
+* PreviewChannelArrangement sync read-only deterministic arrangement plan
 * ApplyChannelChanges    TASK   touched-records transaction + refresh
 * GetChannelApplyResult  sync   durable receipt lookup by requestId
 * GetChannelHistory      sync   bounded revision archive
@@ -28,6 +29,7 @@ import time
 from typing import Any
 
 from justwatch import channel_service, contract, criteria, library, lineup, refresh, snapshots
+from justwatch import organization
 
 
 def _as_int(value: Any, default: int) -> int:
@@ -325,6 +327,9 @@ def _effect_summary(doc: dict, ops: list[dict]) -> list[dict]:
             effects.append({"op": kind, "kind": "metadata", "reindex": False,
                             "count": len(op.get("channelIds") or []) if "channelIds" in op
                             else (2 if kind == "channel.swap" else None)})
+        elif kind == "channels.renumber":
+            effects.append({"op": kind, "kind": "metadata", "reindex": False,
+                            "count": len(op.get("assignments") or [])})
         elif kind == "group.put":
             effects.append({"op": kind, "kind": "metadata", "reindex": False})
         elif kind == "group.delete":
@@ -392,6 +397,43 @@ def op_preview_channel_pool(ctx) -> dict:
         "note": "poolCount is the source behind the channel; rotationSize is "
                 "the bounded on-air loop actually scanned playable (max 50). "
                 "The first sample item is not “now”.",
+    }
+
+
+def op_preview_channel_arrangement(ctx) -> dict:
+    """Read-only deterministic arrangement plan (the organizer's authority).
+
+    Wraps the pure planner in :mod:`justwatch.organization` against the
+    COMMITTED document: complete occupancy (archived/paused/disabled rows
+    included), one intent, optional temp-row overlays for pending creations.
+    Zero writes, zero receipts, zero journal/history entries, zero id/seed
+    allocation, zero Stash queries — bounded by construction (≤899 rows of
+    arithmetic). The response is correlated by the client-generated
+    ``correlationToken`` plus the library revision: a client discards any
+    response whose (revision, token) pair no longer matches its draft, so a
+    slow reply can never replace a newer review, and a changed revision
+    always means a NEW preview and a NEW requestId at Apply time."""
+    doc = _library(ctx)
+    args = ctx.args
+    expected = _as_int(args.get("expectedRevision"), -1)
+    token = str(args.get("correlationToken") or "").strip()
+    if not (1 <= len(token) <= 128):
+        raise ValueError(
+            "correlationToken is required (client-generated, 1-128 characters)")
+    overlays = _parse_json_arg(args.get("channels"), "channels")
+    if overlays is None:
+        overlays = []
+    if not isinstance(overlays, list):
+        raise ValueError("channels must be a list of temp-row overlays")
+    intent = _parse_json_arg(args.get("intent"), "intent")
+    body = organization.plan(
+        doc, intent=intent, overlays=overlays,
+        explain=bool(args.get("explain")), expected_revision=expected)
+    return {
+        "pluginId": contract.PLUGIN_ID,
+        "contractVersion": contract.CONTRACT_VERSION,
+        "correlationToken": token,
+        **body,
     }
 
 

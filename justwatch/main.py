@@ -50,6 +50,7 @@ SYNC_MODES = frozenset({
     "get_channel_library", "get_channel_directory", "get_channel_definition",
     "validate_channel_changes", "preview_channel_pool", "get_channel_apply_result",
     "get_channel_history", "get_channel_refresh_status", "requeue_channel_refresh",
+    "preview_channel_arrangement",
 })
 TASK_MODES = frozenset({
     "save_catalog", "refresh_data", "prepare_programming", "apply_channel_changes",
@@ -1042,6 +1043,7 @@ _HANDLERS = {
     "get_channel_history": channel_ops.op_get_channel_history,
     "get_channel_refresh_status": channel_ops.op_get_channel_refresh_status,
     "requeue_channel_refresh": channel_ops.op_requeue_channel_refresh,
+    "preview_channel_arrangement": channel_ops.op_preview_channel_arrangement,
 }
 
 

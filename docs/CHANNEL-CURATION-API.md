@@ -22,7 +22,10 @@ operation or a new optional field, negotiated through `Capabilities`.
                      "resultOperation": "GetChannelApplyResult" },
   "refreshStatus": { "version": 1, "operation": "GetChannelRefreshStatus",
                      "requeueOperation": "RequeueChannelRefresh" },
-  "poolPreview": { "version": 1, "operation": "PreviewChannelPool" }
+  "poolPreview": { "version": 1, "operation": "PreviewChannelPool" },
+  "arrangement": { "version": 1,
+                   "previewOperation": "PreviewChannelArrangement",
+                   "renumberOpcode": "channels.renumber" }
 },
 "limits": { "…": "…", "libraryChannels": 899 }   // legacy maxChannels stays 99
 ```
@@ -41,6 +44,7 @@ operation or a new optional field, negotiated through `Capabilities`.
 | GetChannelHistory | `GetChannelHistory` | sync | bounded revision archive (restore = a NEW Apply) |
 | GetChannelRefreshStatus | `GetChannelRefreshStatus` | sync | durable post-Apply refresh truth: the pending intent journal + published health per channel (`pending`, `health`, honest `null`s — readiness is never inferred) |
 | RequeueChannelRefresh | `RequeueChannelRefresh` | sync | durably enqueue ONE channel's forced recompute (the UI's Retry); the next refresh pass recomputes it past the health-current short-circuit |
+| PreviewChannelArrangement | `PreviewChannelArrangement` | sync | read-only deterministic arrangement plan (number/group changes, capacity, `choices`, submit-ready `packet`); feature-gated by `features.arrangement` |
 
 ## The library document (storage schema 1)
 
@@ -123,7 +127,8 @@ ApplyChannelChanges {
   ops: [ channel.put{channel} | channel.create{tempId, channel}
        | channel.swap{a, b} | group.put{group} | group.delete{id, moveTo?}
        | channels.move{channelIds, groupId}
-       | channels.patch{channelIds, patch{enabled|paused|archived}} ]
+       | channels.patch{channelIds, patch{enabled|paused|archived}}
+       | channels.renumber{assignments: [{channelId, number}]} ]
 }
 ```
 
@@ -156,6 +161,22 @@ ApplyChannelChanges {
   health into the CURRENT snapshot per channel. A stale worker (identity
   superseded mid-build: source, sort, seed, policy, or playable state)
   re-queues and publishes nothing.
+* `channels.renumber` (additive) is the arrangement opcode: a simultaneous
+  final-number map over EXISTING ids — cycles and 2-cycles (swaps) are legal,
+  and a creation's number never appears here (it lives in its
+  `channel.create`). Occupancy is judged on the packet-aware FINAL number
+  plan, shared by Validate and Apply, so permutations, insertions and
+  create-into-vacated are expressible in one transaction. Composition rules:
+  at most one final-number authority per channel — a `channel.put` number
+  must AGREE with a renumber assignment of the same channel (disagreement is
+  `ambiguous_assignment`), a channel may appear in at most one renumber
+  assignment, and swap ∩ renumber on the same channel is rejected
+  (`ambiguous_assignment`; standalone `channel.swap` stays fully supported).
+  Number/group-only packets are cosmetic by construction: no refresh intent,
+  no rotationVersion churn, no publication or ledger change — only
+  `presentation_signature` moves, which is the client's "directory changed,
+  playback didn't" signal. A renumber-only packet performs ZERO Stash
+  lookups.
 * `programmingMode` in GetChannelDirectory (and both legacy directories and
   Schedule) is the RESOLVED effective mode from one shared resolver: customs
   serve fixed/explore/discovery; networks serve fixed/continuing under the
@@ -181,6 +202,159 @@ ApplyChannelChanges {
 * A queued task id is NOT success: clients poll `GetChannelApplyResult` for
   the correlated receipt. `status: "unknown"` means expired-or-never-reached;
   resubmitting the SAME requestId is safe.
+
+## Channel arrangement (PreviewChannelArrangement, additive)
+
+A read-only, capability-gated sync op behind `features.arrangement`. The
+plugin's pure planner (`justwatch/organization.py`) consumes the COMMITTED
+library document plus ONE intent and returns the authoritative plan: the
+browser renders it and never re-computes collisions. Zero writes, zero
+receipts/history/journal entries, zero id/seed allocation, zero Stash
+queries (≤899 rows of arithmetic). Same document + same request ⇒
+byte-identical response, forever.
+
+### Request
+
+```jsonc
+{
+  "expectedRevision": 12,          // library revision the client reviewed
+  "correlationToken": "org-…",     // client-generated, 1-128 opaque chars, echoed verbatim
+  "explain": true,                 // optional: adds `choices` for insert/free_number
+  "intent": { … },                 // exactly one intent object; "type" discriminates
+  "channels": [                    // OPTIONAL overlays: pending creations ONLY
+    { "tempRef": "temp-1",         // 1-64 chars, never shaped like a real id, unique
+      "kind": "net",               // required (the band is fixed even uncommitted)
+      "name": "Hentai Gold",       // optional, display/ordering only
+      "groupId": "grp_…",          // optional, must exist
+      "sort": "shuffle" } ]        // optional, informational
+}
+```
+
+Overlays never carry numbers — placement is the planner's answer (`created`,
+and the `channel.create` skeleton inside `packet`). Existing channels are
+planned from the committed document; unrelated pending drafts neither occupy
+nor release numbers.
+
+### Intents (`intent.type`)
+
+| type | fields | notes |
+| --- | --- | --- |
+| `assign_group` | `channelIds`/`tempRefs`, `groupId` XOR `createGroup{name, position?, id?}` | mixed namespaces fine; without `id` the planner derives a deterministic `grp_*` so the packet can reference it |
+| `arrange_range` | selection, `range{start,end}` (one band), `order: "number"\|"name"`, `strategy: "useAvailable"` (default) `\|"exclusive"`, `outside{start,end}` REQUIRED iff exclusive (same band, disjoint) | useAvailable packs the selection into the range's free positions (outsiders stay); exclusive relocates EVERY outsider in the whole range into `outside` first — a one-time arrangement, no reservation recorded anywhere |
+| `move_block` | selection (`channelIds` then `tempRefs` — the given order IS the block order), `start` | block lands consecutively; temp rows take their block slots like existing rows (planned in `created` + create skeletons); displaced bystanders keep relative order and push upward through free slots; selected rows vacate first |
+| `insert` | `channelId` XOR `tempRef`, `number`, `direction: "up"` (default) `\|"down"` | occupied target: the contiguous run shifts toward the first free number; full band ⇒ `no_capacity` ("No free number above 899.") |
+| `shift_interval` | `range{start,end}`, `offset` (int) | selects the records CURRENTLY in those slots; gaps preserved; untouched blockers ⇒ `range_overlap`; empty interval or offset 0 ⇒ valid `noop` |
+| `relocate_occupant` | `channelId`, `to` | occupied destination ⇒ `destination_occupied` naming the holder |
+| `free_number` | `kind`, `near`, `count?` | no changes; returns `suggestions {nextHigher, nearest, firstFree, list}` |
+| `swap` | `a`, `b` | existing ids, same band (`bad_swap` otherwise) |
+
+Deterministic ordering everywhere: default selection order = ascending
+current number; `order: "name"` = casefolded name with token tie-break
+(channel id, or `t:<tempRef>` for overlay rows, which cannot collide with a
+real id). Archived/paused/disabled rows occupy their numbers and can be
+moved (flagged by `archived_rows_moved` / `paused_rows_moved` /
+`disabled_rows_moved` warnings) — filtering never frees capacity.
+
+### Response
+
+```jsonc
+{
+  "pluginId": "stash-justwatch", "contractVersion": 1,
+  "revision": 12, "libraryId": "lib_…",
+  "correlationToken": "org-…",           // echoed
+  "noop": false, "valid": true,
+  "numberChanges": [ { "channelId": "net_…", "tempRef": null,
+                       "from": 300, "to": 301, "selected": false,
+                       "reason": "insert-shift-up" } ],
+  "groupChanges":   [ { "channelId": "ch_…", "tempRef": null,
+                        "from": "grp_a", "to": "grp_b" } ],
+  "created":   [ { "tempRef": "temp-1", "number": 300, "groupId": null } ],
+  "displaced": [],                        // the selected=false subset
+  "capacity": { "kind": "net", "bandStart": 100, "bandEnd": 899,
+                "totalSlots": 800, "occupiedSlots": 513, "freeSlots": 287,
+                "neededSlots": 1, "shortfall": 0, "range": null, "outside": null },
+  "suggestions": null,                    // populated for free_number
+  "choices": null,                        // see below
+  "warnings": [ { "code": "health_numbers_stale", "message": "…" } ],
+  "errors":   [],                         // {path, code, message}
+  "packet": {                             // object when valid && !noop, else null
+    "expectedRevision": 12,               // the revision the plan was computed against
+    "ops": [ … ]                          // the submit-ready ops, below
+  }
+}
+```
+
+`reason` vocabulary: `direct`, `insert-shift-up`, `insert-shift-down`,
+`block-displaced`, `range-pack`, `exclusive-outside-relocation`,
+`shift-interval`, `relocate`, `swap`. Warning codes:
+`archived_rows_moved`, `paused_rows_moved`, `disabled_rows_moved`,
+`presentation_will_change`, `health_numbers_stale` (published health keeps
+its last-computed numbers until the next health pass — accepted, never a
+forced reindex).
+
+**Stale protection:** a revision mismatch short-circuits to a single
+`stale_revision` error carrying `currentRevision`. Combined with the echoed
+token, the client discards any response whose (revision, correlationToken)
+pair no longer matches its draft — a slow reply can never replace a newer
+review. A changed revision means a NEW preview and a NEW requestId at Apply.
+
+### `choices` (`explain: true`, insert and free_number only)
+
+```jsonc
+"choices": {
+  "free":   { "nextHigher": 43, "nearest": 41, "firstFree": 1,
+              "list": [43, 44, 45, 41, 40] },
+  "swap":   { "available": true, "with": "net_…", "withName": "…",
+              "withNumber": 300 },
+  "shiftUp":   { "available": true, "firstFree": 303, "movedCount": 3 },
+  "shiftDown": { "available": true, "firstFree": 299, "movedCount": 1 },
+  "relocate":  { "available": true }
+}
+```
+
+`swap.available` is false for a tempRef mover (no original slot); every
+unavailable choice carries `reason` (e.g. "No free number above 899.",
+"band 100-899 is full"). `choices` is null for other intents.
+
+### `packet` (server-authoritative, valid && !noop)
+
+An OBJECT: `expectedRevision` (the revision the plan was computed against)
+plus the deterministically ordered `ops` list. `null` for invalid or no-op
+plans.
+
+```jsonc
+{ "expectedRevision": 12,
+  "ops": [
+    { "op": "group.put", "group": { "id": "grp_…", "name": "Performers", "position": 3 } },
+    { "op": "channel.create", "tempId": "temp-1",
+      "channel": { "kind": "net", "number": 300, "name": "Hentai Gold" } },
+    { "op": "channels.move", "channelIds": ["net_…"], "groupId": "grp_…" },
+    { "op": "channels.renumber",
+      "assignments": [ { "channelId": "net_…", "number": 301 } ] } ] }
+```
+
+Fixed compile order: `group.put` → `channel.create` skeletons →
+`channels.move` → `channels.renumber`. Create entries are SKELETONS
+(kind/number/name/groupId only): the client merges its full pending-create
+draft (source, color, glyph — the planner never fabricates sources) before
+submit. The client MAY append explicitly opted-in `channel.put` ops for dirty
+channels whose number agrees with the renumber map (`ambiguous_assignment`
+otherwise) — never a wholesale put of a bystander. Freeze the ops once at
+Stage; a retry resubmits byte-identical ops/revision/requestId. A group
+assignment combined with a range arrangement is two previews against the
+same revision whose packet `ops` concatenate safely (group ops never touch
+numbers).
+
+### Typed error codes
+
+`stale_revision` (carries `currentRevision`), `bad_intent`, `empty_selection`,
+`unknown_channel`, `unknown_temp_ref`, `bad_temp_ref`, `duplicate_temp_ref`,
+`bad_range`, `range_overlap`, `cross_band`, `band_mixed` (lists offending ids
+— never a silent omission), `no_capacity` (with `capacity.shortfall`),
+`destination_occupied`, `duplicate_destination`, `ambiguous_assignment`,
+`bad_number`, `unknown_group`, `duplicate_group`, `bad_name`. No-op plans are
+NOT errors: `valid: true, noop: true` with empty change lists — the client
+must not spend a revision on them.
 
 ## Compatibility
 

@@ -1,0 +1,77 @@
+{
+  "flowStatus": {
+    "1": "pass",
+    "2": "pass",
+    "3": "pass",
+    "4": "pass-with-known-failures(F6)",
+    "5": "pass",
+    "6": "pass-with-known-failures(F1)",
+    "7": "pass-with-known-failures(F3)",
+    "8": "pass-with-known-failures(F5,F4)",
+    "9": "pass",
+    "10": "pass",
+    "11": "pass"
+  },
+  "failKnown": {
+    "F6": [
+      {
+        "flow": 4,
+        "name": "F6: alphabetical arrange_range plans by name (Alpha Net first)",
+        "detail": "\"intent.order: order must be 'number' or 'name'\""
+      }
+    ],
+    "F1": [
+      {
+        "flow": 6,
+        "name": "F1: editor Create group… commits in one Apply",
+        "detail": "\"1 server validation error(s) — shown under the fields. Draft intact.\""
+      },
+      {
+        "flow": 6,
+        "name": "F1(+residual): occupied create with a new group previews + stages its placement",
+        "detail": "{\"errors\":[\"no group 'grp3ae8d30029'\"],\"stageable\":false}"
+      }
+    ],
+    "F3": [
+      {
+        "flow": 7,
+        "name": "F3: after a transport failure the bar re-enables for the frozen retry",
+        "detail": "\"Apply arrangement disabled + labelled \\\"Applying…\\\" 3s after the transport abort (pending never cleared)\""
+      }
+    ],
+    "F5": [
+      {
+        "flow": 8,
+        "name": "F5: no self-inflicted revision conflict inside one tab",
+        "detail": "{\"bulkConflictToast\":1,\"editorConflictBar\":0,\"note\":\"the second submission ran against an un-refreshed revision instead of waiting for the first receipt\"}"
+      }
+    ],
+    "F4": [
+      {
+        "flow": 8,
+        "name": "F4: staging during flight does not corrupt drafts with the never-committed plan",
+        "detail": "{\"draftNumber\":401,\"serverTruth\":299,\"note\":\"draft was rebased by the SECOND (discarded) staging beforeAfter\"}"
+      }
+    ]
+  },
+  "failNew": [],
+  "failHarness": [],
+  "notes": [
+    "finding(c) empty-create-source: the number-resolution sheet auto-opens right after \"Create draft\", and its frozen packet merges the draft whose source is still the empty criteria stub — Apply arrangement is then REJECTED server-side (validation_failed, ops[0].channel.source empty_rules; verified against the real library.apply_transaction). The editor Apply path pre-checks this locally via validateDraft, but the arrangement path has no equivalent local check on merged create drafts. Recovery is typed and the toast surfaces it; suggested fix: run a validateDraft-style check over merged channel.create drafts before enabling Apply arrangement / Stage (or warn in the sheet).",
+    "finding(c) review-row reason wrap (visual): in the organize Review list the reason text renders inside the CHANNEL cell under the glyph tile (not the REASON column) and overflows the fixed 36px WindowedList row stride — see shots/dark-03-organize-review.png and shots/light-02-organize-review.png (both themes, .jw-review-row). Data is correct; layout only. Candidate for Kimi's fix round: give .jw-review-reason a bounded grid column / no-wrap-ellipsis.",
+    "flow6b residual: with a client-generated group id fixed (grp_ prefix), the numres overlay STILL references an uncommitted group and organization._rows types unknown_group (organization.py:110-112) — the sheet cannot preview. Errors: [\"no group 'grp3ae8d30029'\"] — needs an organizer/UI decision (overlay groupId created in the same packet, or defer the groupId until the group commits).",
+    "flow8 note: after Undo the bar unmounts, so Redo is only reachable by opening an organize sheet first (keyboard scope) — minor affordance gap, not a data bug.",
+    "flow8c post-state: org staged=null pending=false (the second staging was silently discarded by the F4 path)"
+  ],
+  "shots": [
+    "dark-01-main",
+    "dark-02-numres-sheet",
+    "dark-03-organize-review",
+    "dark-04-staged-bar",
+    "dark-05-narrow-actions",
+    "dark-06-zoom-200",
+    "light-01-main",
+    "light-02-organize-review",
+    "light-03-staged-bar"
+  ]
+}
