@@ -11,10 +11,14 @@
 //
 //   node browser-verify-org.cjs [outDir]        # full dry run
 //   FLOW=3 node browser-verify-org.cjs          # one flow (debug)
-//   STRICT=1 node ...                           # non-zero exit on unknown failures
 //
-// Current-tree expectation: flows touching F1/F3/F4/F5/F6 fail with
-// [known-unfixed Fx] markers; the FINAL green run happens after Kimi's fixes.
+// REMEDIATION GATE (R12, 2026-10-06): the process exits NONZERO when ANY
+// behavioral assertion fails — failKnown AND failNew — or when any flow
+// crashes. There are no expected failures on a fixed tree: the remediation
+// converted every F1/F3/F4/F5/F6 known-failure marker into a passing
+// assertion. failKnown reporting is kept so a future expected-failure can
+// still be distinguished from a new finding in the JSON, but it can NEVER
+// satisfy the gate.
 const fs = require('fs');
 const path = require('path');
 const {execFile} = require('child_process');
@@ -33,8 +37,7 @@ const log = (line) => { console.log(line); fs.appendFileSync(path.join(SHOTS, 'd
 
 // ---------------------------------------------------------------- report ----
 const report = {flowStatus: {}, failKnown: {}, failNew: [], failHarness: [], notes: [], shots: []};
-report.notes.push('finding(c) empty-create-source: the number-resolution sheet auto-opens right after "Create draft", and its frozen packet merges the draft whose source is still the empty criteria stub — Apply arrangement is then REJECTED server-side (validation_failed, ops[0].channel.source empty_rules; verified against the real library.apply_transaction). The editor Apply path pre-checks this locally via validateDraft, but the arrangement path has no equivalent local check on merged create drafts. Recovery is typed and the toast surfaces it; suggested fix: run a validateDraft-style check over merged channel.create drafts before enabling Apply arrangement / Stage (or warn in the sheet).');
-report.notes.push('finding(c) review-row reason wrap (visual): in the organize Review list the reason text renders inside the CHANNEL cell under the glyph tile (not the REASON column) and overflows the fixed 36px WindowedList row stride — see shots/dark-03-organize-review.png and shots/light-02-organize-review.png (both themes, .jw-review-row). Data is correct; layout only. Candidate for Kimi\'s fix round: give .jw-review-reason a bounded grid column / no-wrap-ellipsis.');
+report.notes.push('remediation rerun (2026-10-06): expectations updated to the FIXED tree — the 2026-10-05 review\'s F1/F3/F4/F5/F6 known-failure markers and the empty-create-source/review-wrap notes are now passing assertions (R1–R11); flows 12–21 are the new R1–R10 real-bundle regressions. The gate exits nonzero on ANY behavioral failure or crash (R12).');
 function check(name, ok, detail) {
   log('    ' + (ok ? 'ok   ' : 'FAIL ') + name + (ok || detail == null ? '' : ' — ' + JSON.stringify(detail).slice(0, 300)));
   if (ok) return true;
@@ -43,7 +46,10 @@ function check(name, ok, detail) {
 }
 let currentFlow = null;
 function checkKnown(name, ok, fix, detail) {
-  if (ok) { log('    ok   ' + name + ' (already fixed?)'); return true; }
+  // Mechanism kept for known-vs-new FAILURE REPORTING only. Post-remediation
+  // there are no expected failures: a checkKnown failure fails the gate
+  // exactly like a new one (R12).
+  if (ok) { log('    ok   ' + name); return true; }
   log('    known(' + fix + ') ' + name + ' — ' + JSON.stringify(detail).slice(0, 300));
   (report.failKnown[fix] = report.failKnown[fix] || []).push({flow: currentFlow, name, detail: JSON.stringify(detail).slice(0, 500)});
   return false;
@@ -117,7 +123,8 @@ async function boot(browser, opts) {
   await driverRaw(dataDir, 'seed', buildFixture());
   const state = {
     dataDir, errors: [], console: [], previews: [], applies: [],
-    conflictBump: 0, abortNextTask: 0, holdApplyMs: null, bumpSeq: 0,
+    conflictBump: 0, abortNextTask: 0, abortAfterTask: 0, holdApplyMs: null,
+    bumpSeq: 0, previewDelays: [],
     arrangement: o.arrangement !== false,
   };
   const drv = (cmd, args) => driverRaw(dataDir, cmd, args);
@@ -182,7 +189,9 @@ async function boot(browser, opts) {
     org: () => api.session('jw-studio-org-v1:' + LIBRARY_ID),
     armConflictBump: () => { state.conflictBump++; },
     armAbort: () => { state.abortNextTask++; },
+    armAbortAfter: () => { state.abortAfterTask++; },
     armHoldApply: (ms) => { state.holdApplyMs = ms; },
+    armPreviewDelay: (match, ms, once) => { state.previewDelays.push({match, ms, once: once !== false}); },
   };
   return api;
 }
@@ -205,6 +214,10 @@ async function handleGql(state, drv, body, vars) {
       requestId: a.requestId, expectedRevision: a.expectedRevision, ops: a.ops, actor: 'channel-studio',
     });
     state.applies.push({requestId: a.requestId, expected: a.expectedRevision, ops: JSON.parse(a.ops), receipt});
+    if (state.abortAfterTask > 0) {
+      state.abortAfterTask--;
+      return route.abort('connectionreset'); // R6b: committed, response lost
+    }
     return {runPluginTask: 'job-' + state.applies.length};
   }
   if (body.query.includes('runPluginOperation')) {
@@ -215,8 +228,23 @@ async function handleGql(state, drv, body, vars) {
       case 'GetChannelDefinition': return {runPluginOperation: await drv('get_definition', a)};
       case 'ValidateChannelChanges': return {runPluginOperation: await drv('validate', a)};
       case 'PreviewChannelArrangement': {
+        // R1 support: hold a matching response so an older/newer preview can
+        // land out of order. Rules are {match(intentArgs), ms, once?}.
+        for (let i = 0; i < state.previewDelays.length; i++) {
+          const d = state.previewDelays[i];
+          let hit = false;
+          try { hit = !!d.match({intent: JSON.parse(a.intent), args: a}); } catch (e) { hit = false; }
+          if (hit) {
+            if (d.once) state.previewDelays.splice(i, 1);
+            await settle(d.ms);
+            break;
+          }
+        }
         const out = await drv('preview', a);
+        let groups = [];
+        try { groups = a.groups ? JSON.parse(a.groups) : []; } catch (e) { groups = []; }
         state.previews.push({intent: JSON.parse(a.intent), overlays: a.channels ? JSON.parse(a.channels) : [],
+          groups, expectedRevision: a.expectedRevision,
           valid: out.valid, noop: out.noop, errors: out.errors});
         return {runPluginOperation: out};
       }
@@ -260,12 +288,18 @@ const waitChoices = async (api) => {
   await api.page.locator('.jw-choice').first().waitFor({timeout: 20000});
   await settle(250);
 };
+// The Stage button is each sheet footer's ONLY .jw-btn-primary. Its label is
+// dynamic since UX2 ("Stage N channel moves" / "Stage arrangement" /
+// "Planning…"), so locate by class, not by name.
+const stageButton = (api, sheetClass) =>
+  api.page.locator('.' + sheetClass + ' button.jw-btn-primary').first();
 async function stageFromSheet(api, sheetClass) {
-  await api.page.locator('.' + sheetClass).getByRole('button', {name: 'Stage arrangement'}).click();
+  await stageButton(api, sheetClass).click();
   await api.page.locator('.jw-arrange-bar').waitFor({timeout: 10000});
 }
+const arrangeBar = (api) => api.page.locator('.jw-arrange-bar');
 async function applyArrangement(api, revAfter) {
-  await api.page.locator('.jw-arrange-bar').getByRole('button', {name: 'Apply arrangement'}).click();
+  await arrangeBar(api).getByRole('button', {name: /^Apply/}).click();
   try {
     await api.page.locator('.jw-toast', {hasText: 'Arrangement applied at r'}).first().waitFor({timeout: 30000});
   } catch (e) {
@@ -275,7 +309,24 @@ async function applyArrangement(api, revAfter) {
       ' toasts=' + JSON.stringify(await api.page.locator('.jw-toast').allTextContents()));
   }
   await settle(400);
-  if (revAfter != null) check('revision advanced to ' + revAfter, await api.rev() === revAfter, await api.rev());
+  if (revAfter != null) {
+    // the committed revision reaches the chip via refreshLibrary — poll,
+    // never a single read (R5c's bulk path was flaky here).
+    let seen = await api.rev();
+    for (let i = 0; i < 20 && seen !== revAfter; i++) { await settle(300); seen = await api.rev(); }
+    check('revision advanced to ' + revAfter, seen === revAfter, seen);
+  }
+}
+// In-flight marker since R6: a status pill ("Submitting…"/"Applying…"), NOT
+// a disabled Apply button — the button leaves the DOM while a request runs.
+const applyingPill = (api) => api.page.locator('.jw-arrange-bar .jw-pill-applying');
+// R6 unknown-outcome state: the bar must offer Check result / Retry same
+// Apply and never stay stuck on a phantom "Applying…".
+async function waitUnknownOutcome(api) {
+  await api.page.locator('.jw-arrange-stale', {hasText: 'outcome is unknown'}).waitFor({timeout: 15000});
+  await api.page.locator('.jw-arrange-bar').getByRole('button', {name: 'Check result'}).waitFor({timeout: 5000});
+  await api.page.locator('.jw-arrange-bar').getByRole('button', {name: 'Retry same Apply'}).waitFor({timeout: 5000});
+  await settle(200);
 }
 // The editor's rules facet: pick one tag so a new channel's source passes the
 // server's stored-shape validation (empty criteria is a typed error).
@@ -436,7 +487,7 @@ async function flow2(browser) {
     (await page.locator('.jw-review-row', {hasText: 'Occupied 300'}).textContent()).includes('displaced') &&
     (await page.locator('.jw-review-row', {hasText: 'Occupied 300'}).textContent()).includes('300 → 303'));
   const meta = await page.locator('.jw-review-tools .jw-hint').textContent();
-  check('review meta counts 1 displaced bystander', meta.includes('2 affected rows') && meta.includes('1 displaced bystander'), meta);
+  check('review meta counts 1 displaced bystander', meta.includes('1 selected channel') && meta.includes('1 other moves'), meta);
   await page.locator('.jw-review-row', {hasText: 'Chart Three'}).getByRole('button', {name: 'include draft…'}).click();
   check('draft opt-in latches', await page.locator('.jw-review-row', {hasText: 'Chart Three'}).getByRole('button', {name: 'draft included ✓'}).count() === 1);
   await stageFromSheet(api, 'jw-sheet-organize');
@@ -469,7 +520,7 @@ async function flow3(browser) {
   await page.locator('#jw-org-bstart').fill('300');
   await waitReview(api, 6);
   const meta = await page.locator('.jw-review-tools .jw-hint').textContent();
-  check('review lists all 6 rows / 3 displaced bystanders', meta.includes('6 affected rows') && meta.includes('3 displaced bystanders'), meta);
+  check('review lists all 6 rows / 3 displaced bystanders', meta.includes('3 selected channels move') && meta.includes('3 others move'), meta);
   for (const occ of ['Occupied 300', 'Occupied 301', 'Occupied 302']) {
     check('displaced row reviewed: ' + occ,
       (await page.locator('.jw-review-row', {hasText: occ}).textContent()).includes('pushed up by the incoming block'));
@@ -497,7 +548,10 @@ async function flow4(browser) {
   await openGroupMenu(api, 'Performers');
   await page.getByRole('menuitem', {name: 'Arrange numbers…'}).click();
   await page.locator('.jw-sheet-organize').waitFor();
-  check('group scope preselected (2 channels)', (await page.locator('.jw-scope-line').first().textContent()).includes('2 channels in scope'));
+  check('group scope preselected (2 channels)',
+    (await page.locator('.jw-task-scope-line').first().textContent()).includes('Performers') &&
+    (await page.locator('.jw-task-scope-line').first().textContent()).includes('2 channel'),
+    await page.locator('.jw-task-scope-line').first().textContent().catch(() => null));
   await page.locator('#jw-org-rstart').fill('300');
   await page.locator('#jw-org-rend').fill('699');
   await waitReview(api, 2);
@@ -505,7 +559,8 @@ async function flow4(browser) {
   check('capacity line exact', cap.includes('holds 400 slots') && cap.includes('selection needs 2') &&
     cap.includes('5 outsiders keep their numbers'), cap);
   check('outsiders 320/450 untouched in review', await page.locator('.jw-review-row', {hasText: 'Outsider'}).count() === 0);
-  // F6 probe: the Alphabetical chip currently sends order:"alpha" (rejected)
+  // R7 (was known-fail F6): the Alphabetical chip now sends order:"name" —
+  // the planner must accept it and plan by name (Alpha Net first).
   await page.getByRole('button', {name: 'Alphabetical (A–Z, ties by channel id)'}).click();
   await settle(1600);
   const alphaRows = await page.locator('.jw-review-row').count();
@@ -516,8 +571,12 @@ async function flow4(browser) {
   } else {
     alphaDetail = await page.locator('.jw-review-errors').textContent().catch(() => null);
   }
-  checkKnown('F6: alphabetical arrange_range plans by name (Alpha Net first)',
-    alphaOk, 'F6', alphaDetail || (alphaRows + ' review rows'));
+  check('R7: alphabetical arrange_range plans by name (Alpha Net first)',
+    alphaOk, alphaDetail || (alphaRows + ' review rows'));
+  check('R7: frontend sends the canonical order enum ("name", never "alpha")',
+    api.state.previews.length > 0 &&
+    api.state.previews[api.state.previews.length - 1].intent.order === 'name',
+    api.state.previews[api.state.previews.length - 1] || 'no previews');
   await page.getByRole('button', {name: 'Keep current number order'}).click();
   await waitReview(api, 2);
   await stageFromSheet(api, 'jw-sheet-organize');
@@ -537,9 +596,10 @@ async function flow4(browser) {
   await page.locator('.jw-scope-line', {hasText: 'SHORT BY 3'}).waitFor({timeout: 20000});
   const shortLine = await page.locator('.jw-scope-line', {hasText: 'SHORT BY 3'}).textContent();
   check('shortfall line carries the exact number', shortLine.includes('SHORT BY 3') && shortLine.includes('holds 3 slots'), shortLine);
-  check('staging refused while short', await page.locator('.jw-sheet-organize').getByRole('button', {name: 'Stage arrangement'}).isDisabled());
+  check('staging refused while short', await stageButton(api, 'jw-sheet-organize').isDisabled());
   await page.getByRole('button', {name: 'Close — keep staging'}).click();
-  check('nothing staged by the refused plan', await page.locator('.jw-arrange-bar').count() === 0);
+  check('nothing staged by the refused plan',
+    (await page.locator('.jw-arrange-bar:not(.jw-arrange-bar-empty)').count()) === 0);
   check('no page errors', api.state.errors.length === 0, api.state.errors);
   await api.context.close();
 }
@@ -557,8 +617,9 @@ async function flow5(browser) {
   await page.locator('#jw-org-rstart').fill('171');
   await page.locator('#jw-org-rend').fill('180');
   await waitReview(api, 1);
-  await page.getByRole('button', {name: 'Make this range exclusive (one time)'}).click();
-  check('one-time copy present', await page.locator('.jw-hint', {hasText: 'one-time arrangement, not a permanent reservation'}).count() === 1);
+  // UX3: the exclusive strategy is a plain-language chip pair now.
+  await page.getByRole('button', {name: 'Move other channels out of this range'}).click();
+  check('one-time copy present', await page.locator('.jw-hint', {hasText: 'one-time arrangement'}).count() === 1);
   await page.locator('#jw-org-ostart').fill('200');
   await page.locator('#jw-org-oend').fill('210');
   await waitReview(api, 3);
@@ -578,7 +639,7 @@ async function flow5(browser) {
   await api.context.close();
 }
 
-// 6. Create group + assign in ONE Apply (F1 territory).
+// 6. Create group + assign in ONE Apply (R5 territory).
 async function flow6(browser) {
   const api = await boot(browser);
   const {page} = api;
@@ -587,32 +648,58 @@ async function flow6(browser) {
   await page.locator('#f-group').selectOption('__create__');
   await page.locator('input[aria-label="New group name"]').last().fill('Fresh Crew');
   await page.locator('#apply-btn').click();
-  await settle(1800);
-  const applied = (await page.locator('.jw-apply-state').textContent()).includes('Applied at r');
-  checkKnown('F1: editor Create group… commits in one Apply', applied, 'F1',
-    await page.locator('.jw-apply-state').textContent());
-  if (applied) {
-    const doc = await api.doc();
-    check('group created + assigned', doc.groups.some((g) => g.name === 'Fresh Crew') &&
-      doc.channels.find((c) => c.id === 'net_a0000001').groupId ===
-      doc.groups.find((g) => g.name === 'Fresh Crew').id);
-  }
+  await page.locator('.jw-apply-state', {hasText: 'Applied at r'}).waitFor({timeout: 30000});
+  check('R5a: editor Create group… commits in one Apply',
+    api.state.applies.length === 1 && api.state.applies[0].receipt.status === 'committed',
+    api.state.applies.map((a) => a.receipt.status));
+  check('R5a: client group id uses the grp_ prefix (storage-compatible)',
+    api.state.applies[0].ops.some((op) => op.op === 'group.put' && /^grp_[0-9a-f]{8}$/.test(op.group.id)),
+    api.state.applies[0].ops.filter((o) => o.op === 'group.put'));
+  const doc = await api.doc();
+  const crew = doc.groups.find((g) => g.name === 'Fresh Crew');
+  check('R5a: group created + assigned', !!crew &&
+    doc.channels.find((c) => c.id === 'net_a0000001').groupId === crew.id,
+    {groups: doc.groups.map((g) => g.name), chartOne: (doc.channels.find((c) => c.id === 'net_a0000001') || {}).groupId});
   // (b) create-at-occupied referencing a packet-created group: the sheet's
-  // overlay references an uncommitted group.
+  // overlay references an uncommitted group, and the preview must model it
+  // via the "groups" argument (R5) — no unknown_group error.
   await openNewChannel(api, {number: 300, name: 'Renumbered Crew', createGroup: 'Renumbered Crew'});
   await page.getByRole('button', {name: 'Create draft'}).click();
   await page.locator('.jw-sheet-numres').waitFor();
   await settle(1800);
   const sheetErrs = await page.locator('.jw-sheet-numres .jw-error-text').allTextContents();
-  const stageable = await page.locator('.jw-sheet-numres')
-    .getByRole('button', {name: 'Stage arrangement'}).isEnabled();
-  checkKnown('F1(+residual): occupied create with a new group previews + stages its placement',
-    stageable && sheetErrs.length === 0, 'F1', {errors: sheetErrs, stageable});
-  if (sheetErrs.length) {
-    report.notes.push('flow6b residual: with a client-generated group id fixed (grp_ prefix), the numres overlay STILL references an ' +
-      'uncommitted group and organization._rows types unknown_group (organization.py:110-112) — the sheet cannot preview. Errors: ' +
-      JSON.stringify(sheetErrs) + ' — needs an organizer/UI decision (overlay groupId created in the same packet, or defer the groupId until the group commits).');
-  }
+  check('R5b: occupied create with a new group previews cleanly (no unknown_group)',
+    sheetErrs.length === 0, sheetErrs);
+  check('R5b: preview carried the pending group via the groups argument',
+    api.state.previews.length > 0 &&
+    api.state.previews.some((p) => p.groups.some((g) => g.name === 'Renumbered Crew' && /^grp_/.test(g.id))),
+    api.state.previews.map((p) => p.groups));
+  check('R5b: UX4 — the sheet demands complete rules before placing a bare draft',
+    await page.locator('.jw-sheet-numres .jw-note-warn', {hasText: 'rules'}).count() === 1 &&
+    await stageButton(api, 'jw-sheet-numres').isDisabled());
+  await page.getByRole('button', {name: 'Cancel — keep drafts'}).click();
+  await settle(400);
+  await authorTagRule(api, 'Tag 2');
+  await page.getByRole('button', {name: 'Move / insert…'}).first().click();
+  await page.locator('.jw-sheet-numres').waitFor();
+  await waitChoices(api);
+  const sheetErrs2 = await page.locator('.jw-sheet-numres .jw-error-text').allTextContents();
+  check('R5b: reopened placement sheet still previews the pending group cleanly',
+    sheetErrs2.length === 0, sheetErrs2);
+  await stageFromSheet(api, 'jw-sheet-numres');
+  await applyArrangement(api, REVISION + 2);
+  check('R5b: ONE Apply creates the group AND places the channel',
+    api.state.applies.length === 2 &&
+    api.state.applies[1].ops[0].op === 'group.put' &&
+    api.state.applies[1].ops.some((op) => op.op === 'channel.create'),
+    api.state.applies[1].ops);
+  const doc2 = await api.doc();
+  const crew2 = doc2.groups.find((g) => g.name === 'Renumbered Crew');
+  const placed = crew2 ? doc2.channels.find((c) => c.groupId === crew2.id) : null;
+  check('R5b: group + channel committed together at 300',
+    !!crew2 && /^grp_/.test(crew2.id) && placed && placed.number === 300 &&
+    doc2.channels.find((c) => c.name === 'Occupied 302').number === 303,
+    {crew2: crew2 && crew2.id, placed: placed && placed.number});
   check('no page errors', api.state.errors.length === 0, api.state.errors);
   await api.context.close();
 }
@@ -634,7 +721,7 @@ async function flow7(browser) {
   const firstRequestId = (await api.org()).staged.packet.requestId;
 
   api.armConflictBump();
-  await page.locator('.jw-arrange-bar').getByRole('button', {name: 'Apply arrangement'}).click();
+  await arrangeBar(api).getByRole('button', {name: /^Apply/}).click();
   await page.locator('.jw-toast', {hasText: 'Revision conflict'}).first().waitFor({timeout: 30000});
   check('conflict receipt recorded', api.state.applies[0].receipt.error === 'revision_conflict' &&
     api.state.applies[0].receipt.currentRevision === REVISION + 1, api.state.applies[0].receipt);
@@ -658,22 +745,29 @@ async function flow7(browser) {
     {base: org.staged.baseRevision, req: org.staged.packet.requestId});
 
   // lost response: the submit never reaches the server; the frozen requestId
-  // must replay exactly once.
+  // must be kept and offered as Check result / Retry same Apply (R6).
   api.armAbort();
-  await page.locator('.jw-arrange-bar').getByRole('button', {name: 'Apply arrangement'}).click();
-  await settle(3000);
-  const btn = page.locator('.jw-arrange-bar button', {hasText: 'Applying…'});
-  const stuck = await btn.count() > 0 && await btn.first().isDisabled();
-  checkKnown('F3: after a transport failure the bar re-enables for the frozen retry', !stuck, 'F3',
-    stuck ? 'Apply arrangement disabled + labelled "Applying…" 3s after the transport abort (pending never cleared)' : 'bar recovered');
-  if (!stuck) {
-    await page.locator('.jw-arrange-bar').getByRole('button', {name: 'Apply arrangement'}).click();
-    await page.locator('.jw-toast', {hasText: 'Arrangement applied at r'}).first().waitFor({timeout: 30000});
-    const mine = api.state.applies.filter((a) => a.requestId === org.staged.packet.requestId);
-    check('same requestId resubmitted', mine.length === 1 && mine[0].requestId === org.staged.packet.requestId, mine.map((m) => m.requestId));
-    check('revision advanced exactly once', await api.rev() === REVISION + 2 && await api.number('Chart One') === 303,
-      {rev: await api.rev(), chartOne: await api.number('Chart One')});
-  }
+  await arrangeBar(api).getByRole('button', {name: /^Apply/}).click();
+  await waitUnknownOutcome(api);
+  check('R6: transport failure keeps the packet + requestId and offers Check/Retry',
+    api.state.applies.length === 1 && !!(await api.org()).pending, {
+      applies: api.state.applies.length,
+      pending: !!(await api.org()).pending,
+      pill: await applyingPill(api).count(),
+    });
+  const unknownRequestId = (await api.org()).pending.requestId;
+  await arrangeBar(api).getByRole('button', {name: 'Check result'}).click();
+  await page.locator('.jw-toast', {hasText: 'Still no result'}).first().waitFor({timeout: 15000});
+  check('R6: honest unknown after Check result (never submitted)',
+    (await api.org()).pending && (await api.org()).pending.requestId === unknownRequestId &&
+    api.state.applies.length === 1);
+  await arrangeBar(api).getByRole('button', {name: 'Retry same Apply'}).click();
+  await page.locator('.jw-toast', {hasText: 'Arrangement applied at r'}).first().waitFor({timeout: 30000});
+  const mine = api.state.applies.filter((a) => a.requestId === unknownRequestId);
+  check('same requestId resubmitted', mine.length === 1 && mine[0].requestId === unknownRequestId,
+    mine.map((m) => m.requestId));
+  check('revision advanced exactly once', await api.rev() === REVISION + 2 && await api.number('Chart One') === 303,
+    {rev: await api.rev(), chartOne: await api.number('Chart One')});
   check('no page errors', api.state.errors.length === 0, api.state.errors);
   await api.context.close();
 }
@@ -696,8 +790,9 @@ async function flow8(browser) {
     await api.number('Chart Two v1') !== null && (await api.drafts()).net_a0000002.draft.name === 'Chart Two v2',
     {server: await api.number('Chart Two v1'), draft: (await api.drafts()).net_a0000002.draft.name});
 
-  // (8b) F5: editor Apply bypasses the submit coordinator — a bulk action
-  // during the editor's flight self-inflicts a revision conflict.
+  // (8b) R9 (was known-fail F5): the editor Apply rides the SAME submission
+  // coordinator — a bulk action queued during its flight serializes behind
+  // it and never self-inflicts a revision conflict.
   api.armHoldApply(4500);
   await page.locator('#apply-btn').click();
   await page.locator('.jw-apply-state', {hasText: 'Applying…'}).waitFor({timeout: 10000});
@@ -705,19 +800,23 @@ async function flow8(browser) {
   await selectRows(api, ['Chart One']);
   await page.locator('.jw-bulk-bar').getByRole('button', {name: 'Pause', exact: true}).click();
   await page.locator('.jw-overlay .jw-dialog').getByRole('button', {name: 'Apply', exact: true}).click();
-  await settle(6500); // hold (4.5s) elapses; the second path's outcome surfaces
+  for (let i = 0; i < 40; i++) {
+    const one = ((await api.doc()).channels.find((c) => c.id === 'net_a0000001') || {});
+    if (one.paused === true && (await api.rev()) === REVISION + 3) break;
+    await settle(500);
+  }
   const conflictToast = await page.locator('.jw-toast', {hasText: 'Revision conflict'}).count();
   const editorConflict = await page.locator('.jw-apply-state', {hasText: 'Revision conflict'}).count();
-  checkKnown('F5: no self-inflicted revision conflict inside one tab', conflictToast === 0 && editorConflict === 0, 'F5',
-    {bulkConflictToast: conflictToast, editorConflictBar: editorConflict,
-     note: 'the second submission ran against an un-refreshed revision instead of waiting for the first receipt'});
-  await page.getByRole('button', {name: 'Keep editing my draft'}).click().catch(() => {});
-  await settle(800);
-  if (conflictToast === 0) {
-    check('bulk path landed (Chart One paused)', ((await api.doc()).channels.find((c) => c.id === 'net_a0000001') || {}).paused === true);
-  }
+  check('R9: no self-inflicted revision conflict inside one tab', conflictToast === 0 && editorConflict === 0,
+    {bulkConflictToast: conflictToast, editorConflictBar: editorConflict});
+  check('R9: both submissions committed, the second at the first receipt\'s revision',
+    api.state.applies.length === 3 &&
+    api.state.applies[1].receipt.status === 'committed' && String(api.state.applies[1].expected) === String(REVISION + 1) &&
+    api.state.applies[2].receipt.status === 'committed' && String(api.state.applies[2].expected) === String(REVISION + 2),
+    api.state.applies.map((a) => ({e: a.expected, s: a.receipt.status})));
+  check('bulk path landed (Chart One paused)', ((await api.doc()).channels.find((c) => c.id === 'net_a0000001') || {}).paused === true);
 
-  // (ii) undo/redo of staging
+  // (ii) undo/redo of staging (UX7: the bar persists as an empty state)
   await openEditor(api, 'Chart One');
   await page.getByRole('button', {name: 'Move / insert…'}).first().click();
   await page.locator('.jw-sheet-numres').waitFor();
@@ -725,15 +824,17 @@ async function flow8(browser) {
   await page.locator('.jw-hint', {hasText: '303 is free.'}).waitFor({timeout: 15000});
   await stageFromSheet(api, 'jw-sheet-numres');
   await page.locator('.jw-arrange-bar').getByRole('button', {name: 'Undo'}).click();
-  check('undo clears the staging bar', await page.locator('.jw-arrange-bar').count() === 0);
+  check('undo clears the staging (bar unmounts or drops to its empty state)',
+    (await page.locator('.jw-arrange-bar:not(.jw-arrange-bar-empty)').count()) === 0);
   // redo is reachable while an organize sheet holds the keyboard scope
   await page.getByRole('button', {name: 'Organize channels…'}).click();
   await page.locator('.jw-sheet-organize').waitFor();
   await page.keyboard.press('Control+Shift+z');
   await settle(400);
   await page.getByRole('button', {name: 'Close — keep staging'}).click();
-  check('redo restores the staged bar', await page.locator('.jw-arrange-bar').count() === 1);
-  report.notes.push('flow8 note: after Undo the bar unmounts, so Redo is only reachable by opening an organize sheet first (keyboard scope) — minor affordance gap, not a data bug.');
+  check('redo restores the staged bar',
+    await page.locator('.jw-arrange-bar.jw-arrange-bar-empty').count() === 0 &&
+    (await arrangeBar(api).textContent()).includes('303'));
   await page.locator('.jw-arrange-bar').getByRole('button', {name: 'Discard'}).click();
   await page.locator('.jw-overlay .jw-dialog').getByRole('button', {name: 'Discard'}).click();
   await settle(300);
@@ -776,36 +877,46 @@ async function flow8(browser) {
   check('same-field conflict names itself', (await page.locator('.jw-rebase-note').textContent()).includes('The server also changed name'));
   check('draft keeps the local value', ((await api.drafts()).net_a0000003.draft.name) === 'Zeta Three');
 
-  // (8c) F4: staging while an arrangement Apply is in flight
+  // (8c) R2 (was known-fail F4): staging while an arrangement Apply is in
+  // flight — the fixed frontend REFUSES it (F3 guard); the in-flight plan
+  // commits and no draft ever sees an uncommitted map.
   await openEditor(api, 'Chart One');
   await page.getByRole('button', {name: 'Move / insert…'}).first().click();
   await page.locator('.jw-sheet-numres').waitFor();
   await page.locator('#jw-numres-dest').fill('305');
   await page.locator('.jw-hint', {hasText: '305 is free.'}).waitFor({timeout: 15000});
+  await page.locator('.jw-sheet-numres button.jw-btn-primary:not([disabled])').waitFor({timeout: 15000});
   await stageFromSheet(api, 'jw-sheet-numres');
-  api.armHoldApply(6500);
-  await page.locator('.jw-arrange-bar').getByRole('button', {name: 'Apply arrangement'}).click();
-  await page.locator('.jw-arrange-bar button', {hasText: 'Applying…'}).waitFor({timeout: 5000});
-  // second arrangement staged DURING the flight
+  api.armHoldApply(6000);
+  await arrangeBar(api).getByRole('button', {name: /^Apply/}).click();
+  await applyingPill(api).waitFor({timeout: 5000});
+  // second arrangement DURING the flight: staged, but its Apply-start Stage
+  // would refuse — assert the guard refuses the STAGE itself.
   await page.getByRole('button', {name: 'Organize channels…'}).click();
   await page.locator('.jw-sheet-organize').waitFor();
+  // part (iii) left a move_block cached form — restore the range action first
+  await page.getByRole('button', {name: 'Arrange within range'}).click();
   await page.getByRole('button', {name: 'A number interval'}).click();
   await page.locator('#jw-org-scstart').fill('298');
   await page.locator('#jw-org-scend').fill('299');
   await page.locator('#jw-org-rstart').fill('400');
   await page.locator('#jw-org-rend').fill('401');
   await waitReview(api, 2);
-  await page.locator('.jw-sheet-organize').getByRole('button', {name: 'Stage arrangement'}).click();
-  await settle(5500); // let the held apply land
+  await page.locator('.jw-sheet-organize button.jw-btn-primary').click();
+  await page.locator('.jw-toast', {hasText: 'still unresolved'}).first().waitFor({timeout: 10000});
+  check('R2/F4: the during-flight Stage is refused — the submitted plan is never overwritten',
+    (await page.locator('.jw-sheet-organize').count()) === 1 &&
+    ((await api.org()).staged.label || '').includes('305'));
+  await page.getByRole('button', {name: 'Close — keep staging'}).click();
+  await settle(4500); // let the held apply land
   await page.locator('.jw-toast', {hasText: 'Arrangement applied at r'}).first().waitFor({timeout: 30000});
-  check('server committed the ORIGINAL in-flight plan', await api.number('Chart One') === 305, await api.number('Chart One'));
+  check('server committed the ORIGINAL in-flight plan', (await api.number('Chart One')) === 305, await api.number('Chart One'));
   const d3c = (await api.drafts()).net_a0000003;
-  checkKnown('F4: staging during flight does not corrupt drafts with the never-committed plan',
-    d3c.draft.number === 299, 'F4',
-    {draftNumber: d3c.draft.number, serverTruth: 299, note: 'draft was rebased by the SECOND (discarded) staging beforeAfter'});
+  check('R2: bystander drafts untouched by the refused plan (299, Zeta Three)',
+    d3c && d3c.draft.number === 299 && d3c.draft.name === 'Zeta Three', d3c && d3c.draft);
   const orgC = await api.org();
-  report.notes.push('flow8c post-state: org staged=' + JSON.stringify(orgC.staged && orgC.staged.label) +
-    ' pending=' + JSON.stringify(!!orgC.pending) + ' (the second staging was silently discarded by the F4 path)');
+  check('R2: pending resolved; nothing of the refused staging leaked',
+    orgC.pending === null, {pending: !!orgC.pending});
   check('no page errors', api.state.errors.length === 0, api.state.errors);
   await api.context.close();
 }
@@ -883,6 +994,21 @@ async function flow10(browser) {
   await page.locator('#jw-org-rend').fill('310');
   await waitReview(api, 1);
   await api.shot('dark-03-organize-review');
+  // R11: header and row cells must share the same four grid columns —
+  // Channel | Number | Group | Why — no cell slipping under the wrong head.
+  const cols = await page.evaluate(() => {
+    const x = (sel) => { const n = document.querySelector(sel); return n ? Math.round(n.getBoundingClientRect().left) : null; };
+    return {
+      head: [x('.jw-review-h-channel'), x('.jw-review-h-move'), x('.jw-review-h-group'), x('.jw-review-h-reason')],
+      row: [x('.jw-review-row .jw-review-channel'), x('.jw-review-row .jw-review-move'),
+            x('.jw-review-row .jw-review-group'), x('.jw-review-row .jw-review-reason')],
+      rowH: (() => { const n = document.querySelector('.jw-review-row'); return n ? n.offsetHeight : null; })(),
+    };
+  });
+  check('R11: review columns align with the header (Channel/Number/Group/Why)',
+    cols.head.every((hx, i) => hx != null && cols.row[i] != null && Math.abs(hx - cols.row[i]) <= 2) &&
+    cols.rowH != null && cols.rowH <= 40,
+    cols);
   await stageFromSheet(api, 'jw-sheet-organize');
   await api.shot('dark-04-staged-bar');
   await page.locator('.jw-arrange-bar').getByRole('button', {name: 'Discard'}).click();
@@ -926,8 +1052,8 @@ async function flow11(browser) {
   const {page} = api;
   await page.addScriptTag({content: EXTRAS_SRC}); // Stash re-injection semantics
   await settle(600);
-  check('hook announces the page state', await page.locator('.jw-visually-hidden', {hasText: 'Channel Studio ready — 18 channels at r' + REVISION}).count() === 1,
-    await page.locator('.jw-visually-hidden').allTextContents());
+  check('snippet attached to the live page state', await page.evaluate(() =>
+    !!(window.JWChannelStudio && window.JWChannelStudio.version >= 1)));
   const stagedBefore = api.state.console.filter((c) => c.includes('arrangement staged')).length;
 
   await openEditor(api, 'Chart One');
@@ -963,6 +1089,590 @@ async function flow11(browser) {
   await api.context.close();
 }
 
+// 12. R1: Stage can never freeze a stale plan — synchronous unbinding,
+//     reordered/delayed preview responses, and the numres sheet's debounce.
+async function flowR1(browser) {
+  const api = await boot(browser);
+  const {page} = api;
+  // -- variant A: immediate Stage after a range change must stage the NEW plan
+  await page.getByRole('button', {name: 'Organize channels…'}).click();
+  await page.locator('.jw-sheet-organize').waitFor();
+  await page.getByRole('button', {name: 'An entire group'}).click();
+  await page.locator('#jw-org-group').selectOption('grp_alpha001');
+  await page.locator('#jw-org-rstart').fill('400');
+  await page.locator('#jw-org-rend').fill('410');
+  await waitReview(api, 6);
+  check('400–410 plan is bound and stageable', await stageButton(api, 'jw-sheet-organize').isEnabled());
+  // any input change invalidates the binding SYNCHRONOUSLY — before the
+  // 350ms debounce fires the replacement preview.
+  await page.locator('#jw-org-rstart').fill('500');
+  await page.locator('#jw-org-rend').fill('510');
+  check('R1: Stage is dead the instant an input changes (old response unbound)',
+    await stageButton(api, 'jw-sheet-organize').isDisabled());
+  await settle(600);
+  check('R1: the abandoned 400 plan was never staged in the click window',
+    (await page.locator('.jw-arrange-bar:not(.jw-arrange-bar-empty)').count()) === 0);
+  await waitReview(api, 6);
+  check('R1: the 500–510 preview replaced the review',
+    (await page.locator('.jw-review-row').first().textContent()).includes('500'));
+  await stageFromSheet(api, 'jw-sheet-organize');
+  const stagedA = await api.org();
+  const renumA = stagedA.staged.packet.ops.find((o) => o.op === 'channels.renumber');
+  check('R1: staged packet assigns 500.., never the abandoned 400s',
+    renumA && renumA.assignments[0].number === 500 && renumA.assignments[1].number === 501,
+    renumA && renumA.assignments.slice(0, 2));
+  check('R1: staged label names the NEW destination',
+    stagedA.staged.label.includes('500–510'), stagedA.staged.label);
+  await arrangeBar(api).getByRole('button', {name: 'Undo'}).click();
+  await settle(300);
+
+  // -- variant B: a slow OLD response landing late must be discarded
+  // (Stage closed the sheet; UX7's cached form restores scope + range.)
+  await page.getByRole('button', {name: 'Organize channels…'}).click();
+  await page.locator('.jw-sheet-organize').waitFor();
+  await settle(600);
+  api.armPreviewDelay(({intent}) => !!(intent && intent.range && intent.range.start === 400), 2600);
+  await page.locator('#jw-org-rstart').fill('400');
+  await page.locator('#jw-org-rend').fill('410');
+  await settle(700); // the 400 preview FIRES and is held in flight
+  await page.locator('#jw-org-rstart').fill('500');
+  await page.locator('#jw-org-rend').fill('510');
+  await settle(900); // the CURRENT (500) preview fires and lands first
+  check('R1: current plan (500) rendered while the 400 response is still held',
+    (await page.locator('.jw-review-row').first().textContent()).includes('500'));
+  await settle(2300); // the held 400 response lands LATE
+  check('R1: precondition — the held 400 response did arrive late',
+    api.state.previews.filter((p) => p.intent.range && p.intent.range.start === 400).length >= 2,
+    api.state.previews.map((p) => p.intent.range));
+  check('R1: the late response was discarded — review still shows the 500 plan',
+    (await page.locator('.jw-review-row').first().textContent()).includes('500'));
+  check('R1: still bound after the late landing (Stage enabled)',
+    await stageButton(api, 'jw-sheet-organize').isEnabled());
+  await stageFromSheet(api, 'jw-sheet-organize');
+  const stagedB = await api.org();
+  const renumB = stagedB.staged.packet.ops.find((o) => o.op === 'channels.renumber');
+  check('R1: staged packet after the late landing still assigns 500..',
+    renumB && renumB.assignments[0].number === 500, renumB && renumB.assignments.slice(0, 2));
+  await arrangeBar(api).getByRole('button', {name: 'Discard'}).click();
+  await page.locator('.jw-overlay .jw-dialog').getByRole('button', {name: 'Discard'}).click();
+  await settle(300);
+
+  // -- variant C: the number-resolution sheet obeys the same rule
+  await page.keyboard.press('Escape');
+  await settle(300);
+  await openEditor(api, 'Chart One');
+  await page.getByRole('button', {name: 'Move / insert…'}).first().click();
+  await page.locator('.jw-sheet-numres').waitFor();
+  await page.locator('#jw-numres-dest').fill('303');
+  // the "303 is free." hint is client-side; BOUND means the response landed
+  await page.locator('.jw-sheet-numres button.jw-btn-primary:not([disabled])').waitFor({timeout: 15000});
+  check('R1: numres 303 plan stageable', await stageButton(api, 'jw-sheet-numres').isEnabled());
+  await page.locator('#jw-numres-dest').fill('305');
+  check('R1: numres Stage dies the instant the destination changes',
+    await stageButton(api, 'jw-sheet-numres').isDisabled());
+  await settle(700);
+  check('R1: numres old (303) plan not staged in the debounce window',
+    (await page.locator('.jw-arrange-bar:not(.jw-arrange-bar-empty)').count()) === 0);
+  await page.locator('.jw-hint', {hasText: '305 is free.'}).waitFor({timeout: 15000});
+  check('R1: numres new (305) plan bound', await stageButton(api, 'jw-sheet-numres').isEnabled());
+  await stageFromSheet(api, 'jw-sheet-numres');
+  const stagedC = await api.org();
+  const renumC = stagedC.staged.packet.ops.find((o) => o.op === 'channels.renumber');
+  check('R1: numres staged packet places at the CURRENT destination (305)',
+    renumC && renumC.assignments.some((a) => a.channelId === 'net_a0000001' && a.number === 305),
+    renumC && renumC.assignments);
+  check('no page errors', api.state.errors.length === 0, api.state.errors);
+  await api.context.close();
+}
+
+// 13. R2: completing an Apply reconciles ONLY its submitted snapshot. The
+//     fixed frontend REFUSES a new Stage while an Apply is unresolved (F3
+//     guard), so the "newer plan during flight" path is Undo: staged flips
+//     back to the previous plan while the submitted packet stays immutable.
+async function flowR2(browser) {
+  const api = await boot(browser);
+  const {page} = api;
+  await openEditor(api, 'Chart Three');
+  await page.locator('#f-name').fill('Zeta Three'); // bystander content draft
+  // plan A (kept on the undo stack) …
+  await openEditor(api, 'Chart One');
+  await page.getByRole('button', {name: 'Move / insert…'}).first().click();
+  await page.locator('.jw-sheet-numres').waitFor();
+  await page.locator('#jw-numres-dest').fill('305');
+  await page.locator('.jw-hint', {hasText: '305 is free.'}).waitFor({timeout: 15000});
+  await page.locator('.jw-sheet-numres button.jw-btn-primary:not([disabled])').waitFor({timeout: 15000});
+  await stageFromSheet(api, 'jw-sheet-numres');
+  // … and plan B (the bar's current plan, the one Apply will submit)
+  await page.getByRole('button', {name: 'Organize channels…'}).click();
+  await page.locator('.jw-sheet-organize').waitFor();
+  await page.getByRole('button', {name: 'A number interval'}).click();
+  await page.locator('#jw-org-scstart').fill('298');
+  await page.locator('#jw-org-scend').fill('299');
+  await page.locator('#jw-org-rstart').fill('400');
+  await page.locator('#jw-org-rend').fill('401');
+  await waitReview(api, 2);
+  await stageFromSheet(api, 'jw-sheet-organize');
+  check('B is the bar\'s staged plan (A sits on the undo stack)',
+    ((await api.org()).staged.label || '').includes('400–401'));
+  const tokenB = (await api.org()).staged.correlationToken;
+  api.armHoldApply(6000);
+  await arrangeBar(api).getByRole('button', {name: /^Apply/}).click();
+  await applyingPill(api).waitFor({timeout: 5000});
+  // the F3 guard: a NEW Stage during flight is refused, never a silent
+  // overwrite of the unresolved submitted packet.
+  await page.getByRole('button', {name: 'Organize channels…'}).click();
+  await page.locator('.jw-sheet-organize').waitFor();
+  await page.getByRole('button', {name: 'Assign group', exact: true}).click();
+  await page.locator('#jw-org-dest').selectOption('grp_trio001');
+  await waitReview(api, 2);
+  await page.locator('.jw-sheet-organize button.jw-btn-primary').click();
+  await page.locator('.jw-toast', {hasText: 'still unresolved'}).first().waitFor({timeout: 10000});
+  check('R2/F3: a new Stage during the flight is REFUSED (sheet stays open, staged untouched)',
+    (await page.locator('.jw-sheet-organize').count()) === 1 &&
+    (await api.org()).staged.correlationToken === tokenB);
+  await page.getByRole('button', {name: 'Close — keep staging'}).click();
+  await settle(300);
+  // Undo during flight: the bar flips to plan A; the SUBMITTED packet (B)
+  // stays immutable in pending.
+  await arrangeBar(api).getByRole('button', {name: 'Undo'}).click();
+  await settle(300);
+  check('R2: Undo during flight shows plan A while B\'s Apply runs',
+    ((await api.org()).staged.label || '').includes('305') && !!(await api.org()).pending,
+    {staged: (await api.org()).staged.label, pending: !!(await api.org()).pending});
+  await page.locator('.jw-toast', {hasText: 'Arrangement applied at r'}).first().waitFor({timeout: 30000});
+  await settle(600);
+  check('server committed the SUBMITTED plan B only',
+    (await api.number('Chart One')) === 297 &&
+    (await api.number('Chart Two')) === 400 && (await api.number('Chart Three')) === 401,
+    {one: await api.number('Chart One'), two: await api.number('Chart Two'), three: await api.number('Chart Three')});
+  const orgAfter = await api.org();
+  check('R2: the newer (undo-revealed) staging survives the commit — staged kept, pending resolved',
+    orgAfter.staged && orgAfter.staged.intent && orgAfter.staged.intent.number === 305 &&
+    orgAfter.staged.baseRevision === REVISION && orgAfter.pending === null,
+    {staged: orgAfter.staged && orgAfter.staged.label, base: orgAfter.staged && orgAfter.staged.baseRevision,
+     pending: !!orgAfter.pending});
+  const d3 = (await api.drafts()).net_a0000003;
+  check('R2: bystander draft keeps its content and adopts ONLY the committed map (401, never an uncommitted number)',
+    d3 && d3.draft.name === 'Zeta Three' && d3.draft.number === 401, d3 && d3.draft);
+  check('R2: bar flags the surviving staging stale + offers Reload and replan',
+    (await page.locator('.jw-arrange-stale', {hasText: 'Based on r' + REVISION}).count()) === 1 &&
+    (await page.getByRole('button', {name: 'Reload and replan'}).count()) === 1);
+  check('no page errors', api.state.errors.length === 0, api.state.errors);
+  await api.context.close();
+}
+
+// 14. R3: newer creation edits remap onto the final id — never dropped.
+async function flowR3(browser) {
+  const api = await boot(browser);
+  const {page} = api;
+  await openNewChannel(api, {number: 300, name: 'Submitted channel name'});
+  await page.getByRole('button', {name: 'Create draft'}).click();
+  await page.locator('.jw-sheet-numres').waitFor();
+  await page.getByRole('button', {name: 'Cancel — keep drafts'}).click();
+  await settle(400);
+  await authorTagRule(api, 'Tag 1');
+  await page.getByRole('button', {name: 'Move / insert…'}).first().click();
+  await page.locator('.jw-sheet-numres').waitFor();
+  await waitChoices(api);
+  await stageFromSheet(api, 'jw-sheet-numres');
+  const tempId = Object.keys((await api.drafts()) || {}).find((k) => String(k).startsWith('temp-'));
+  api.armHoldApply(3000);
+  await arrangeBar(api).getByRole('button', {name: /^Apply/}).click();
+  await applyingPill(api).waitFor({timeout: 5000});
+  // newer edit DURING the flight — after the packet was frozen at Stage
+  await page.locator('#f-name').fill('Newer unsent channel name');
+  await page.locator('.jw-toast', {hasText: 'Arrangement applied at r'}).first().waitFor({timeout: 30000});
+  await settle(600);
+  const doc = await api.doc();
+  const created = doc.channels.find((c) => c.name === 'Submitted channel name');
+  check('server record carries the SUBMITTED name at 300',
+    !!created && created.number === 300, created && {id: created.id, number: created.number});
+  const drafts = await api.drafts();
+  check('R3: drafts not emptied — the newer edit remapped onto the final id',
+    !!created && drafts[created.id] && drafts[created.id].draft.name === 'Newer unsent channel name',
+    created ? drafts[created.id] : 'no created channel');
+  check('R3: the temp draft was dropped after the remap', !drafts[tempId], Object.keys(drafts));
+  check('no page errors', api.state.errors.length === 0, api.state.errors);
+  await api.context.close();
+}
+
+// 15. R4: include-draft honors the reviewed group move — assignment-only AND
+//     combined range+group variants.
+async function flowR4(browser) {
+  const api = await boot(browser);
+  const {page} = api;
+  // -- variant 1: assignment-only
+  await openEditor(api, 'Chart One');
+  await page.locator('#f-name').fill('Owner updated name');
+  await ensureBulkMode(api);
+  await selectRows(api, ['Chart One']);
+  await page.getByRole('button', {name: 'Organize selection…'}).click();
+  await page.locator('.jw-sheet-organize').waitFor();
+  await page.getByRole('button', {name: 'Assign group', exact: true}).click();
+  await page.locator('#jw-org-dest').selectOption('grp_trio001');
+  await waitReview(api, 1);
+  const row = page.locator('.jw-review-row', {hasText: 'Chart One'});
+  check('review shows the reviewed move Alpha → Trio',
+    (await row.textContent()).includes('Alpha → Trio'), await row.textContent());
+  await row.getByRole('button', {name: 'include draft…'}).click();
+  await settle(400);
+  await stageFromSheet(api, 'jw-sheet-organize');
+  await applyArrangement(api, REVISION + 1);
+  const doc = await api.doc();
+  const one = doc.channels.find((c) => c.id === 'net_a0000001');
+  check('R4: committed group is the REVIEWED Trio (not the draft\'s stale Alpha)',
+    one.groupId === 'grp_trio001', one);
+  check('R4: dirty name committed alongside, number untouched',
+    one.name === 'Owner updated name' && one.number === 297, {name: one.name, number: one.number});
+  const put = api.state.applies[0].ops.find((op) => op.op === 'channel.put');
+  check('R4: wire put carries the reconciled groupId (agreement rule extends to groups)',
+    put && put.channel.groupId === 'grp_trio001', put && put.channel.groupId);
+  await api.context.close();
+
+  // -- variant 2: combined range + group
+  const api2 = await boot(browser);
+  const p2 = api2.page;
+  await openEditor(api2, 'Chart Two');
+  await p2.locator('#f-name').fill('Combined Name');
+  await ensureBulkMode(api2);
+  await selectRows(api2, ['Chart Two']);
+  await p2.getByRole('button', {name: 'Organize selection…'}).click();
+  await p2.locator('.jw-sheet-organize').waitFor();
+  await p2.locator('#jw-org-rstart').fill('500');
+  await p2.locator('#jw-org-rend').fill('500');
+  await p2.locator('.jw-sheet-organize input[type="checkbox"]').check();
+  await p2.locator('#jw-org-dest2').selectOption('grp_trio001');
+  await waitReview(api2, 1);
+  const row2 = p2.locator('.jw-review-row', {hasText: 'Chart Two'});
+  check('combined review shows number AND group',
+    (await row2.textContent()).includes('298 → 500') && (await row2.textContent()).includes('Alpha → Trio'),
+    await row2.textContent());
+  await row2.getByRole('button', {name: 'include draft…'}).click();
+  await settle(400);
+  await stageFromSheet(api2, 'jw-sheet-organize');
+  await applyArrangement(api2, REVISION + 1);
+  const doc2 = await api2.doc();
+  const two = doc2.channels.find((c) => c.id === 'net_a0000002');
+  check('R4 combined: number, group AND name all land as reviewed',
+    two.number === 500 && two.groupId === 'grp_trio001' && two.name === 'Combined Name', two);
+  check('no page errors (variant 2)', api2.state.errors.length === 0, api2.state.errors);
+  await api2.context.close();
+}
+
+// 16. R5: inline group creation — editor path, occupied-create path, and bulk
+//     create-and-assign, all with the pending group in preview AND packet.
+async function flowR5(browser) {
+  const api = await boot(browser);
+  const {page} = api;
+  // (a) editor inline creation
+  await openEditor(api, 'Chart One');
+  await page.locator('#f-group').selectOption('__create__');
+  await page.locator('input[aria-label="New group name"]').last().fill('Fresh Crew');
+  await page.locator('#apply-btn').click();
+  await page.locator('.jw-apply-state', {hasText: 'Applied at r'}).waitFor({timeout: 30000});
+  check('R5a: one Apply commits group.put + channel.put',
+    api.state.applies.length === 1 &&
+    api.state.applies[0].ops[0].op === 'group.put' && /^grp_/.test(api.state.applies[0].ops[0].group.id),
+    api.state.applies[0].ops.map((o) => o.op));
+  let doc = await api.doc();
+  const crew = doc.groups.find((g) => g.name === 'Fresh Crew');
+  check('R5a: group exists and Chart One is a member',
+    !!crew && doc.channels.find((c) => c.id === 'net_a0000001').groupId === crew.id,
+    doc.groups.map((g) => g.name));
+  // (b) occupied-create referencing a NEW group: preview + packet composition
+  await openNewChannel(api, {number: 300, name: 'Renumbered Crew', createGroup: 'Renumbered Crew'});
+  await page.getByRole('button', {name: 'Create draft'}).click();
+  await page.locator('.jw-sheet-numres').waitFor();
+  await settle(1800);
+  check('R5b: placement previews with the pending group (no unknown_group)',
+    (await page.locator('.jw-sheet-numres .jw-error-text').count()) === 0,
+    await page.locator('.jw-sheet-numres .jw-error-text').allTextContents());
+  check('R5b: preview requests carried the groups argument',
+    api.state.previews.some((p) => p.groups.some((g) => g.name === 'Renumbered Crew' && /^grp_/.test(g.id))),
+    api.state.previews.map((p) => p.groups));
+  await page.getByRole('button', {name: 'Cancel — keep drafts'}).click();
+  await settle(400);
+  await authorTagRule(api, 'Tag 2');
+  await page.getByRole('button', {name: 'Move / insert…'}).first().click();
+  await page.locator('.jw-sheet-numres').waitFor();
+  await waitChoices(api);
+  check('R5b: reopened sheet still previews the pending group cleanly',
+    (await page.locator('.jw-sheet-numres .jw-error-text').count()) === 0);
+  await stageFromSheet(api, 'jw-sheet-numres');
+  await applyArrangement(api, REVISION + 2);
+  const bOps = api.state.applies[1].ops;
+  check('R5b: packet order group.put → channel.create → renumber chain',
+    bOps[0].op === 'group.put' && /^grp_/.test(bOps[0].group.id) &&
+    bOps.some((o) => o.op === 'channel.create' && o.channel.groupId === bOps[0].group.id) &&
+    bOps.some((o) => o.op === 'channels.renumber'),
+    bOps.map((o) => o.op));
+  doc = await api.doc();
+  const crew2 = doc.groups.find((g) => g.name === 'Renumbered Crew');
+  const placed = crew2 && doc.channels.find((c) => c.groupId === crew2.id);
+  check('R5b: group + created channel committed together at 300',
+    !!crew2 && placed && placed.number === 300 &&
+    doc.channels.find((c) => c.name === 'Occupied 302').number === 303,
+    {crew: crew2 && crew2.id, placed: placed && placed.number});
+  // (c) bulk create-and-assign
+  await ensureBulkMode(api);
+  await selectRows(api, ['Chart Three', 'Occupied 300']);
+  await page.getByRole('button', {name: 'Organize selection…'}).click();
+  await page.locator('.jw-sheet-organize').waitFor();
+  await page.getByRole('button', {name: 'Assign group', exact: true}).click();
+  await page.locator('#jw-org-newgroup').fill('Bulk Crew');
+  await waitReview(api, 2);
+  await stageFromSheet(api, 'jw-sheet-organize');
+  await applyArrangement(api, REVISION + 3);
+  const cOps = api.state.applies[2].ops;
+  check('R5c: bulk create-and-assign in one packet',
+    cOps[0].op === 'group.put' && /^grp_/.test(cOps[0].group.id) &&
+    cOps.some((o) => o.op === 'channels.move' && o.groupId === cOps[0].group.id),
+    cOps.map((o) => o.op));
+  doc = await api.doc();
+  const crew3 = doc.groups.find((g) => g.name === 'Bulk Crew');
+  check('R5c: both channels moved into the new group',
+    !!crew3 && doc.channels.find((c) => c.id === 'net_a0000003').groupId === crew3.id &&
+    doc.channels.find((c) => c.name === 'Occupied 300').groupId === crew3.id,
+    crew3 && crew3.id);
+  check('no page errors', api.state.errors.length === 0, api.state.errors);
+  await api.context.close();
+}
+
+// 17. R6: unknown-outcome recovery — transport abort BEFORE submission, and a
+//     lost response AFTER a real commit.
+async function flowR6(browser) {
+  const api = await boot(browser);
+  const {page} = api;
+  // (a) the request never reaches the server
+  await openEditor(api, 'Chart One');
+  await page.getByRole('button', {name: 'Move / insert…'}).first().click();
+  await page.locator('.jw-sheet-numres').waitFor();
+  await page.locator('#jw-numres-dest').fill('303');
+  await page.locator('.jw-hint', {hasText: '303 is free.'}).waitFor({timeout: 15000});
+  await stageFromSheet(api, 'jw-sheet-numres');
+  api.armAbort();
+  await arrangeBar(api).getByRole('button', {name: /^Apply/}).click();
+  await waitUnknownOutcome(api);
+  check('R6a: never stuck on "Applying…" — Check result / Retry offered',
+    (await applyingPill(api).count()) === 0 && api.state.applies.length === 0,
+    {pill: await applyingPill(api).count(), applies: api.state.applies.length});
+  const reqA = (await api.org()).pending.requestId;
+  check('R6a: the exact submitted packet + requestId are kept',
+    !!(await api.org()).staged && (await api.org()).staged.packet.requestId === reqA, reqA);
+  await arrangeBar(api).getByRole('button', {name: 'Check result'}).click();
+  await page.locator('.jw-toast', {hasText: 'Still no result'}).first().waitFor({timeout: 15000});
+  check('R6a: unknown stays actionable after Check result (never rejected, never committed)',
+    !!(await api.org()).pending && (await api.org()).pending.requestId === reqA);
+  await arrangeBar(api).getByRole('button', {name: 'Retry same Apply'}).click();
+  await page.locator('.jw-toast', {hasText: 'Arrangement applied at r'}).first().waitFor({timeout: 30000});
+  check('R6a: retry committed ONCE under the kept requestId',
+    api.state.applies.length === 1 && api.state.applies[0].requestId === reqA &&
+    (await api.rev()) === REVISION + 1 && (await api.number('Chart One')) === 303,
+    api.state.applies.map((a) => a.requestId));
+  // (b) the response is lost AFTER the server committed
+  await openEditor(api, 'Chart Two');
+  await page.getByRole('button', {name: 'Move / insert…'}).first().click();
+  await page.locator('.jw-sheet-numres').waitFor();
+  await page.locator('#jw-numres-dest').fill('304');
+  await page.locator('.jw-hint', {hasText: '304 is free.'}).waitFor({timeout: 15000});
+  await stageFromSheet(api, 'jw-sheet-numres');
+  api.armAbortAfter();
+  await arrangeBar(api).getByRole('button', {name: /^Apply/}).click();
+  await waitUnknownOutcome(api);
+  check('R6b: the server DID commit — only this tab\'s outcome is unknown',
+    api.state.applies.length === 2 && api.state.applies[1].receipt.status === 'committed' &&
+    (await api.number('Chart Two')) === 304,
+    {applies: api.state.applies.length, chartTwo: await api.number('Chart Two')});
+  await arrangeBar(api).getByRole('button', {name: 'Check result'}).click();
+  await page.locator('.jw-toast', {hasText: 'Arrangement applied at r'}).first().waitFor({timeout: 15000});
+  await settle(600);
+  const orgB = await api.org();
+  check('R6b: Check result reconciles the durable committed receipt (no resubmission)',
+    orgB.pending === null && orgB.staged === null && api.state.applies.length === 2,
+    {pending: !!orgB.pending, staged: !!orgB.staged, applies: api.state.applies.length});
+  check('R6b: revision adopted', (await api.rev()) === REVISION + 2, await api.rev());
+  check('no page errors', api.state.errors.length === 0, api.state.errors);
+  await api.context.close();
+}
+
+// 18. R7: Alphabetical ordering sends the canonical order:"name" and stages
+//     via a real frontend-generated packet.
+async function flowR7(browser) {
+  const api = await boot(browser);
+  const {page} = api;
+  await openGroupMenu(api, 'Performers');
+  await page.getByRole('menuitem', {name: 'Arrange numbers…'}).click();
+  await page.locator('.jw-sheet-organize').waitFor();
+  check('task sheet fixes the group scope',
+    (await page.locator('.jw-task-scope-line').textContent()).includes('Performers'));
+  await page.locator('#jw-org-rstart').fill('300');
+  await page.locator('#jw-org-rend').fill('699');
+  await waitReview(api, 2);
+  await page.getByRole('button', {name: 'Alphabetical (A–Z, ties by channel id)'}).click();
+  await settle(1200);
+  check('R7: review plans by name (Alpha Net first)',
+    (await page.locator('.jw-review-row').first().textContent()).includes('Alpha Net'),
+    await page.locator('.jw-review-row').allTextContents());
+  const last = api.state.previews[api.state.previews.length - 1];
+  check('R7: the frontend packet uses order:"name" (never the rejected "alpha")',
+    last && last.intent.order === 'name', last && last.intent.order);
+  await stageFromSheet(api, 'jw-sheet-organize');
+  const renum = (await api.org()).staged.packet.ops.find((o) => o.op === 'channels.renumber');
+  check('R7: staged packet packs Alpha Net → 303, Zulu Net → 304 (300–302 belong to Alpha bystanders)',
+    renum && renum.assignments[0].number === 303 && renum.assignments[1].number === 304,
+    renum && renum.assignments);
+  await applyArrangement(api, REVISION + 1);
+  check('R7: committed by name order',
+    (await api.number('Alpha Net')) === 303 && (await api.number('Zulu Net')) === 304,
+    {alpha: await api.number('Alpha Net'), zulu: await api.number('Zulu Net')});
+  check('no page errors', api.state.errors.length === 0, api.state.errors);
+  await api.context.close();
+}
+
+// 19. R8: reload + replan reconstructs the COMPLETE authored intent — scope
+//     group, order, destination, strategy, and the combined assignment.
+async function flowR8(browser) {
+  const api = await boot(browser);
+  const {page} = api;
+  await page.getByRole('button', {name: 'Organize channels…'}).click();
+  await page.locator('.jw-sheet-organize').waitFor();
+  await page.getByRole('button', {name: 'An entire group'}).click();
+  await page.locator('#jw-org-group').selectOption('grp_perfo01');
+  await page.locator('#jw-org-rstart').fill('400');
+  await page.locator('#jw-org-rend').fill('410');
+  await page.getByRole('button', {name: 'Alphabetical (A–Z, ties by channel id)'}).click();
+  await page.locator('.jw-sheet-organize input[type="checkbox"]').check();
+  await page.locator('#jw-org-dest2').selectOption('grp_trio001');
+  await waitReview(api, 2);
+  await stageFromSheet(api, 'jw-sheet-organize');
+  check('staged: Performers → 400–410 + combined Trio assignment',
+    ((await api.org()).staged.label || '').includes('400–410'), (await api.org()).staged.label);
+  // an unrelated external revision makes the staged plan stale
+  await api.drv('rename', {channelId: 'net_a0000003', name: 'Server Renamed'});
+  await page.getByRole('button', {name: 'More actions'}).click();
+  await page.getByRole('menuitem', {name: 'Reload library'}).click();
+  await settle(900);
+  check('bar flags the stale base after the external revision',
+    (await page.locator('.jw-arrange-stale', {hasText: 'the library is now r' + (REVISION + 1)}).count()) === 1,
+    await page.locator('.jw-arrange-stale').allTextContents());
+  await page.reload();
+  await page.locator('.jw-dial-row').first().waitFor({timeout: 30000});
+  await settle(800);
+  check('R8: the staged intent + stale flag survive the reload',
+    (await page.locator('.jw-arrange-stale').count()) >= 1 &&
+    ((await api.org()).staged || {}).baseRevision === REVISION);
+  await page.getByRole('button', {name: 'Reload and replan'}).click();
+  await page.locator('.jw-sheet-organize').waitFor();
+  check('R8: scope group retained (Performers, NOT the first group)',
+    (await page.locator('#jw-org-group').inputValue()) === 'grp_perfo01' &&
+    (await page.locator('.jw-chip-active', {hasText: 'An entire group'}).count()) === 1,
+    await page.locator('#jw-org-group').inputValue());
+  check('R8: scope still counts 2 channels',
+    (await page.locator('.jw-scope-line').first().textContent()).includes('2 channels in scope'));
+  check('R8: order retained (Alphabetical)',
+    (await page.getByRole('button', {name: 'Alphabetical (A–Z, ties by channel id)'}).getAttribute('aria-pressed')) === 'true');
+  check('R8: conflict strategy retained (keep other channels in place)',
+    (await page.getByRole('button', {name: 'Keep other channels in place'}).getAttribute('aria-pressed')) === 'true');
+  check('R8: combined assignment retained (checkbox + Trio)',
+    await page.locator('.jw-sheet-organize input[type="checkbox"]').isChecked() &&
+    (await page.locator('#jw-org-dest2').inputValue()) === 'grp_trio001');
+  check('R8: destination range retained (400–410)',
+    (await page.locator('#jw-org-rstart').inputValue()) === '400' &&
+    (await page.locator('#jw-org-rend').inputValue()) === '410');
+  await waitReview(api, 2);
+  const previews = api.state.previews;
+  check('R8: replan re-previewed BOTH halves at the new revision with the kept settings',
+    previews.length >= 2 && previews[previews.length - 1].expectedRevision === REVISION + 1 &&
+    previews.some((p) => p.intent.type === 'assign_group' && p.intent.groupId === 'grp_trio001') &&
+    previews.some((p) => p.intent.type === 'arrange_range' && p.intent.range &&
+      p.intent.range.start === 400 && p.intent.order === 'name'),
+    previews.slice(-2).map((p) => ({t: p.intent.type, rev: p.expectedRevision})));
+  await stageFromSheet(api, 'jw-sheet-organize');
+  const ops = (await api.org()).staged.packet.ops;
+  check('R8: re-staged packet keeps the combined composition',
+    ops.some((o) => o.op === 'channels.move' && o.groupId === 'grp_trio001') &&
+    ops.some((o) => o.op === 'channels.renumber' && o.assignments.length === 2),
+    ops.map((o) => o.op));
+  await applyArrangement(api, REVISION + 2);
+  check('R8: committed Alpha Net 400, Zulu Net 401',
+    (await api.number('Alpha Net')) === 400 && (await api.number('Zulu Net')) === 401,
+    {alpha: await api.number('Alpha Net'), zulu: await api.number('Zulu Net')});
+  const doc = await api.doc();
+  check('R8: both performers landed in Trio',
+    doc.channels.find((c) => c.id === 'net_e0000002').groupId === 'grp_trio001' &&
+    doc.channels.find((c) => c.id === 'net_e0000001').groupId === 'grp_trio001');
+  check('no page errors', api.state.errors.length === 0, api.state.errors);
+  await api.context.close();
+}
+
+// 20. R9: editor Apply + bulk action serialize through the ONE coordinator —
+//     the second op waits for the first receipt (no self-inflicted conflict).
+async function flowR9(browser) {
+  const api = await boot(browser);
+  const {page} = api;
+  await openEditor(api, 'Chart One');
+  await page.locator('#f-name').fill('Serialized Name');
+  api.armHoldApply(3000);
+  await page.locator('#apply-btn').click();
+  await page.locator('.jw-apply-state', {hasText: 'Applying…'}).waitFor({timeout: 10000});
+  await ensureBulkMode(api);
+  await selectRows(api, ['Chart One']);
+  await page.locator('.jw-bulk-bar').getByRole('button', {name: 'Pause', exact: true}).click();
+  await page.locator('.jw-overlay .jw-dialog').getByRole('button', {name: 'Apply', exact: true}).click();
+  for (let i = 0; i < 40; i++) {
+    const row = ((await api.doc()).channels.find((c) => c.id === 'net_a0000001') || {});
+    if (row.paused === true && (await api.rev()) === REVISION + 2) break;
+    await settle(500);
+  }
+  const row = (await api.doc()).channels.find((c) => c.id === 'net_a0000001');
+  check('R9: both ops landed (rename + pause)',
+    row.name === 'Serialized Name' && row.paused === true, row);
+  check('R9: serialized — the bulk op ran at the editor receipt\'s revision',
+    api.state.applies.length === 2 &&
+    api.state.applies[0].receipt.status === 'committed' && String(api.state.applies[0].expected) === String(REVISION) &&
+    api.state.applies[1].receipt.status === 'committed' && String(api.state.applies[1].expected) === String(REVISION + 1),
+    api.state.applies.map((a) => ({e: a.expected, s: a.receipt.status, err: a.receipt.error})));
+  check('R9: no revision-conflict toast anywhere',
+    (await page.locator('.jw-toast', {hasText: 'Revision conflict'}).count()) === 0);
+  check('no page errors', api.state.errors.length === 0, api.state.errors);
+  await api.context.close();
+}
+
+// 21. R10: malformed payloads reject TYPED + DURABLY through the REAL
+//     ValidateChannelChanges / ApplyChannelChanges — never a crash, never a
+//     silent revision bump.
+async function flowR10(browser) {
+  const api = await boot(browser);
+  const cases = [
+    {name: 'assignments:true', ops: [{op: 'channels.renumber', assignments: true}], code: 'bad_assignment'},
+    {name: 'assignments:42', ops: [{op: 'channels.renumber', assignments: 42}], code: 'bad_assignment'},
+    {name: 'nested-array entry', ops: [{op: 'channels.renumber', assignments: [['net_a0000001', 300]]}], code: 'bad_assignment'},
+    {name: 'kind:"invalid"', ops: [{op: 'channel.create', tempId: 'temp-review', channel: {kind: 'invalid', number: 100}}], code: 'bad_kind'},
+  ];
+  for (const c of cases) {
+    const v = await api.drv('validate', {ops: JSON.stringify(c.ops)});
+    check('R10 validate typed rejection: ' + c.name,
+      v.valid === false && (v.errors || []).some((e) => e.code === c.code), v.errors);
+    const doc = await api.doc();
+    const receipt = await api.drv('apply', {
+      requestId: 'harness-malformed-' + c.name.replace(/\W/g, ''),
+      expectedRevision: String(doc.revision), ops: JSON.stringify(c.ops), actor: 'harness-malformed',
+    });
+    check('R10 apply rejected without crashing: ' + c.name,
+      receipt.status === 'rejected' && receipt.error === 'validation_failed' &&
+      (receipt.errors || []).some((e) => e.code === c.code), receipt);
+    const durable = await api.drv('receipt', {requestId: receipt.requestId});
+    check('R10 rejected receipt is durable + replay-exact: ' + c.name,
+      durable && durable.status === 'rejected' && durable.digest === receipt.digest, durable);
+  }
+  const doc = await api.doc();
+  check('R10: revision + definitions untouched by every malformed attempt',
+    doc.revision === REVISION && doc.channels.length === 18,
+    {revision: doc.revision, channels: doc.channels.length});
+  check('no page errors', api.state.errors.length === 0, api.state.errors);
+  await api.context.close();
+}
+
 // ----------------------------------------------------------------- main ----
 (async () => {
   const browser = await chromium.launch({executablePath: process.env.JW_AUDIT_CHROME || '/opt/google/chrome/chrome',
@@ -972,14 +1682,24 @@ async function flow11(browser) {
     [1, 'create-at-occupied + shift chain + downward mirror', flow1],
     [2, 'existing 299 → 300 with dirty name (opt-in put + renumber)', flow2],
     [3, 'block 171/173/180 → 300 with bystanders', flow3],
-    [4, 'Performers 300-699 useAvailable + capacity + shortfall', flow4],
+    [4, 'Performers 300-699 useAvailable + capacity + shortfall + R7 alpha', flow4],
     [5, 'exclusive range with outside interval', flow5],
-    [6, 'create group + assign in one Apply (F1)', flow6],
-    [7, 'revision conflict + lost-response replay', flow7],
-    [8, 'edit-in-flight, undo/redo, rebase, reversal, stage-in-flight', flow8],
+    [6, 'create group + assign in one Apply (R5)', flow6],
+    [7, 'revision conflict + R6 unknown-outcome retry', flow7],
+    [8, 'edit-in-flight, undo/redo, rebase, reversal, R2 stage-in-flight', flow8],
     [9, 'capability gating fallback', flow9],
     [10, 'visual sweep + geometry + keyboard', flow10],
     [11, 'extras snippet lifecycle', flow11],
+    [12, 'R1: stale-preview binding, reorder, numres debounce', flowR1],
+    [13, 'R2: submitted-snapshot reconciliation, newer staging survives', flowR2],
+    [14, 'R3: newer creation edits remap onto the final id', flowR3],
+    [15, 'R4: include-draft honors the reviewed group (both variants)', flowR4],
+    [16, 'R5: inline group creation (editor, occupied-create, bulk)', flowR5],
+    [17, 'R6: unknown outcome — abort before submit + lost-after-commit', flowR6],
+    [18, 'R7: alphabetical order enum name', flowR7],
+    [19, 'R8: reload + replan retains the full intent', flowR8],
+    [20, 'R9: one coordinator serializes editor + bulk', flowR9],
+    [21, 'R10: malformed payloads → typed + durable rejection', flowR10],
   ];
   for (const [n, title, fn] of flows) {
     if (only && n !== only) continue;
@@ -1006,10 +1726,20 @@ async function flow11(browser) {
 
   log('\n================ DRY-RUN SUMMARY ================');
   for (const [n, s] of Object.entries(report.flowStatus)) log('flow ' + n + ': ' + s);
-  log('known-unfixed failures: ' + JSON.stringify(Object.fromEntries(Object.entries(report.failKnown).map(([k, v]) => [k, v.length]))));
+  const knownCount = Object.values(report.failKnown).reduce((n, list) => n + list.length, 0);
+  const gateFailures = report.failNew.length + knownCount + report.failHarness.length;
+  log('known-classified failures: ' + JSON.stringify(Object.fromEntries(Object.entries(report.failKnown).map(([k, v]) => [k, v.length]))));
   log('new findings: ' + report.failNew.length + '; harness crashes: ' + report.failHarness.length +
     '; notes: ' + report.notes.length + '; shots: ' + report.shots.length);
-  fs.writeFileSync(path.join(SHOTS, 'dry-run-report.json'), JSON.stringify(report, null, 2));
-  if (report.failHarness.length && process.env.STRICT) process.exit(1);
+  // R12 acceptance gate: ANY behavioral assertion failure (known- or
+  // new-classified) or harness crash fails the process. STRICT is retired —
+  // the gate is unconditional.
+  log('GATE: ' + (gateFailures === 0
+    ? 'PASS — 0 behavioral failures, 0 crashes'
+    : 'FAIL — ' + gateFailures + ' failing assertion(s)/crash(es) (' +
+      report.failNew.length + ' new, ' + knownCount + ' known-classified, ' + report.failHarness.length + ' crashes)'));
+  fs.writeFileSync(path.join(SHOTS, 'dry-run-report.json'), JSON.stringify(
+    Object.assign({}, report, {gate: {failures: gateFailures, pass: gateFailures === 0}}), null, 2));
+  if (gateFailures > 0) process.exit(1);
   log('report + screenshots in ' + SHOTS);
 })().catch((e) => { console.error(e); process.exit(1); });

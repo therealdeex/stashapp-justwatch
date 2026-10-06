@@ -418,29 +418,45 @@ def _final_numbers(doc: dict, ops: list[dict]) -> tuple[dict, dict]:
         return not isinstance(value, bool) and isinstance(value, int) \
             and lo <= value <= hi
 
+    # The interpreter consumes ONLY structurally valid records and never
+    # raises: malformed containers/ids/kinds fold nothing here and are
+    # reported as typed errors by the per-op checks (_check_ops), which must
+    # run ahead of any exception surface (review 2026-10-06 R10).
     for op in ops:
         if not isinstance(op, dict):
             continue
         kind = op.get("op")
         if kind == "channel.put":
-            channel = op.get("channel") or {}
-            stored = by_id.get(channel.get("id"))
+            channel = op.get("channel")
+            if not isinstance(channel, dict):
+                continue
+            cid = channel.get("id")
+            stored = by_id.get(cid) if isinstance(cid, str) else None
             number = channel.get("number")
             if stored is not None and _in_band(stored["kind"], number):
                 numbers[stored["id"]] = number
         elif kind == "channel.create":
-            channel = op.get("channel") or {}
+            channel = op.get("channel")
             temp_id = op.get("tempId")
+            if not isinstance(channel, dict) or not isinstance(temp_id, str) \
+                    or not temp_id:
+                continue
+            ns = channel.get("kind")
+            if not isinstance(ns, str) or ns not in BANDS:
+                ns = "net"  # invalid kinds are rejected by the per-op checks
             number = channel.get("number")
-            ns = channel.get("kind") or "net"
-            if isinstance(temp_id, str) and temp_id and _in_band(ns, number):
+            if _in_band(ns, number):
                 temps[temp_id] = number
         elif kind == "channel.swap":
             a, b = op.get("a"), op.get("b")
-            if a in numbers and b in numbers:
+            if isinstance(a, str) and isinstance(b, str) \
+                    and a in numbers and b in numbers:
                 numbers[a], numbers[b] = numbers[b], numbers[a]
         elif kind == "channels.renumber":
-            for entry in op.get("assignments") or ():
+            assignments = op.get("assignments")
+            if not isinstance(assignments, list):
+                continue
+            for entry in assignments:
                 if not isinstance(entry, dict):
                     continue
                 cid, number = entry.get("channelId"), entry.get("number")
@@ -598,7 +614,8 @@ def _check_ops(library: dict, ops: list[dict]) -> list[dict]:
             if not isinstance(channel, dict):
                 err(i, "channel", "not_an_object", "channel.put needs a channel object")
                 continue
-            existing = by_id.get(channel.get("id"))
+            cid = channel.get("id")
+            existing = by_id.get(cid) if isinstance(cid, str) else None
             if existing is None:
                 err(i, "channel.id", "unknown_channel",
                     "channel.put needs the id of an existing channel")
@@ -617,7 +634,13 @@ def _check_ops(library: dict, ops: list[dict]) -> list[dict]:
                     and lo <= number <= hi:
                 put_numbers[existing["id"]] = (i, number)
         elif kind == "channel.create":
-            channel = op.get("channel") or {}
+            channel = op.get("channel")
+            if channel is None:
+                channel = {}
+            if not isinstance(channel, dict):
+                err(i, "channel", "not_an_object",
+                    "channel.create needs a channel object")
+                continue
             temp_id = op.get("tempId")
             if not isinstance(temp_id, str) or not temp_id.strip():
                 err(i, "tempId", "bad_temp_id", "channel.create needs a tempId")
@@ -627,7 +650,9 @@ def _check_ops(library: dict, ops: list[dict]) -> list[dict]:
             _check_channel_draft(i, channel, by_id, groups, new_groups, err,
                                  creating=True, final_numbers=final_numbers)
         elif kind == "channel.swap":
-            a, b = by_id.get(op.get("a")), by_id.get(op.get("b"))
+            a_id, b_id = op.get("a"), op.get("b")
+            a = by_id.get(a_id) if isinstance(a_id, str) else None
+            b = by_id.get(b_id) if isinstance(b_id, str) else None
             if a is None or b is None:
                 err(i, "a/b", "unknown_channel", "swap needs two existing channel ids")
             elif a["id"] == b["id"]:
@@ -639,9 +664,14 @@ def _check_ops(library: dict, ops: list[dict]) -> list[dict]:
                 swap_ids[b["id"]] = i
         elif kind == "channels.renumber":
             assignments = op.get("assignments")
-            if not isinstance(assignments, list) or not assignments:
+            if assignments is None or (isinstance(assignments, list)
+                                       and not assignments):
                 err(i, "assignments", "empty_assignment",
                     "channels.renumber needs a non-empty assignments list")
+                continue
+            if not isinstance(assignments, list):
+                err(i, "assignments", "bad_assignment",
+                    "assignments must be a list of {channelId, number} objects")
                 continue
             for j, entry in enumerate(assignments):
                 path = f"assignments[{j}]"
@@ -674,7 +704,11 @@ def _check_ops(library: dict, ops: list[dict]) -> list[dict]:
                 err(i, "group", "not_an_object", "group.put needs a group object")
                 continue
             gid = group.get("id")
-            if gid is not None and gid not in groups and not GRP_ID_RE.match(str(gid)):
+            if gid is not None and not isinstance(gid, str):
+                err(i, "group.id", "bad_group_id", "group ids look like grp_…")
+                gid = None  # keep the rest of this op's checks crash-free
+            elif gid is not None and gid not in groups \
+                    and not GRP_ID_RE.match(str(gid)):
                 err(i, "group.id", "bad_group_id", "group ids look like grp_…")
             name = group.get("name")
             if not isinstance(name, str) or not (1 <= len(name.strip()) <= MAX_NAME_LEN):
@@ -692,12 +726,18 @@ def _check_ops(library: dict, ops: list[dict]) -> list[dict]:
                 if clash:
                     err(i, "group.name", "duplicate_group", f"a group named {name.strip()!r} exists")
             position = group.get("position")
-            if isinstance(position, bool) or not isinstance(position, int) or position < 1:
+            # An ABSENT position is completed server-side at apply time
+            # (appended after the existing groups) — a pending group the
+            # client authored rides its packet without one. Present positions
+            # must still be real positive integers.
+            if position is not None and (
+                    isinstance(position, bool) or not isinstance(position, int)
+                    or position < 1):
                 err(i, "group.position", "bad_position", "position must be a positive integer")
             new_groups[gid or "__new__"] = name if isinstance(name, str) else ""
         elif kind == "group.delete":
             gid = op.get("id")
-            if gid not in groups:
+            if not isinstance(gid, str) or gid not in groups:
                 err(i, "id", "unknown_group", f"no group {gid!r}")
             elif len(groups) == 1:
                 err(i, "id", "last_group", "cannot remove the last group")
@@ -708,7 +748,8 @@ def _check_ops(library: dict, ops: list[dict]) -> list[dict]:
                         f"choose a destination for {members} channel(s)")
         elif kind == "channels.move":
             target = op.get("groupId")
-            if target not in groups and target not in new_groups:
+            if not isinstance(target, str) or (
+                    target not in groups and target not in new_groups):
                 # A group created by a group.put op EARLIER IN THIS TRANSACTION
                 # is a legal destination (create-group + move-channels is one
                 # atomic Apply).
@@ -817,14 +858,15 @@ def _check_channel_draft(i, channel, by_id, groups, new_groups, err, *,
         channel = dict(channel)
         channel.setdefault("kind", "net")
     kind = channel.get("kind")
-    if kind not in BANDS:
+    if not isinstance(kind, str) or kind not in BANDS:
         err(i, "channel.kind", "bad_kind", "kind must be 'ch' or 'net'")
         return
     name = channel.get("name")
     if not isinstance(name, str) or not (1 <= len(name.strip()) <= MAX_NAME_LEN):
         err(i, "channel.name", "bad_name", f"name must be 1-{MAX_NAME_LEN} characters")
     gid = channel.get("groupId")
-    if gid not in groups and gid not in new_groups:
+    if not isinstance(gid, str) or (
+            gid not in groups and gid not in new_groups):
         err(i, "channel.groupId", "unknown_group", "choose a group that exists")
     number = channel.get("number")
     lo, hi = BANDS[kind]
@@ -849,7 +891,8 @@ def _check_channel_draft(i, channel, by_id, groups, new_groups, err, *,
         err(i, "channel.color", "bad_color", "color must be #RRGGBB")
     if channel.get("glyph") is not None and channel["glyph"] not in contract.GLYPHS:
         err(i, "channel.glyph", "unknown_glyph", "glyph is not in the shared glyph set")
-    if channel.get("sort") is not None and channel["sort"] not in contract.SORTS:
+    sort = channel.get("sort")
+    if sort is not None and (not isinstance(sort, str) or sort not in contract.SORTS):
         err(i, "channel.sort", "unknown_sort", f"sort must be one of: {', '.join(contract.SORTS)}")
     source = channel.get("source")
     if not isinstance(source, dict):

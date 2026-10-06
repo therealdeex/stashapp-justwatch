@@ -363,14 +363,17 @@
     };
   }
 
-  // THE write path: task submit + receipt correlation.
-  async function applyChannelChanges(requestId, expectedRevision, ops) {
+  // THE write path: task submit + receipt correlation. `onSubmitted` fires
+  // once the task was ACCEPTED by the queue (before polling) so callers can
+  // distinguish "submitting" from "polling" in the lifecycle UI.
+  async function applyChannelChanges(requestId, expectedRevision, ops, onSubmitted) {
     await runTask("Apply Channel Changes", {
       mode: "ApplyChannelChanges",
       requestId,
       expectedRevision: String(expectedRevision),
       ops: JSON.stringify(ops),
     });
+    if (onSubmitted) { try { onSubmitted(); } catch (e) { /* lifecycle hint only */ } }
     return pollApplyReceipt(requestId);
   }
 
@@ -390,6 +393,10 @@
     };
     if (req.explain) args.explain = true;
     if (req.overlays && req.overlays.length) args.channels = JSON.stringify(req.overlays);
+    // Pending (uncommitted) groups: the planner validates them and emits
+    // their group.put ops FIRST in the packet, so ONE Apply creates the
+    // group and assigns/places channels (frozen interface 2026-10-06).
+    if (req.groups && req.groups.length) args.groups = JSON.stringify(req.groups);
     return runOp("PreviewChannelArrangement", args);
   }
 
@@ -440,12 +447,14 @@
   }
 
   function newGroupId() {
-    // Server-side group ids look like grp_<lowercase>; a client-generated id
-    // lets channels.move reference a group created in the same transaction.
-    const bytes = new Uint8Array(5);
+    // Server-side group ids look like grp_<8 lowercase hex>; a
+    // client-generated id lets group.put / channels.move reference a group
+    // created in the same transaction (anything else is rejected
+    // bad_group_id).
+    const bytes = new Uint8Array(4);
     (window.crypto || { getRandomValues: (b) => b.forEach((_, i) => { b[i] = (Math.random() * 256) | 0; }) })
       .getRandomValues(bytes);
-    return "grp" + Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+    return "grp_" + Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
   }
 
   // ------------------------------------------------------------------
@@ -1055,9 +1064,13 @@
   // staged: { baseRevision, correlationToken, label, intent, response,
   //           packet: { expectedRevision, ops, requestId }, beforeAfter,
   //           tempRefs, optIns, stagedAt }
-  // pending: { requestId, expected, opsDigest, correlationToken,
-  //            beforeAfter, tempIds, submittedAt }
+  // pending: the IMMUTABLE submitted snapshot { requestId, expected,
+  //           opsDigest, correlationToken, packet, beforeAfter, tempRefs,
+  //           submittedAt, state: "submitting"|"polling"|"outcome_unknown" }.
+  //           It survives reload and is reconciled EXCLUSIVELY by its own
+  //           requestId/packet — never by the editable staged draft (R2).
   // undo/redo: bounded stacks of prior `staged` values (null = no staging).
+  // Stage/undo/redo/discard intentionally NEVER touch pending.
   // ------------------------------------------------------------------
 
   function makeOrgStore(libraryId) {
@@ -1087,7 +1100,9 @@
         if (s.undo.length > UNDO_CAP) s.undo.splice(0, s.undo.length - UNDO_CAP);
         s.redo = [];
         s.staged = staged;
-        s.pending = null;
+        // R2: a staged/undone/redone/discarded plan NEVER erases an
+        // unresolved submitted packet — receipt reconciliation correlates
+        // with the pending snapshot, not the editable draft.
         write();
       },
       undo() {
@@ -1095,7 +1110,6 @@
         if (!s.undo.length) return false;
         s.redo.push(s.staged);
         s.staged = s.undo.pop();
-        s.pending = null;
         write();
         return true;
       },
@@ -1104,7 +1118,6 @@
         if (!s.redo.length) return false;
         s.undo.push(s.staged);
         s.staged = s.redo.pop();
-        s.pending = null;
         write();
         return true;
       },
@@ -1115,10 +1128,13 @@
         if (s.undo.length > UNDO_CAP) s.undo.splice(0, s.undo.length - UNDO_CAP);
         s.redo = [];
         s.staged = null;
-        s.pending = null;
         write();
       },
       setPending(p) { const s = read(); s.pending = p; write(); },
+      setPendingState(state) {
+        const s = read();
+        if (s.pending) { s.pending = Object.assign({}, s.pending, { state }); write(); }
+      },
       clearPending() { const s = read(); s.pending = null; write(); },
       clearStagedOnly() { const s = read(); s.staged = null; write(); },
       subscribe(fn) { listeners.push(fn); return () => { listeners = listeners.filter((f) => f !== fn); }; },
@@ -1128,6 +1144,59 @@
   // ------------------------------------------------------------------
   // Organization pure helpers
   // ------------------------------------------------------------------
+
+  // R1: ONE binding fingerprint per preview response. Stage eligibility
+  // requires the bound response's fingerprint to equal the fingerprint of
+  // the CURRENT controls — the instant any planning input changes the old
+  // response stops being stageable, before any debounce fires.
+  function previewFingerprint(parts) {
+    return JSON.stringify(parts);
+  }
+
+  // The planner's canonical order enum is "number" | "name"; "alpha" is a
+  // deprecated alias that must never be emitted (normalized to "name").
+  function normalizeOrder(order) {
+    return order === "alpha" ? "name" : (order === "name" ? "name" : "number");
+  }
+
+  // Pending (uncommitted) groups referenced by drafts — the preview/apply
+  // "groups" argument (frozen interface). position is best-effort client
+  // chrome (server assigns real positions in the packet's group.put).
+  function pendingGroupsFromDrafts(drafts, committedGroups) {
+    if (!drafts) return [];
+    const committed = new Set((committedGroups || []).map((g) => g.id));
+    const seen = new Set();
+    const out = [];
+    const maxPos = Math.max(0, ...(committedGroups || []).map((g) => g.position || 0));
+    for (const id of drafts.ids()) {
+      const entry = drafts.get(id);
+      const d = entry && entry.draft;
+      if (d && d.pendingGroupName != null && d.groupId && !committed.has(d.groupId) && !seen.has(d.groupId)) {
+        const name = String(d.pendingGroupName || "").trim();
+        if (!name) continue;
+        seen.add(d.groupId);
+        out.push({ id: d.groupId, name, position: maxPos + out.length + 1 });
+      }
+    }
+    return out;
+  }
+
+  // R3: did the owner edit a temp draft AFTER its wire snapshot was frozen
+  // into the submitted packet? number/groupId are plan-authoritative (the
+  // arrangement owns them) and never count as "newer edits"; identity is
+  // server-owned. Everything else (name/source/color/glyph/sort/flags/
+  // programming) compared on the wire form decides.
+  function draftDiffersFromSubmitted(draft, submittedChannel) {
+    if (!draft || !submittedChannel) return false;
+    const wire = toWireChannel(clone(draft));
+    const a = Object.assign({}, wire);
+    const b = Object.assign({}, submittedChannel);
+    for (const k of ["id", "seed", "provenance", "number", "groupId", "pendingGroupName"]) {
+      delete a[k];
+      delete b[k];
+    }
+    return JSON.stringify(a) !== JSON.stringify(b);
+  }
 
   // Dial preview overlay from a staged arrangement: number/group changes
   // keyed by channel id OR temp ref (plan rows for pending creations ride
@@ -1192,21 +1261,43 @@
     return REASON_TEXT[reason] || String(reason || "moved");
   }
 
+  // UX6: routine warnings in everyday language. Anything without an entry
+  // here still renders (verbatim) — the raw diagnostics additionally land
+  // in an expandable details area at the review.
+  const WARNING_COPY = {
+    archived_rows_moved: "Some archived channels will move numbers. They stay archived — nothing returns to the guide until you restore them.",
+    paused_rows_moved: "Some paused channels will move numbers. They stay paused and off the guide.",
+    disabled_rows_moved: "Some off-air channels will move numbers. Their rules are untouched.",
+    presentation_will_change: "Numbers and groups will look different on the TV guide. What airs on each channel stays the same.",
+    health_numbers_stale: "On-air counts catch up at the next routine refresh — nothing needs re-indexing now.",
+  };
+  function warningPlainText(w) {
+    return WARNING_COPY[w && w.code] || (w && (w.message || w.code)) || String(w);
+  }
+
   // Freeze a preview response into a staged arrangement (frozen contract
   // decision 2): the server-emitted packet is stored verbatim; the UI only
   // (a) merges full pending-create drafts into channel.create skeletons and
-  // (b) appends explicitly opted-in channel.put ops whose number AGREES with
-  // the plan's final number for that channel.
+  // (b) appends explicitly opted-in channel.put ops whose number AND group
+  // AGREE with the plan's final values for that channel (R4 — a stale
+  // groupId riding an opted-in put must never silently reverse the
+  // reviewed group move).
   function freezeArrangementPacket(resp, opts) {
     const options = opts || {};
     const drafts = options.drafts || null;
     const optInPuts = options.optInPuts || {}; // channelId -> wire channel
+    const pendingGroups = options.pendingGroups || [];
     const finalNumbers = {}; // channelId/tempRef -> final number per the plan
+    const finalGroups = {};  // channelId/tempRef -> final groupId per the plan
     for (const nc of (resp && resp.numberChanges) || []) {
       const ref = nc.channelId || nc.tempRef;
       if (ref) finalNumbers[ref] = nc.to;
     }
-    const ops = clone((resp.packet && resp.packet.ops) || []);
+    for (const gc of (resp && resp.groupChanges) || []) {
+      const ref = gc.channelId || gc.tempRef;
+      if (ref) finalGroups[ref] = gc.to;
+    }
+    let ops = clone((resp.packet && resp.packet.ops) || []);
     for (const op of ops) {
       if (op.op === "channel.create" && op.tempId && drafts) {
         // The planner never fabricates sources/colors/glyphs — merge the
@@ -1230,8 +1321,27 @@
     for (const id of Object.keys(optInPuts)) {
       const wire = clone(optInPuts[id]);
       if (finalNumbers[id] != null) wire.number = finalNumbers[id]; // agreement rule
+      if (finalGroups[id] != null) wire.groupId = finalGroups[id]; // R4
       ops.push({ op: "channel.put", channel: wire });
     }
+    // R5 fallback: a pending (uncommitted) group referenced by this packet
+    // MUST have its group.put in the same freeze — the planner normally
+    // emits it (it was told via the "groups" arg), but packets assembled
+    // client-side (number-resolution augmentations) need it explicitly.
+    const putIds = new Set(ops.filter((o) => o.op === "group.put" && o.group).map((o) => o.group.id));
+    const referenced = new Set();
+    for (const op of ops) {
+      if (op.op === "channel.create" && op.channel && op.channel.groupId) referenced.add(op.channel.groupId);
+      if (op.op === "channels.move" && op.groupId) referenced.add(op.groupId);
+      if (op.op === "channel.put" && op.channel && op.channel.groupId) referenced.add(op.channel.groupId);
+    }
+    const extraPuts = [];
+    for (const g of pendingGroups) {
+      if (g && g.id && referenced.has(g.id) && !putIds.has(g.id)) {
+        extraPuts.push({ op: "group.put", group: { id: g.id, name: g.name, position: g.position != null ? g.position : 1 } });
+      }
+    }
+    if (extraPuts.length) ops = extraPuts.concat(ops);
     return {
       expectedRevision: (resp.packet && resp.packet.expectedRevision != null)
         ? resp.packet.expectedRevision : resp.revision,
@@ -1253,13 +1363,20 @@
     out.valid = !!(assignResp.valid && rangeResp.valid);
     out.noop = !!(assignResp.noop && rangeResp.noop);
     const groupOps = [];
+    const groupSeen = new Set();
     const creates = new Map(); // tempId -> op
     const moves = [];
     const renumbers = [];
     const others = [];
     const take = (ops) => {
       for (const op of ops || []) {
-        if (op.op === "group.put") groupOps.push(op);
+        if (op.op === "group.put") {
+          // Two same-revision previews (assign + range) both emit the
+          // pending group's put — dedupe by id, keep the first.
+          if (!op.group || groupSeen.has(op.group.id)) continue;
+          groupSeen.add(op.group.id);
+          groupOps.push(op);
+        }
         else if (op.op === "channel.create") {
           // Same tempRef in both packets: the assign packet's groupId is the
           // intent's target; the number packet's placement wins the number.
@@ -1277,6 +1394,17 @@
     };
     take(assignResp.packet && assignResp.packet.ops);
     take(rangeResp.packet && rangeResp.packet.ops);
+    // Merge the created-row overlays the same way (range packet's number
+    // wins; the assign packet's groupId wins).
+    const createdMap = new Map();
+    for (const cr of (assignResp.created) || []) if (cr && cr.tempRef) createdMap.set(cr.tempRef, clone(cr));
+    for (const cr of (rangeResp.created) || []) {
+      if (!cr || !cr.tempRef) continue;
+      const prev = createdMap.get(cr.tempRef) || {};
+      createdMap.set(cr.tempRef, Object.assign({}, prev, cr,
+        prev.groupId != null && cr.groupId == null ? { groupId: prev.groupId } : {}));
+    }
+    out.created = [...createdMap.values()];
     out.packet = {
       expectedRevision: rangeResp.revision,
       ops: groupOps.concat([...creates.values()], moves, renumbers, others),
@@ -1475,7 +1603,7 @@
   }
 
   // Fixed-height windowed list: renders only the visible slice (+overscan).
-  function WindowedList({ items, itemHeight, render, overscan, resetKey, ariaLabel, className }) {
+  function WindowedList({ items, itemHeight, render, overscan, resetKey, ariaLabel, className, listStyle }) {
     const ref = useRef(null);
     const [range, setRange] = useState({ start: 0, end: 60 });
     const itemsRef = useRef(items);
@@ -1521,7 +1649,7 @@
     const slice = items.slice(range.start, range.end);
     return h("div", {
       className: "jw-winlist" + (className ? " " + className : ""), ref,
-      role: "listbox", "aria-label": ariaLabel,
+      role: "listbox", "aria-label": ariaLabel, style: listStyle || undefined,
     },
       h("div", { style: { height: items.length * itemHeight + "px", position: "relative" } },
         h("div", { style: { position: "absolute", top: range.start * itemHeight + "px", left: 0, right: 0 } },
@@ -2252,6 +2380,7 @@
     const [relocateTo, setRelocateTo] = useState(null);
     const [explain, setExplain] = useState(null); // opening explain response
     const [resp, setResp] = useState(null);       // the ACTIVE choice's preview
+    const [respKey, setRespKey] = useState(null); // its binding fingerprint (R1)
     const [busy, setBusy] = useState(false);
     const [loadError, setLoadError] = useState(null);
     const seqRef = useRef(0);
@@ -2270,6 +2399,29 @@
         : []
     ), [isTemp, tempEntry, subject.ref, kind]);
 
+    // R5: an uncommitted group rides the SAME preview/Apply — the planner
+    // validates it via the "groups" arg and emits its group.put first.
+    const pendingGroups = useMemo(() => {
+      if (!isTemp || !tempEntry || !tempEntry.draft || tempEntry.draft.pendingGroupName == null) return [];
+      const name = String(tempEntry.draft.pendingGroupName || "").trim();
+      const gid = tempEntry.draft.groupId;
+      return name && gid ? [{ id: gid, name, position: (lib.groups || []).length + 1 }] : [];
+    }, [isTemp, tempEntry, lib]);
+
+    // UX4/R5: a whole create+arrangement commit needs real source rules —
+    // the placement sheet says so instead of offering a Stage-able plan
+    // that predictably rejects at Apply.
+    const rulesComplete = useMemo(() => {
+      if (!isTemp || !tempEntry || !tempEntry.draft) return true;
+      const src = tempEntry.draft.source;
+      if (!isRuleSource(src)) return false;
+      const wire = toWireSource(src);
+      const hasRule = FACET_KEYS.some((k) => wire[k] && wire[k].length)
+        || wire.date || wire.duration || wire.createdAt || wire.q
+        || wire.studioSceneCount || wire.performerSceneCount;
+      return hasRule && ruleSourceClientErrors(wire).length === 0;
+    }, [isTemp, tempEntry]);
+
     const occupantOf = (n) => Number.isInteger(n)
       ? (lib.channels || []).find((c) => c.number === n && c.id !== subject.ref) || null
       : null;
@@ -2277,7 +2429,31 @@
 
     const subjectIntentKey = isTemp ? { tempRef: subject.ref } : { channelId: subject.ref };
 
-    async function runPreview(intent, withExplain) {
+    // The intent the CURRENT controls describe — one construction shared by
+    // the debounced preview effect and the R1 stage-eligibility check, so a
+    // response can only ever be staged against the exact controls that
+    // produced it.
+    const activeChoice = useMemo(() => {
+      if (!Number.isInteger(dest)) return null;
+      if (choice === "free") {
+        if (!Number.isInteger(freePick)) return null;
+        return { intent: Object.assign({ type: "insert", number: freePick, direction: "up" }, subjectIntentKey) };
+      }
+      if (choice === "swap") {
+        if (!occupant) return null;
+        return { intent: { type: "swap", a: subject.ref, b: occupant.id } };
+      }
+      if (choice === "relocate") {
+        if (!occupant || !Number.isInteger(relocateTo)) return null;
+        return { intent: { type: "relocate_occupant", channelId: occupant.id, to: relocateTo } };
+      }
+      return { intent: Object.assign({ type: "insert", number: dest, direction: choice === "insert-down" ? "down" : "up" }, subjectIntentKey) };
+    }, [choice, dest, freePick, relocateTo, occupant, subject.ref, isTemp]);
+    const activeKey = activeChoice
+      ? previewFingerprint({ intent: activeChoice.intent, overlays, groups: pendingGroups, revision: lib.revision })
+      : null;
+
+    async function runPreview(intent, withExplain, key) {
       const seq = ++seqRef.current;
       setBusy(true);
       setLoadError(null);
@@ -2287,6 +2463,7 @@
           correlationToken: tokenRef.current,
           intent,
           overlays,
+          groups: pendingGroups,
           explain: !!withExplain,
         });
         if (!aliveRef.current || seq !== seqRef.current) return;
@@ -2295,9 +2472,11 @@
         if (out && out.correlationToken && out.correlationToken !== tokenRef.current) return;
         if (withExplain) setExplain(out);
         setResp(out);
+        setRespKey(key != null ? key : previewFingerprint({ intent, overlays, groups: pendingGroups, revision: lib.revision }));
       } catch (e) {
         if (!aliveRef.current || seq !== seqRef.current) return;
         setResp(null);
+        setRespKey(null);
         setLoadError(String((e && e.message) || e));
       } finally {
         if (aliveRef.current && seq === seqRef.current) setBusy(false);
@@ -2306,31 +2485,20 @@
 
     // Opening call: insert-up at the destination with the full choice matrix.
     useEffect(() => {
-      if (!Number.isInteger(dest)) return;
-      void runPreview(Object.assign({ type: "insert", number: dest, direction: "up" }, subjectIntentKey), true);
+      if (!Number.isInteger(dest)) return undefined;
+      const intent = Object.assign({ type: "insert", number: dest, direction: "up" }, subjectIntentKey);
+      const key = previewFingerprint({ intent, overlays, groups: pendingGroups, revision: lib.revision });
+      void runPreview(intent, true, key);
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     // Re-preview when the destination or the active choice's parameter moves.
     useEffect(() => {
-      if (!Number.isInteger(dest)) { setResp(null); return undefined; }
-      let intent = null;
-      if (choice === "free") {
-        if (!Number.isInteger(freePick)) { setResp(null); return undefined; }
-        intent = Object.assign({ type: "insert", number: freePick, direction: "up" }, subjectIntentKey);
-      } else if (choice === "swap") {
-        if (!occupant) { setResp(null); return undefined; }
-        intent = { type: "swap", a: subject.ref, b: occupant.id };
-      } else if (choice === "relocate") {
-        if (!occupant || !Number.isInteger(relocateTo)) { setResp(null); return undefined; }
-        intent = { type: "relocate_occupant", channelId: occupant.id, to: relocateTo };
-      } else {
-        intent = Object.assign({ type: "insert", number: dest, direction: choice === "insert-down" ? "down" : "up" }, subjectIntentKey);
-      }
-      const t = setTimeout(() => { void runPreview(intent, false); }, 250);
+      if (!activeChoice) { setResp(null); setRespKey(null); return undefined; }
+      const t = setTimeout(() => { void runPreview(activeChoice.intent, false, activeKey); }, 250);
       return () => clearTimeout(t);
       // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [choice, dest, freePick, relocateTo]);
+    }, [activeKey]);
 
     const choices = (explain && explain.choices) || {};
     const matrix = [
@@ -2417,7 +2585,9 @@
     }, [resp, lib, drafts]);
 
     const stage = () => {
-      if (!resp || !resp.valid || resp.noop) return;
+      // R1: only the response bound to the CURRENT controls may freeze —
+      // never a stale plan under a new destination label.
+      if (!bound || !resp.valid || resp.noop || !rulesComplete) return;
       // Relocate: the preview packet covers the OCCUPANT; the subject's own
       // placement augments the packet (contract-sanctioned): existing rows
       // join the renumber map, pending creations append their skeleton.
@@ -2445,7 +2615,9 @@
         }
         subjectBeforeAfter = { number: [currentNumber, finalForSubject] };
       }
-      const packet = freezeArrangementPacket(work, { drafts });
+      // R5: the freeze includes the pending group's group.put, not just the
+      // channel skeleton — one Apply creates the group AND places the row.
+      const packet = freezeArrangementPacket(work, { drafts, pendingGroups });
       const beforeAfter = beforeAfterFromResponse(work);
       if (subjectBeforeAfter) beforeAfter[subject.ref] = subjectBeforeAfter;
       const finalNumber = choice === "free" ? freePick : dest;
@@ -2464,7 +2636,9 @@
 
     const noop = resp && resp.valid && resp.noop;
     const respErrors = (resp && resp.errors) || [];
-    const stageable = !!(resp && resp.valid && !resp.noop && !busy);
+    // R1: stageable requires the bound response to match the live controls.
+    const bound = !!(resp && respKey && activeKey && respKey === activeKey);
+    const stageable = !!(bound && resp.valid && !resp.noop && !busy && rulesComplete);
 
     return h(Dialog, {
       title: "Place “" + subjectName + "” at " + (Number.isInteger(dest) ? dest : "…"),
@@ -2473,11 +2647,20 @@
         h("button", { key: "c", className: "jw-btn", onClick: onClose }, "Cancel — keep drafts"),
         h("button", {
           key: "s", className: "jw-btn jw-btn-primary", disabled: !stageable,
-          title: stageable ? "Stage this plan locally — nothing is written until Apply arrangement" : "Pick an available choice first",
+          title: !rulesComplete
+            ? "Finish the channel's rules first — a channel with no source can't go on the air"
+            : stageable
+              ? "Stage this plan locally — nothing is written until Apply arrangement"
+              : "Pick an available choice first",
           onClick: stage,
         }, busy ? "Planning…" : "Stage arrangement"),
       ],
     },
+      !rulesComplete && isTemp
+        ? h("div", { className: "jw-note-warn", role: "status" },
+            "Finish this channel's rules before placing it — a channel with no source can't go on the air. ",
+            "Close this sheet, add at least one rule in the editor, then come back — your placement choices are kept.")
+        : null,
       h("div", { className: "jw-field" },
         h("label", { className: "jw-field-label", htmlFor: "jw-numres-dest" },
           "Destination number (" + band[0] + "–" + band[1] + ")"),
@@ -2556,12 +2739,20 @@
                 key: r.key,
                 className: "jw-review-row" + (r.displaced ? " jw-review-row-displaced" : ""),
               },
-                h(GlyphTile, { codepoint: r.glyph, color: r.color, size: 24, fallback: r.number[1] }),
-                h("span", { className: "jw-review-name" }, r.name, r.isNew ? h(StatusChip, { kind: "accent" }, "new") : null),
-                h("span", { className: "jw-review-move" },
+                // R11: glyph + name are ONE Channel cell so the row honors
+                // the same explicit grid the organizer review uses.
+                h("span", { className: "jw-review-channel", title: r.name },
+                  h(GlyphTile, { codepoint: r.glyph, color: r.color, size: 24, fallback: r.number[1] }),
+                  h("span", { className: "jw-review-name" }, r.name,
+                    r.isNew ? h(StatusChip, { kind: "accent" }, "new") : null)),
+                h("span", { className: "jw-review-move", tabIndex: 0,
+                  "aria-label": (r.number[0] != null ? r.number[0] : "—") + " → " + (r.number[1] != null ? r.number[1] : "—"),
+                  title: (r.number[0] != null ? r.number[0] : "—") + " → " + (r.number[1] != null ? r.number[1] : "—") },
                   r.number[0] != null ? String(r.number[0]) : "—", " → ", r.number[1] != null ? String(r.number[1]) : "—"),
-                h("span", { className: "jw-review-reason" },
-                  (r.displaced ? "displaced — " : "selected — ") + reasonText(r.reason)),
+                h("span", { className: "jw-review-reason", tabIndex: 0,
+                  "aria-label": (r.displaced ? "Displaced — " : "Selected — ") + reasonText(r.reason),
+                  title: (r.displaced ? "Displaced — " : "Selected — ") + reasonText(r.reason) },
+                  (r.displaced ? "Displaced — " : "Selected — ") + reasonText(r.reason)),
               ))),
           )
         : (busy ? h("p", { className: "jw-hint" }, "Planning…") : null),
@@ -2584,48 +2775,72 @@
 
   function OrganizeSheet({
     lib, drafts, groups, tempRows, filteredIds, selectionIds,
-    initialScope, initialIntent, reviewStaged,
-    onStage, onSplitSelection, onClose,
+    initialScope, initialIntent, reviewStaged, cachedForm,
+    onStage, onSplitSelection, onBackToEdit, onFormChange, onOpenDraft,
+    onReplan, onClose,
   }) {
     const committed = lib.channels || [];
     const byId = useMemo(() => new Map(committed.map((c) => [c.id, c])), [lib]);
     const tempById = useMemo(() => new Map((tempRows || []).map((t) => [t.id, t])), [tempRows]);
 
+    // R8: the FULL editable intent survives staging, reload and replan.
+    // `seed` is the persisted intent (an explicit staged intent wins over
+    // the cached partial form from a previously closed sheet).
+    const seed = initialIntent || cachedForm || null;
+
     // ---- section 1: Channels (scope) ----
     const [scopeType, setScopeType] = useState(() => {
       if (initialScope && initialScope.type) return initialScope.type;
-      if (initialIntent && initialIntent.scopeType) return initialIntent.scopeType;
+      if (seed && seed.scopeType) return seed.scopeType;
       return selectionIds && selectionIds.size ? "selection" : "group";
     });
     const [scopeGroupId, setScopeGroupId] = useState(() => {
       if (initialScope && initialScope.groupId) return initialScope.groupId;
+      if (seed && seed.scopeGroupId && (groups || []).some((g) => g.id === seed.scopeGroupId)) return seed.scopeGroupId;
       return groups[0] ? groups[0].id : "";
     });
-    const [scopeStart, setScopeStart] = useState(() => (initialScope && initialScope.range ? initialScope.range.start : null));
-    const [scopeEnd, setScopeEnd] = useState(() => (initialScope && initialScope.range ? initialScope.range.end : null));
+    const [scopeStart, setScopeStart] = useState(() => (
+      initialScope && initialScope.range ? initialScope.range.start
+        : seed && Number.isInteger(seed.scopeStart) ? seed.scopeStart : null));
+    const [scopeEnd, setScopeEnd] = useState(() => (
+      initialScope && initialScope.range ? initialScope.range.end
+        : seed && Number.isInteger(seed.scopeEnd) ? seed.scopeEnd : null));
 
     // ---- section 2: Action ----
-    const [action, setAction] = useState(() => (initialIntent && initialIntent.action) || "arrange_range");
+    const [action, setAction] = useState(() => (seed && seed.action) || "arrange_range");
+    // Task mode: opened from a group header — the group is fixed and the
+    // flow is Destination → Conflicts → Review (UX1). "Change selection"
+    // reveals the full generic scope controls.
+    const taskGroup = !reviewStaged && initialScope && initialScope.type === "group"
+      ? (groups || []).find((g) => g.id === initialScope.groupId) || null : null;
+    const [advancedScope, setAdvancedScope] = useState(false);
 
     // ---- section 3: Destination and order ----
-    const [destGroupId, setDestGroupId] = useState(groups[0] ? groups[0].id : "");
-    const [newGroupName, setNewGroupName] = useState("");
-    const [rangeStart, setRangeStart] = useState(() => (initialIntent && initialIntent.range ? initialIntent.range.start : null));
-    const [rangeEnd, setRangeEnd] = useState(() => (initialIntent && initialIntent.range ? initialIntent.range.end : null));
-    const [blockStart, setBlockStart] = useState(() => (initialIntent && initialIntent.start != null ? initialIntent.start : null));
-    const [offset, setOffset] = useState(() => (initialIntent && initialIntent.offset != null ? initialIntent.offset : 10));
-    const [order, setOrder] = useState("number");
+    const [destGroupId, setDestGroupId] = useState(() => (
+      seed && seed.destGroupId && (groups || []).some((g) => g.id === seed.destGroupId)
+        ? seed.destGroupId : groups[0] ? groups[0].id : ""));
+    const [newGroupName, setNewGroupName] = useState(() => (seed && seed.newGroupName) || "");
+    // One stable client id per sheet open for the inline-created group (R5).
+    const [pendingGid] = useState(newGroupId);
+    const [rangeStart, setRangeStart] = useState(() => (
+      seed && seed.range && Number.isInteger(seed.range.start) ? seed.range.start : null));
+    const [rangeEnd, setRangeEnd] = useState(() => (
+      seed && seed.range && Number.isInteger(seed.range.end) ? seed.range.end : null));
+    const [blockStart, setBlockStart] = useState(() => (seed && seed.start != null ? seed.start : null));
+    const [offset, setOffset] = useState(() => (seed && seed.offset != null ? seed.offset : 10));
+    const [order, setOrder] = useState(() => normalizeOrder(seed && seed.order));
 
     // ---- section 4: Conflicts ----
-    const [strategy, setStrategy] = useState(() => (initialIntent && initialIntent.strategy) || "useAvailable");
-    const [outStart, setOutStart] = useState(() => (initialIntent && initialIntent.outside ? initialIntent.outside.start : null));
-    const [outEnd, setOutEnd] = useState(() => (initialIntent && initialIntent.outside ? initialIntent.outside.end : null));
+    const [strategy, setStrategy] = useState(() => (seed && seed.strategy) || "useAvailable");
+    const [outStart, setOutStart] = useState(() => (seed && seed.outside ? seed.outside.start : null));
+    const [outEnd, setOutEnd] = useState(() => (seed && seed.outside ? seed.outside.end : null));
     // Optional combination (plan §3.4 note): a range arrangement can also
     // assign the selection to a group in the SAME reviewed packet.
-    const [alsoAssign, setAlsoAssign] = useState(false);
+    const [alsoAssign, setAlsoAssign] = useState(() => !!(seed && seed.alsoAssign));
 
     // ---- section 5: Review ----
     const [resp, setResp] = useState(reviewStaged ? reviewStaged.response : null);
+    const [respKey, setRespKey] = useState(null); // R1 binding fingerprint
     const [busy, setBusy] = useState(false);
     const [loadError, setLoadError] = useState(null);
     const [reviewFilter, setReviewFilter] = useState("");
@@ -2665,6 +2880,30 @@
 
     const scopeChannelIds = scopeRefs.filter((r) => !String(r).startsWith("temp-"));
     const scopeTempRefs = scopeRefs.filter((r) => String(r).startsWith("temp-"));
+
+    // F7: a temp row in scope whose source rules are incomplete would make
+    // the plan Stage-able only to fail honestly at Apply (validation_failed).
+    // Gate Stage and tell the owner exactly which draft to finish. Same rule
+    // as the number-resolution sheet's rulesComplete — one policy, two sheets.
+    const incompleteTemps = (() => {
+      if (!drafts || reviewStaged) return [];
+      const bad = [];
+      for (const ref of scopeTempRefs) {
+        const entry = drafts.get(ref);
+        const d = entry && entry.draft;
+        if (!d) continue;
+        const src = d.source;
+        if (!isRuleSource(src)) { bad.push({ ref, name: (d.name || "").trim() || "Unnamed channel" }); continue; }
+        const wire = toWireSource(src);
+        const hasRule = FACET_KEYS.some((k) => wire[k] && wire[k].length)
+          || wire.date || wire.duration || wire.createdAt || wire.q
+          || wire.studioSceneCount || wire.performerSceneCount;
+        if (!hasRule || ruleSourceClientErrors(wire).length) {
+          bad.push({ ref, name: (d.name || "").trim() || "Unnamed channel" });
+        }
+      }
+      return bad;
+    })();
     // A selection scope keeps rows hidden by the current filter BY DESIGN —
     // the scope line says so explicitly, never a silent acting-on-hidden.
     const hiddenInScope = useMemo(() => {
@@ -2696,7 +2935,7 @@
       if (!scopeRefs.length) return null;
       if (action === "assign_group") {
         const base = { type: "assign_group", channelIds: scopeChannelIds, tempRefs: scopeTempRefs };
-        if (newGroupName.trim()) base.createGroup = { name: newGroupName.trim() };
+        if (newGroupName.trim()) base.groupId = pendingGid; // created in the same packet (R5)
         else if (destGroupId) base.groupId = destGroupId;
         else return null;
         return base;
@@ -2725,7 +2964,7 @@
           const t = tempById.get(ref);
           return t ? String(t.name || "") : "";
         };
-        const ordered = order === "alpha"
+        const ordered = order === "name"
           ? scopeRefs.slice().sort((a, b) => nameOf(a).toLowerCase().localeCompare(nameOf(b).toLowerCase())
               || (String(a).startsWith("temp-") ? "t:" + a : a).localeCompare(String(b).startsWith("temp-") ? "t:" + b : b))
           : scopeRefs; // already number-sorted
@@ -2746,20 +2985,36 @@
     const assignIntent = (alsoAssign && action === "arrange_range" && scopeRefs.length)
       ? (() => {
           const base = { type: "assign_group", channelIds: scopeChannelIds, tempRefs: scopeTempRefs };
-          if (newGroupName.trim()) base.createGroup = { name: newGroupName.trim() };
+          if (newGroupName.trim()) base.groupId = pendingGid;
           else if (destGroupId) base.groupId = destGroupId;
           else return null;
           return base;
         })()
       : null;
-    const assignKey = JSON.stringify(assignIntent);
+
+    // R5: pending (uncommitted) groups told to the planner — it validates
+    // them and emits their group.put FIRST, so one Apply creates the group
+    // and assigns/places channels.
+    const pendingGroups = useMemo(() => {
+      const name = newGroupName.trim();
+      return name ? [{ id: pendingGid, name, position: (groups || []).length + 1 }] : [];
+    }, [newGroupName, pendingGid, groups]);
+
+    // R1: the fingerprint of what the controls describe RIGHT NOW. Any
+    // change (intent, overlays, pending groups, revision) moves this
+    // immediately — before the debounce — so the previously bound response
+    // stops being stageable the instant an input changes.
+    const currentKey = previewFingerprint({
+      intent, assign: assignIntent, overlays, groups: pendingGroups, revision: lib.revision,
+    });
 
     useEffect(() => {
       if (reviewStaged) return undefined; // reopening a review: no re-preview
-      if (!intent) { setResp(null); return undefined; }
-      if (alsoAssign && action === "arrange_range" && !assignIntent) { setResp(null); return undefined; }
+      if (!intent) { setResp(null); setRespKey(null); return undefined; }
+      if (alsoAssign && action === "arrange_range" && !assignIntent) { setResp(null); setRespKey(null); return undefined; }
       const token = tokenRef.current;
       const seq = ++seqRef.current;
+      const key = currentKey;
       const handle = setTimeout(async () => {
         setBusy(true);
         setLoadError(null);
@@ -2769,6 +3024,7 @@
             correlationToken: token,
             intent,
             overlays,
+            groups: pendingGroups,
           });
           if (!aliveRef.current || seq !== seqRef.current) return;
           if (rangeOut && rangeOut.correlationToken && rangeOut.correlationToken !== token) return;
@@ -2781,15 +3037,18 @@
               correlationToken: token,
               intent: assignIntent,
               overlays,
+              groups: pendingGroups,
             });
             if (!aliveRef.current || seq !== seqRef.current) return;
             if (assignOut && assignOut.correlationToken && assignOut.correlationToken !== token) return;
             out = combineArrangementResponses(assignOut, rangeOut);
           }
           setResp(out);
+          setRespKey(key);
         } catch (e) {
           if (!aliveRef.current || seq !== seqRef.current) return;
           setResp(null);
+          setRespKey(null);
           setLoadError(String((e && e.message) || e));
         } finally {
           if (aliveRef.current && seq === seqRef.current) setBusy(false);
@@ -2797,7 +3056,36 @@
       }, 350);
       return () => clearTimeout(handle);
       // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [intentKey, assignKey, reviewStaged]);
+    }, [currentKey, reviewStaged]);
+
+    // UX7: the full editable form is reported up on every change so closing
+    // the sheet preserves partially entered organization settings.
+    const formState = useMemo(() => ({
+      scopeType, scopeGroupId,
+      scopeStart: Number.isInteger(scopeStart) ? scopeStart : null,
+      scopeEnd: Number.isInteger(scopeEnd) ? scopeEnd : null,
+      action,
+      destGroupId, newGroupName: newGroupName.trim(),
+      range: Number.isInteger(rangeStart) && Number.isInteger(rangeEnd)
+        ? { start: Math.min(rangeStart, rangeEnd), end: Math.max(rangeStart, rangeEnd) } : null,
+      start: Number.isInteger(blockStart) ? blockStart : null,
+      offset: Number.isInteger(offset) ? offset : null,
+      order: normalizeOrder(order),
+      strategy,
+      outside: strategy === "exclusive" && Number.isInteger(outStart) && Number.isInteger(outEnd)
+        ? { start: Math.min(outStart, outEnd), end: Math.max(outStart, outEnd) } : null,
+      alsoAssign,
+      scopeCount: scopeRefs.length,
+      revision: lib.revision,
+    }), [scopeType, scopeGroupId, scopeStart, scopeEnd, action, destGroupId, newGroupName,
+      rangeStart, rangeEnd, blockStart, offset, order, strategy, outStart, outEnd, alsoAssign,
+      scopeRefs.length, lib.revision]);
+    const formStateKey = JSON.stringify(formState);
+    useEffect(() => {
+      if (reviewStaged || !onFormChange) return;
+      onFormChange(formState);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [formStateKey, reviewStaged]);
 
     // ---- review rows (merged number+group per ref) ----
     const reviewRows = useMemo(() => {
@@ -2855,6 +3143,54 @@
       return g ? g.name : (gid || "—");
     };
 
+    // UX5: the scannable split — selected rows vs displaced bystanders.
+    const selectedRows = reviewRows.filter((r) => !r.displaced);
+    const displacedRows = reviewRows.filter((r) => r.displaced);
+    // R11: glyph + name are ONE Channel cell; every cell carries its full
+    // text as a title (mouse) AND as an accessible name on a focusable cell
+    // (F8: keyboard and screen-reader users get the full value too).
+    const cellText = (full) => ({ tabIndex: 0, "aria-label": full, title: full });
+    const renderReviewRow = (r) => h("div", {
+      key: r.key,
+      className: "jw-review-row" + (r.displaced ? " jw-review-row-displaced" : ""),
+      role: "option", "aria-selected": r.displaced ? "false" : "true",
+    },
+      h("span", { className: "jw-review-channel", title: r.name },
+        h(GlyphTile, { codepoint: r.glyph, color: r.color, size: 24, fallback: r.number ? r.number[1] : "—" }),
+        h("span", { className: "jw-review-name" },
+          r.name,
+          r.isTemp ? h(StatusChip, { kind: "accent" }, "new") : null,
+          r.hasDraft && !reviewStaged ? h("button", {
+            className: "jw-link jw-review-optin",
+            title: "This channel also has unsaved edits — include them in this Apply (its number and group are reconciled to the plan)",
+            "aria-pressed": optIns.has(r.ref) ? "true" : "false",
+            onClick: (e) => {
+              e.stopPropagation();
+              setOptIns((cur) => {
+                const next = new Set(cur);
+                if (next.has(r.ref)) next.delete(r.ref); else next.add(r.ref);
+                return next;
+              });
+            },
+          }, optIns.has(r.ref) ? "draft included ✓" : "include draft…") : null)),
+      h("span", {
+        className: "jw-review-move",
+        ...cellText(r.number ? (r.number[0] != null ? r.number[0] : "new") + " → " + (r.number[1] != null ? r.number[1] : "—") : "unchanged"),
+      },
+        r.number
+          ? (r.number[0] != null ? String(r.number[0]) : "—") + " → " + (r.number[1] != null ? String(r.number[1]) : "—")
+          : ""),
+      h("span", {
+        className: "jw-review-group",
+        ...cellText(r.group ? groupName(r.group[0]) + " → " + groupName(r.group[1]) : "unchanged"),
+      }, r.group ? groupName(r.group[0]) + " → " + groupName(r.group[1]) : ""),
+      h("span", {
+        className: "jw-review-reason",
+        ...cellText((r.displaced ? "Displaced — " : "Selected — ") + r.reasons.map(reasonText).join("; ")),
+      },
+        (r.displaced ? "Displaced — " : "Selected — ") + r.reasons.map(reasonText).join("; ")),
+    );
+
     const respErrors = (resp && resp.errors) || [];
     const warnings = (resp && resp.warnings) || [];
     const noop = !!(resp && resp.valid && resp.noop);
@@ -2878,7 +3214,79 @@
       if (capacity.shortfall) parts.push("SHORT BY " + capacity.shortfall);
       return parts.join(" · ");
     })();
-    const stageable = !!(resp && resp.valid && !resp.noop && !busy && !(capacity && capacity.shortfall));
+
+    // UX3: a compact, truthful occupancy strip for the chosen range —
+    // derived from the committed library (archived/paused/disabled rows
+    // still occupy), with blockers inspectable by number.
+    const occupancy = useMemo(() => {
+      if (action !== "arrange_range") return null;
+      if (!Number.isInteger(rangeStart) || !Number.isInteger(rangeEnd)) return null;
+      const lo = Math.min(rangeStart, rangeEnd);
+      const hi = Math.max(rangeStart, rangeEnd);
+      const total = hi - lo + 1;
+      if (total < 1 || total > 400) return { lo, hi, total, tooWide: total > 400 };
+      const inScope = new Set(scopeRefs);
+      const byNumber = new Map();
+      for (const c of committed) if (c.number != null && !byNumber.has(c.number)) byNumber.set(c.number, c);
+      const tempByNumber = new Map();
+      for (const t of (tempRows || [])) if (t.number != null && !tempByNumber.has(t.number)) tempByNumber.set(t.number, t);
+      const cells = [];
+      let inRange = 0, blockers = 0, free = 0;
+      const blockerList = [];
+      for (let n = lo; n <= hi; n++) {
+        const c = byNumber.get(n);
+        const t = tempByNumber.get(n);
+        if (c && inScope.has(c.id)) {
+          cells.push({ n, kind: "selected", title: n + " · " + c.name + " — selected, moves within the range" });
+          inRange++;
+        } else if (c) {
+          cells.push({ n, kind: "occupied", title: n + " · " + c.name + " — stays unless you move other channels out" });
+          blockers++;
+          if (blockerList.length < 6) blockerList.push(n + " “" + c.name + "”");
+        } else if (t) {
+          cells.push({ n, kind: "temp", title: n + " · " + (t.name || "new draft") + " — pending draft" });
+        } else {
+          cells.push({ n, kind: "free", title: n + " — free" });
+          free++;
+        }
+      }
+      return { lo, hi, total, cells, inRange, blockers, free, blockerList };
+    }, [action, rangeStart, rangeEnd, scopeRefs, committed, tempRows]);
+
+    // R1: stageable ONLY when the bound response matches the live controls.
+    const bound = !!(resp && respKey && !reviewStaged && respKey === currentKey);
+    // F7: AND every temp row in scope has complete source rules.
+    const stageable = !!(bound && resp.valid && !resp.noop && !busy
+      && !(capacity && capacity.shortfall) && incompleteTemps.length === 0);
+
+    // UX2: truthy consequence counts rendered next to the Stage/Apply
+    // buttons — never generic "arrangement" wording.
+    const reviewCounts = (() => {
+      const rows = reviewRows;
+      const moves = rows.filter((r) => !r.displaced && (r.number || r.group)).length;
+      const displaced = rows.filter((r) => r.displaced).length;
+      const placed = ((resp && resp.created) || []).length;
+      return { moves, displaced, placed, total: rows.length };
+    })();
+    const stageButtonLabel = (() => {
+      const n = reviewCounts.moves;
+      if (action === "assign_group") return n ? "Stage " + n + " channel move" + (n === 1 ? "" : "s") : "Stage arrangement";
+      if (action === "arrange_range" || action === "move_block") return n ? "Stage " + n + " channel move" + (n === 1 ? "" : "s") : "Stage arrangement";
+      return "Stage arrangement";
+    })();
+    const consequenceLine = (() => {
+      if (!resp || !resp.valid || noop) return null;
+      const parts = [];
+      if (reviewCounts.moves) parts.push(reviewCounts.moves + " of your channels move");
+      if (action === "arrange_range" && strategy === "exclusive" && reviewCounts.displaced) {
+        parts.push(reviewCounts.displaced + " other channel" + (reviewCounts.displaced === 1 ? "" : "s") + " relocate out of the range");
+      } else if (reviewCounts.displaced) {
+        parts.push(reviewCounts.displaced + " other channel" + (reviewCounts.displaced === 1 ? " keeps" : "s keep") + " their numbers");
+      }
+      if (reviewCounts.placed) parts.push(reviewCounts.placed + " new channel" + (reviewCounts.placed === 1 ? "" : "s") + " placed");
+      parts.push("What airs stays the same");
+      return parts.join(" · ");
+    })();
 
     const stage = () => {
       if (!stageable) return;
@@ -2887,7 +3295,7 @@
         const entry = drafts && drafts.get(id);
         if (entry && entry.draft) optInPuts[id] = toWireChannel(clone(entry.draft));
       }
-      const packet = freezeArrangementPacket(resp, { drafts, optInPuts });
+      const packet = freezeArrangementPacket(resp, { drafts, optInPuts, pendingGroups });
       const actionLabel = {
         assign_group: "Assign " + scopeRefs.length + " channels to a group",
         arrange_range: "Arrange " + scopeRefs.length + " channels into "
@@ -2896,14 +3304,18 @@
         shift_interval: "Shift " + Math.min(scopeStart, scopeEnd) + "–" + Math.max(scopeStart, scopeEnd)
           + " by " + (offset > 0 ? "+" : "") + offset,
       }[action] || "Arrangement";
+      // R8: persist the COMPLETE editable intent (scope + all settings), so
+      // reload/replan reconstructs exactly what the owner authored.
       onStage({
         baseRevision: resp.revision,
         correlationToken: tokenRef.current,
         label: actionLabel,
-        intent: Object.assign({}, intent, {
+        intent: Object.assign({}, formState, intent, {
           scopeType, action,
           range: intent.range || null, start: intent.start != null ? intent.start : null,
           offset: intent.offset != null ? intent.offset : null,
+          order: normalizeOrder(order),
+          pendingGid: newGroupName.trim() ? pendingGid : null,
         }),
         response: resp,
         packet,
@@ -2930,26 +3342,64 @@
     const bandMixedError = respErrors.find((e) => e && e.code === "band_mixed");
 
     return h(Dialog, {
-      title: reviewStaged ? "Review staged arrangement" : "Organize channels",
+      title: reviewStaged ? "Review staged arrangement"
+        : taskGroup ? "Place “" + taskGroup.name + "” in a range"
+          : "Organize channels",
       onClose, wide: true, dialogClass: "jw-sheet-organize",
       footer: reviewStaged
-        ? [h("button", { key: "c", className: "jw-btn jw-btn-primary", onClick: onClose }, "Close review")]
+        ? [
+            // F6: a reversal staging has NO editable form — going "back to
+            // edit" would seed the sheet with an intent no control
+            // understands. Offer the honest action instead: replan it fresh.
+            reviewStaged.intent && reviewStaged.intent.type === "reversal"
+              ? h("button", { key: "b", className: "jw-btn", onClick: onReplan || onClose }, "Replan reversal")
+              : h("button", { key: "b", className: "jw-btn", onClick: onBackToEdit || onClose }, "← Back to edit"),
+            h("button", { key: "c", className: "jw-btn jw-btn-primary", onClick: onClose }, "Close review"),
+          ]
         : [
+            // UX2: the consequence summary sits next to the Stage button.
+            h("span", {
+              key: "sum", className: "jw-consequence", role: "status",
+            }, consequenceLine || (busy ? "Planning…" : "Complete the sections above to preview the plan.")),
             h("button", { key: "c", className: "jw-btn", onClick: onClose }, "Close — keep staging"),
             h("button", {
               key: "s", className: "jw-btn jw-btn-primary", disabled: !stageable,
               title: stageable
                 ? "Stage this plan locally — nothing is written until Apply arrangement"
-                : "The plan must be valid and change something first",
+                : (incompleteTemps.length
+                  ? "Finish the new channels' source rules first — see the notice above"
+                  : "The plan must be valid, match the current settings, and change something first"),
               onClick: stage,
-            }, busy ? "Planning…" : "Stage arrangement"),
+            }, busy && !bound ? "Planning…" : stageButtonLabel),
           ],
     },
       reviewStaged ? null : [
-        // ---- 1. Channels ----
-        h("section", { key: "s1", className: "jw-orgsec", "aria-label": "Channels" },
-          sectionHead("1", "Channels"),
-          h("div", { className: "jw-chip-row", role: "radiogroup", "aria-label": "Scope" },
+        incompleteTemps.length ? h("div", {
+          key: "s0", className: "jw-orgsec jw-orgsec-notice", role: "alert",
+        },
+          h("strong", null, "Finish the new channels' source rules before staging."),
+          " A channel with no source can't go on the air, so this plan can't be staged yet:",
+          incompleteTemps.map((t) => h("span", { key: t.ref, className: "jw-incomplete-temp" },
+            h("button", {
+              className: "jw-link",
+              onClick: () => { if (onOpenDraft) onOpenDraft(t.ref); },
+            }, "Open “" + t.name + "”…"),
+          )),
+        ) : null,
+        // ---- 1. Channels and destination ----
+        h("section", { key: "s1", className: "jw-orgsec", "aria-label": "Channels and destination" },
+          sectionHead("1", taskGroup ? "Destination" : "Channels and destination"),
+          taskGroup ? h("div", { className: "jw-task-scope" },
+            h("span", { className: "jw-task-scope-line" },
+              h("strong", null, "“" + taskGroup.name + "”"),
+              " — " + scopeRefs.length + " channel" + (scopeRefs.length === 1 ? "" : "s") + " in this group"),
+            h("button", {
+              className: "jw-btn jw-btn-ghost jw-btn-small",
+              "aria-expanded": advancedScope ? "true" : "false",
+              onClick: () => setAdvancedScope((v) => !v),
+            }, advancedScope ? "Use the whole group" : "Change selection…"),
+          ) : null,
+          (!taskGroup || advancedScope) ? h("div", { className: "jw-chip-row", role: "radiogroup", "aria-label": "Scope" },
             [
               ["selection", "Current selection" + (selectionIds && selectionIds.size ? " (" + selectionIds.size + ")" : "")],
               ["group", "An entire group"],
@@ -2963,19 +3413,24 @@
                 || (key === "filter" && !(filteredIds && filteredIds.length))
                 || (action === "shift_interval" && key !== "interval"),
               onClick: () => setScopeType(key),
-            }, label))),
-          scopeType === "group" ? h("div", { className: "jw-field" },
+            }, label))) : null,
+          (!taskGroup || advancedScope) && scopeType === "group" ? h("div", { className: "jw-field" },
             h("label", { className: "jw-field-label", htmlFor: "jw-org-group" }, "Group"),
             h("select", {
               id: "jw-org-group", className: "jw-input", value: scopeGroupId,
               onChange: (e) => setScopeGroupId(e.target.value),
             }, (groups || []).map((g) => h("option", { key: g.id, value: g.id }, g.name))),
           ) : null,
-          (scopeType === "interval" || action === "shift_interval") ? h("div", { className: "jw-fieldrow" },
+          (!taskGroup || advancedScope) && (scopeType === "interval" || action === "shift_interval") ? h("div", { className: "jw-fieldrow" },
             numInput("jw-org-scstart", "From number", scopeStart, setScopeStart, 1, 899),
             numInput("jw-org-scend", "To number", scopeEnd, setScopeEnd, 1, 899),
           ) : null,
-          h("p", { className: "jw-scope-line" },
+          seed && seed.scopeCount != null && seed.scopeCount !== scopeRefs.length && scopeType === "group"
+            ? h("p", { className: "jw-note-warn", role: "status" },
+                "This group's membership changed since the plan was staged (was " + seed.scopeCount
+                + ", now " + scopeRefs.length + ") — review the new scope before staging again.")
+            : null,
+          (!taskGroup || advancedScope) ? h("p", { className: "jw-scope-line" },
             action === "shift_interval"
               ? (Number.isInteger(scopeStart) && Number.isInteger(scopeEnd)
                   ? "Every channel currently in " + Math.min(scopeStart, scopeEnd) + "–" + Math.max(scopeStart, scopeEnd)
@@ -2983,27 +3438,19 @@
                   : "Pick the interval to shift.")
               : scopeRefs.length + " channel" + (scopeRefs.length === 1 ? "" : "s") + " in scope"
                 + (scopeTempRefs.length ? " (" + scopeTempRefs.length + " not yet on the server — placed as drafts)" : "")
-                + (hiddenInScope ? " — includes " + hiddenInScope + " hidden by the current filter" : "")),
-          mixedScope && action !== "assign_group"
+                + (hiddenInScope ? " — includes " + hiddenInScope + " hidden by the current filter" : "")) : null,
+          (!taskGroup || advancedScope) && mixedScope && action !== "assign_group"
             ? h("p", { className: "jw-note-warn" },
                 "The scope mixes My Channels (1–99) and networks (100–899) — a number arrangement needs one band. "
                 + "Split the selection (via Select channels) and arrange each band separately — nothing is omitted silently.")
             : null,
-        ),
-        // ---- 2. Action ----
-        h("section", { key: "s2", className: "jw-orgsec", "aria-label": "Action" },
-          sectionHead("2", "Action"),
-          h("div", { className: "jw-chip-row", role: "radiogroup", "aria-label": "Action" },
+          (!taskGroup || advancedScope) ? h("div", { className: "jw-chip-row", role: "radiogroup", "aria-label": "Action" },
             ORG_ACTIONS.map((a) => h("button", {
               key: a.key,
               className: "jw-chip" + (action === a.key ? " jw-chip-active" : ""),
               "aria-pressed": action === a.key ? "true" : "false",
               onClick: () => setAction(a.key),
-            }, a.label))),
-        ),
-        // ---- 3. Destination and order ----
-        h("section", { key: "s3", className: "jw-orgsec", "aria-label": "Destination and order" },
-          sectionHead("3", "Destination and order"),
+            }, a.label))) : null,
           action === "assign_group" ? h("div", null,
             h("div", { className: "jw-field" },
               h("label", { className: "jw-field-label", htmlFor: "jw-org-dest" }, "Move to existing group"),
@@ -3065,39 +3512,58 @@
                 onClick: () => setOrder("number"),
               }, "Keep current number order"),
               h("button", {
-                className: "jw-chip" + (order === "alpha" ? " jw-chip-active" : ""),
-                "aria-pressed": order === "alpha" ? "true" : "false",
-                onClick: () => setOrder("alpha"),
+                className: "jw-chip" + (order === "name" ? " jw-chip-active" : ""),
+                "aria-pressed": order === "name" ? "true" : "false",
+                onClick: () => setOrder("name"),
               }, "Alphabetical (A–Z, ties by channel id)")),
           ) : null,
         ),
-        // ---- 4. Conflicts ----
-        h("section", { key: "s4", className: "jw-orgsec", "aria-label": "Conflicts" },
-          sectionHead("4", "Conflicts"),
+        // ---- 2. Other channels in this range (conflicts) ----
+        h("section", { key: "s2", className: "jw-orgsec", "aria-label": "Conflicts" },
+          sectionHead("2", action === "arrange_range" ? "Other channels in this range" : "Conflicts"),
           action === "arrange_range" ? h("div", null,
             h("div", { className: "jw-chip-row", role: "radiogroup", "aria-label": "Outsider strategy" },
               h("button", {
                 className: "jw-chip" + (strategy === "useAvailable" ? " jw-chip-active" : ""),
                 "aria-pressed": strategy === "useAvailable" ? "true" : "false",
                 onClick: () => setStrategy("useAvailable"),
-              }, "Use available numbers"),
+              }, "Keep other channels in place"),
               h("button", {
                 className: "jw-chip" + (strategy === "exclusive" ? " jw-chip-active" : ""),
                 "aria-pressed": strategy === "exclusive" ? "true" : "false",
                 onClick: () => setStrategy("exclusive"),
-              }, "Make this range exclusive (one time)")),
+              }, "Move other channels out of this range")),
             strategy === "useAvailable"
               ? h("p", { className: "jw-hint" },
-                  "Channels already inside the range that are not in scope keep their numbers; the selection packs around them.")
+                  "Your channels take the free positions; channels already inside the range keep their numbers.")
               : h("div", null,
                   h("p", { className: "jw-hint" },
-                    "Every other channel in the range moves to a free number in the interval you choose. "
-                    + "This is a one-time arrangement, not a permanent reservation."),
+                    "Every other channel in the range moves to free numbers you pick below. "
+                    + "This is a one-time arrangement — the range is never reserved."),
                   h("div", { className: "jw-fieldrow" },
-                    numInput("jw-org-ostart", "Relocate outsiders to: from", outStart, setOutStart, 1, 899),
+                    numInput("jw-org-ostart", "Relocate other channels to: from", outStart, setOutStart, 1, 899),
                     numInput("jw-org-oend", "to", outEnd, setOutEnd, 1, 899),
                   ),
                 ),
+            occupancy ? h("div", { className: "jw-occupancy-wrap" },
+              occupancy.tooWide || !occupancy.cells
+                ? h("p", { className: "jw-hint" },
+                    "Range " + occupancy.lo + "–" + occupancy.hi + " (" + occupancy.total.toLocaleString()
+                    + " slots) is too wide for the visual strip — the Review below lists every affected channel.")
+                : h("div", { className: "jw-occupancy", role: "img", "aria-label": "Occupancy of range " + occupancy.lo + "–" + occupancy.hi },
+                    occupancy.cells.map((c) => h("span", {
+                      key: c.n, className: "jw-occ jw-occ-" + c.kind, title: c.title,
+                    }))),
+              !occupancy.tooWide && occupancy.cells
+                ? h("p", { className: "jw-hint" },
+                    "Range " + occupancy.lo + "–" + occupancy.hi + ": " + occupancy.inRange + " selected · "
+                    + occupancy.blockers + " other channel" + (occupancy.blockers === 1 ? "" : "s") + " · "
+                    + occupancy.free + " free"
+                    + (occupancy.blockerList.length
+                        ? " — occupied by: " + occupancy.blockerList.join(", ") + (occupancy.blockers > 6 ? " …" : "")
+                        : ""))
+                : null,
+            ) : null,
             capacityLine ? h("p", {
               className: "jw-scope-line" + (capacity && capacity.shortfall ? " jw-error-text" : ""),
               role: capacity && capacity.shortfall ? "alert" : undefined,
@@ -3108,9 +3574,9 @@
               : "Displaced channels keep their relative order and push through free numbers; every one of them is listed in the Review below."),
         ),
       ],
-      // ---- 5. Review ----
+      // ---- 3. Review ----
       h("section", { className: "jw-orgsec", "aria-label": "Review" },
-        reviewStaged ? null : sectionHead("5", "Review"),
+        reviewStaged ? null : sectionHead("3", "Review"),
         reviewStaged && reviewStaged.label ? h("p", { className: "jw-scope-line" }, reviewStaged.label) : null,
         bandMixedError
           ? h("div", { className: "jw-review-errors", role: "alert" },
@@ -3132,7 +3598,15 @@
           : null,
         warnings.length
           ? h("div", { className: "jw-note-warn" },
-              warnings.map((w, i) => h("div", { key: i }, w.message || String(w.code || w))))
+              // UX6: routine warnings read as everyday consequences; the raw
+              // server diagnostics live in an expandable details area.
+              warnings.map((w, i) => h("div", { key: i }, warningPlainText(w))),
+              warnings.some((w) => !WARNING_COPY[w && w.code])
+                ? h("details", { className: "jw-warn-details" },
+                    h("summary", null, "Technical details"),
+                    warnings.filter((w) => !WARNING_COPY[w && w.code]).map((w, i) => h("div", {
+                      key: i, className: "jw-hint",
+                    }, (w.code ? w.code + " — " : "") + (w.message || "")))) : null)
           : null,
         noop ? h("p", { className: "jw-hint" }, "Nothing would change with these settings.") : null,
         !resp && busy ? h("p", { className: "jw-hint" }, "Planning…") : null,
@@ -3141,66 +3615,50 @@
           : null,
         loadError ? h("p", { className: "jw-error-text", role: "alert" }, loadError) : null,
         resp && reviewRows.length
-          ? h("div", null,
-              h("div", { className: "jw-review-tools" },
-                h("input", {
-                  type: "search", className: "jw-input jw-chip-filter",
-                  placeholder: "Filter review rows…", "aria-label": "Filter review rows",
-                  value: reviewFilter, onChange: (e) => setReviewFilter(e.target.value),
-                }),
-                h("span", { className: "jw-hint" },
-                  reviewRows.length + " affected row" + (reviewRows.length === 1 ? "" : "s")
-                  + (reviewRows.some((r) => r.displaced)
-                      ? " · " + reviewRows.filter((r) => r.displaced).length + " displaced bystander"
-                        + (reviewRows.filter((r) => r.displaced).length === 1 ? "" : "s")
-                      : "")),
+          ? h("div", { className: "jw-review-xscroll" },
+              // UX5: a sticky affected-count summary + the review split into
+              // "Your selected channels" vs "Other channels that move".
+              h("div", { className: "jw-review-sticky" },
+                h("div", { className: "jw-review-tools" },
+                  h("input", {
+                    type: "search", className: "jw-input jw-chip-filter",
+                    placeholder: "Filter review rows…", "aria-label": "Filter review rows",
+                    value: reviewFilter, onChange: (e) => setReviewFilter(e.target.value),
+                  }),
+                  h("span", { className: "jw-hint" },
+                    selectedRows.length + " selected channel" + (selectedRows.length === 1 ? "" : "s") + " move"
+                    + (displacedRows.length
+                        ? " · " + displacedRows.length + " other" + (displacedRows.length === 1 ? " moves" : "s move")
+                        : ""))),
               ),
-              // ONE horizontal scroller for head + rows: on narrow screens
-              // the table scrolls as a block (head never misaligns).
-              h("div", { className: "jw-review-xscroll" },
               h("div", { className: "jw-review-head" },
                 h("span", { className: "jw-review-h-channel" }, "Channel"),
                 h("span", { className: "jw-review-h-move" }, "Number"),
                 h("span", { className: "jw-review-h-group" }, "Group"),
-                h("span", { className: "jw-review-h-reason" }, "Reason"),
+                h("span", { className: "jw-review-h-reason" }, "Why"),
               ),
-              h(WindowedList, {
-                items: reviewRows, itemHeight: 36, ariaLabel: "Arrangement review",
-                className: "jw-review-list", resetKey: intentKey,
-                render: (r) => h("div", {
-                  key: r.key,
-                  className: "jw-review-row" + (r.displaced ? " jw-review-row-displaced" : ""),
-                  role: "option", "aria-selected": r.displaced ? "false" : "true",
-                },
-                  h(GlyphTile, { codepoint: r.glyph, color: r.color, size: 24, fallback: r.number ? r.number[1] : "—" }),
-                  h("span", { className: "jw-review-name" },
-                    r.name,
-                    r.isTemp ? h(StatusChip, { kind: "accent" }, "new") : null,
-                    r.hasDraft && !reviewStaged ? h("button", {
-                      className: "jw-link jw-review-optin",
-                      title: "This channel also has unsaved edits — include them in this Apply (its number is reconciled to the plan)",
-                      "aria-pressed": optIns.has(r.ref) ? "true" : "false",
-                      onClick: (e) => {
-                        e.stopPropagation();
-                        setOptIns((cur) => {
-                          const next = new Set(cur);
-                          if (next.has(r.ref)) next.delete(r.ref); else next.add(r.ref);
-                          return next;
-                        });
-                      },
-                    }, optIns.has(r.ref) ? "draft included ✓" : "include draft…") : null,
-                  ),
-                  h("span", { className: "jw-review-move" },
-                    r.number
-                      ? (r.number[0] != null ? String(r.number[0]) : "—") + " → " + (r.number[1] != null ? String(r.number[1]) : "—")
-                      : "·"),
-                  h("span", { className: "jw-review-group" },
-                    r.group ? groupName(r.group[0]) + " → " + groupName(r.group[1]) : "·"),
-                  h("span", { className: "jw-review-reason" },
-                    (r.displaced ? "displaced — " : "selected — ") + r.reasons.map(reasonText).join("; ")),
-                ),
-              }),
-              )
+              selectedRows.length
+                ? h("div", { className: "jw-review-subhead", role: "heading", "aria-level": "4" },
+                    "Your selected channels (" + selectedRows.length + ")")
+                : null,
+              selectedRows.length
+                ? h(WindowedList, {
+                    items: selectedRows, itemHeight: 36, ariaLabel: "Selected channels in this plan",
+                    className: "jw-review-list", resetKey: intentKey + "|sel", listStyle: { height: "190px" },
+                    render: renderReviewRow,
+                  })
+                : null,
+              displacedRows.length
+                ? h("div", { className: "jw-review-subhead", role: "heading", "aria-level": "4" },
+                    "Other channels that move (" + displacedRows.length + ")")
+                : null,
+              displacedRows.length
+                ? h(WindowedList, {
+                    items: displacedRows, itemHeight: 36, ariaLabel: "Other channels displaced by this plan",
+                    className: "jw-review-list", resetKey: intentKey + "|dis", listStyle: { height: "160px" },
+                    render: renderReviewRow,
+                  })
+                : null,
             )
           : null,
       ),
@@ -3210,31 +3668,82 @@
   // ------------------------------------------------------------------
   // Arrangement bar: the scoped sticky bar for a staged arrangement.
   // Scope stays explicit next to the editor's own Apply channel bar.
+  // Submission lifecycle (R6): the pending entry carries
+  // state "submitting" | "polling" | "outcome_unknown"; committed/rejected
+  // resolve through the durable receipt. A transport failure NEVER leaves
+  // the button stuck on "Applying…" — it offers Check result / Retry.
   // ------------------------------------------------------------------
 
-  function ArrangementBar({ staged, pending, libRevision, busy, onApply, onReview, onDiscard, onUndo, onRedo, canUndo, canRedo, onReplan }) {
-    if (!staged) return null;
-    const ba = staged.beforeAfter || {};
+  function ArrangementBar({ staged, pending, libRevision, busy, onApply, onCheckResult, onRetry, onForgetPending, onReview, onDiscard, onUndo, onRedo, canUndo, canRedo, onReplan }) {
+    const lifecycle = pending ? (pending.state || "submitting") : "idle";
+    // UX7: Undo/Redo stay discoverable even with nothing staged (the stacks
+    // remember prior stagings until something replaces them). F3: an
+    // unresolved submission keeps the bar visible so Check result / Retry /
+    // Forget stay reachable with NOTHING staged.
+    if (!staged && !canUndo && lifecycle !== "outcome_unknown") return null;
+    const ba = staged ? (staged.beforeAfter || {}) : {};
     const refs = Object.keys(ba);
     const renumbered = refs.filter((r) => ba[r] && ba[r].number).length;
-    const displacedSet = new Set((((staged.response || {}).displaced) || [])
+    const regrouped = refs.filter((r) => ba[r] && ba[r].group).length;
+    const displacedSet = new Set(((((staged || {}).response || {}).displaced) || [])
       .map((nc) => nc.channelId || nc.tempRef));
-    if (!displacedSet.size) {
+    if (!displacedSet.size && staged) {
       for (const nc of ((staged.response || {}).numberChanges) || []) {
         if (nc.selected === false) displacedSet.add(nc.channelId || nc.tempRef);
       }
     }
-    const placed = Object.keys(staged.tempRefs || {}).length;
-    const staleBase = libRevision != null && staged.baseRevision != null && libRevision !== staged.baseRevision;
+    const placed = staged ? Object.keys(staged.tempRefs || {}).length : 0;
+    const moveCount = renumbered + regrouped;
+    const staleBase = !!staged && libRevision != null && staged.baseRevision != null && libRevision !== staged.baseRevision;
     const parts = [];
     if (renumbered) parts.push(renumbered + " channel" + (renumbered === 1 ? "" : "s") + " renumbered");
+    if (regrouped) parts.push(regrouped + " channel" + (regrouped === 1 ? "" : "s") + " regrouped");
     if (displacedSet.size) parts.push(displacedSet.size + " other channel" + (displacedSet.size === 1 ? "" : "s") + " relocated");
     if (placed) parts.push(placed + " new channel" + (placed === 1 ? "" : "s") + " placed");
-    if (!parts.length) parts.push(staged.label || "Arrangement staged");
+    if (staged && !parts.length) parts.push(staged.label || "Arrangement staged");
+    const applyLabel = moveCount
+      ? "Apply " + moveCount + " channel move" + (moveCount === 1 ? "" : "s")
+      : "Apply arrangement";
+    if (!staged) {
+      return h("div", { className: "jw-arrange-bar jw-arrange-bar-empty", role: "region", "aria-label": "Arrangement history" },
+        h("span", { className: "jw-arrange-label" },
+          h("strong", null, lifecycle === "outcome_unknown" ? "Apply outcome unknown" : "Nothing staged"),
+          h("span", { className: "jw-arrange-sublabel" },
+            lifecycle === "outcome_unknown"
+              ? "The packet and request id are kept — resolve it before staging anything new."
+              : "Undo brings back a staged plan until something replaces it.")),
+        h("span", { style: { flex: 1 } }),
+        lifecycle === "outcome_unknown"
+          ? [
+              h("button", {
+                key: "check", className: "jw-btn jw-btn-small",
+                onClick: onCheckResult,
+                title: "Ask the server once for the durable receipt of the kept request id",
+              }, "Check result"),
+              h("button", {
+                key: "retry", className: "jw-btn jw-btn-small jw-btn-primary",
+                onClick: onRetry,
+                title: "Resubmit the exact same packet and request id — byte-identical retries can never commit twice",
+              }, "Retry same Apply"),
+              h("button", {
+                key: "forget", className: "jw-btn jw-btn-ghost jw-btn-small",
+                onClick: onForgetPending,
+                title: "Give up on the kept request — only do this if Check result keeps coming back empty and you accept the risk",
+              }, "Forget kept request"),
+            ]
+          : null,
+        canUndo ? h("button", { className: "jw-btn jw-btn-ghost jw-btn-small", onClick: onUndo, title: "Undo (Ctrl+Z)" }, "Undo") : null,
+        canRedo ? h("button", { className: "jw-btn jw-btn-ghost jw-btn-small", onClick: onRedo, title: "Redo (Ctrl+Shift+Z)" }, "Redo") : null,
+      );
+    }
     return h("div", { className: "jw-arrange-bar", role: "region", "aria-label": "Staged arrangement" },
       h("span", { className: "jw-arrange-label" },
         h("strong", null, parts.join(" · ")),
         staged.label ? h("span", { className: "jw-arrange-sublabel" }, staged.label) : null),
+      lifecycle === "outcome_unknown"
+        ? h("span", { className: "jw-note-warn jw-arrange-stale", role: "alert" },
+            "The last Apply's outcome is unknown — the packet and request id are kept.")
+        : null,
       staleBase
         ? h("span", { className: "jw-note-warn jw-arrange-stale", role: "status" },
             "Based on r" + staged.baseRevision + " — the library is now r" + libRevision + ".")
@@ -3243,16 +3752,43 @@
       canUndo ? h("button", { className: "jw-btn jw-btn-ghost jw-btn-small", onClick: onUndo, title: "Undo (Ctrl+Z)" }, "Undo") : null,
       canRedo ? h("button", { className: "jw-btn jw-btn-ghost jw-btn-small", onClick: onRedo, title: "Redo (Ctrl+Shift+Z)" }, "Redo") : null,
       h("button", { className: "jw-btn jw-btn-small", onClick: onReview }, "Review…"),
-      h("button", {
-        className: "jw-btn jw-btn-ghost jw-btn-small", disabled: busy,
-        onClick: onDiscard,
-      }, "Discard"),
+      lifecycle === "submitting" || lifecycle === "polling"
+        ? h("span", { className: "jw-pill jw-pill-applying", role: "status", title: "The receipt resolves in the background — leaving the page does not interrupt it" },
+            lifecycle === "submitting" ? "Submitting…" : "Applying…")
+        : null,
+      lifecycle === "outcome_unknown"
+        ? [
+            h("button", {
+              key: "check", className: "jw-btn jw-btn-small",
+              onClick: onCheckResult,
+              title: "Ask the server once for the durable receipt of the kept request id",
+            }, "Check result"),
+            h("button", {
+              key: "retry", className: "jw-btn jw-btn-small jw-btn-primary",
+              onClick: onRetry,
+              title: "Resubmit the exact same packet and request id — byte-identical retries can never commit twice",
+            }, "Retry same Apply"),
+            h("button", {
+              key: "forget", className: "jw-btn jw-btn-ghost jw-btn-small",
+              onClick: onForgetPending,
+              title: "Give up on the kept request — only do this if Check result keeps coming back empty and you accept the risk",
+            }, "Forget kept request"),
+          ]
+        : null,
+      lifecycle === "idle" || lifecycle === "outcome_unknown"
+        ? h("button", {
+            className: "jw-btn jw-btn-ghost jw-btn-small", disabled: busy,
+            onClick: onDiscard,
+          }, "Discard")
+        : null,
       staleBase
         ? h("button", { className: "jw-btn jw-btn-primary", onClick: onReplan }, "Reload and replan")
-        : h("button", {
-            className: "jw-btn jw-btn-primary", disabled: busy || !!pending,
-            onClick: onApply,
-          }, (pending || busy) ? "Applying…" : "Apply arrangement"),
+        : lifecycle === "idle"
+          ? h("button", {
+              className: "jw-btn jw-btn-primary", disabled: busy,
+              onClick: onApply,
+            }, applyLabel)
+          : null,
     );
   }
 
@@ -3268,7 +3804,7 @@
 
   function EditorPane({
     channelId, lib, getRevision, drafts, confirm, toast, arrangement,
-    submitOps, onApplied, onCreated, libraryVersion,
+    submitOps, submitApply, onApplied, onCreated, libraryVersion,
   }) {
     const isTemp = String(channelId).startsWith("temp-");
     // arrangement = { available, staged, openResolution(subject) } — the
@@ -3442,6 +3978,14 @@
               + ". Your draft keeps your values — review them before Apply.";
           }
           base = clone(storedChannel);
+        }
+        if (saved && saved.conflict === "definition_unavailable" && !isTemp) {
+          // F2: the arrangement committed this channel but its fresh
+          // definition could not be fetched — the draft is kept, flagged
+          // conflicted; the owner must reload before editing further.
+          notice = (notice ? notice + " " : "")
+            + "The committed definition could not be loaded after the last arrangement Apply — "
+            + "reload this channel (Reload library) before editing further.";
         }
         if (!alive) return;
         setStored(storedChannel);
@@ -3865,7 +4409,11 @@
       setPhase("applying");
       inFlightRef.current = true;
 
-      const promise = applyChannelChanges(requestId, expected, ops);
+      // R9: channel Applies join the ONE submission coordinator
+      // (enqueueSubmit) — they serialize with bulk/groups/arrangement, and
+      // the coordinator adopts the committed revision BEFORE the queue
+      // releases, so the next submission never reads a stale revision.
+      const promise = (submitApply || ((fn) => fn()))(() => applyChannelChanges(requestId, expected, ops));
       inflightApplies.set(channelId, { requestId, snapshot, expected, promise, name: applyName });
       inflightNotify();
       let receipt;
@@ -4958,7 +5506,20 @@
       if (groupFilter && g.id !== groupFilter) continue;
       const members = channels.filter((c) => c.groupId === g.id);
       if (!members.length && q) continue;
-      items.push({ type: "header", g, count: members.length });
+      // UX8: the header shows the member count AND the actual number span /
+      // gap summary (current truth, never an implied reservation).
+      let spanText = "";
+      let spanTitle = members.length + " channel" + (members.length === 1 ? "" : "s");
+      if (members.length) {
+        const nums = members.map((c) => c.number).filter((n) => Number.isInteger(n)).sort((a, b) => a - b);
+        if (nums.length) {
+          const gaps = (nums[nums.length - 1] - nums[0] + 1) - nums.length;
+          spanText = nums[0] + "–" + nums[nums.length - 1] + (gaps > 0 ? " · " + gaps + " gap" + (gaps === 1 ? "" : "s") : "");
+          spanTitle += " · numbers " + nums[0] + "–" + nums[nums.length - 1]
+            + (gaps > 0 ? " · " + gaps + " free number" + (gaps === 1 ? "" : "s") + " inside the span" : " · no gaps");
+        }
+      }
+      items.push({ type: "header", g, count: members.length, spanText, spanTitle });
       if (!(collapsed.has(g.id) && !searching)) {
         for (const c of members) items.push({ type: "ch", c });
       }
@@ -4966,8 +5527,10 @@
     return items;
   }
 
-  function DialRow({ ch, selected, bulkMode, checked, hasDraft, groupsById, onSelect, onCheck }) {
+  function DialRow({ ch, selected, bulkMode, checked, hasDraft, groupsById, onSelect, onCheck, onInsert }) {
     const shiftRef = useRef(false);
+    const [insertOpen, setInsertOpen] = useState(false);
+    const insertRef = useOutsideClose(insertOpen, () => setInsertOpen(false));
     const ariaLabel = (ch.number != null ? ch.number + " · " : "") + ch.name
       + (ch.archived ? ", archived" : ch.paused ? ", paused" : "") + (ch.staged ? ", staged number" : "");
     return h("div", {
@@ -5007,6 +5570,31 @@
         !ch.archived && ch.paused ? h(StatusChip, { kind: "dim" }, "paused") : null,
         ch.temp ? h(StatusChip, { kind: "accent" }, "new") : null,
       ),
+      // UX4: contextual insert actions — a new channel before/after this
+      // row prefills the placement sheet (the conflict resolver).
+      onInsert && !bulkMode ? h("span", {
+        className: "jw-menu-host jw-insert-host", ref: insertRef,
+        onClick: (e) => e.stopPropagation(),
+        onKeyDown: (e) => e.stopPropagation(),
+      },
+        h("button", {
+          className: "jw-btn jw-btn-ghost jw-group-menu-btn jw-insert-btn",
+          "aria-haspopup": "menu", "aria-expanded": insertOpen ? "true" : "false",
+          "aria-label": "Insert a new channel next to " + ch.name,
+          title: "New channel before/after this",
+          onClick: (e) => { e.stopPropagation(); setInsertOpen((v) => !v); },
+        }, "＋"),
+        insertOpen ? h("span", { className: "jw-menu jw-group-menu", role: "menu" },
+          h("button", {
+            role: "menuitem", className: "jw-menu-item",
+            onClick: (e) => { e.stopPropagation(); setInsertOpen(false); onInsert(ch, "before"); },
+          }, "New channel before this"),
+          h("button", {
+            role: "menuitem", className: "jw-menu-item",
+            onClick: (e) => { e.stopPropagation(); setInsertOpen(false); onInsert(ch, "after"); },
+          }, "New channel after this"),
+        ) : null,
+      ) : null,
     );
   }
 
@@ -5076,10 +5664,12 @@
 
     const draftsRef = useRef(null);
     const libRef = useRef(null);
+    const liveRevisionRef = useRef(null); // F4: revision adopted SYNCHRONOUSLY on fetch, before any render
     const selectedIdRef = useRef(null);
     const searchInputRef = useRef(null);
     const toastSeq = useRef(0);
     const orgRef = useRef(null);          // makeOrgStore(libraryId), created at boot
+    const organizeFormRef = useRef(null); // UX7: partial organize-sheet settings survive closing
     const liveSeq = useRef(0);
 
     libRef.current = lib;
@@ -5135,6 +5725,7 @@
           orgRef.current.subscribe(() => setOrgTick((x) => x + 1));
           setOrgTick((x) => x + 1);
           setLib(data);
+          liveRevisionRef.current = typeof data.revision === "number" ? data.revision : null;
           const first = (data.channels || [])[0];
           if (first) setSelectedId(first.id);
           recoverPending(libraryId);
@@ -5153,21 +5744,34 @@
       if (!entry || !entry.requestId) return;
       void entry.expected; // the receipt carries the truth
       pollApplyReceipt(entry.requestId).then(async (receipt) => {
-        if (!receipt || receipt.status === "unknown") return; // keep for a manual retry
+        if (!receipt || receipt.status === "unknown") {
+          // R6: the submission identity survives — the bar must offer
+          // Check result / Retry, not a phantom "Applying…".
+          if (entry.scope === "arrangement" && orgRef.current && orgRef.current.get().pending
+              && orgRef.current.get().pending.requestId === entry.requestId) {
+            orgRef.current.setPendingState("outcome_unknown");
+          }
+          return; // keep for a manual retry
+        }
         clearOpsPending(libraryId);
         if (receipt.status === "committed") {
           const org = orgRef.current;
           const staged = org ? org.get().staged : null;
           if (entry.scope === "arrangement" && org && org.get().pending
               && org.get().pending.requestId === entry.requestId) {
-            finishArrangementCommit(receipt, staged);
+            // Reconcile the SUBMITTED snapshot (R2), not whatever is staged.
+            finishArrangementCommit(receipt, org.get().pending);
           } else {
             await refreshLibrary();
             toast((entry.label || "Apply") + " — committed at r" + receipt.revision + " (recovered).", "ok");
           }
+          void staged;
         } else if (receipt.error === "revision_conflict") {
+          if (entry.scope === "arrangement" && orgRef.current) orgRef.current.clearPending();
           await refreshLibrary();
           toast("A queued Apply hit a revision conflict while away — nothing changed; review and Apply again.", "err");
+        } else if (entry.scope === "arrangement" && orgRef.current) {
+          orgRef.current.clearPending();
         }
       }).catch(() => { /* offline: the pending record stays for the next visit */ });
       // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -5199,6 +5803,10 @@
     const refreshLibrary = useCallback(async () => {
       try {
         const data = await fetchLibrary();
+        // F4: adopt the fetched revision into the ref-level slot the moment
+        // the response arrives — render timing must not decide what the
+        // next queued submission stamps as expectedRevision.
+        if (data && typeof data.revision === "number") liveRevisionRef.current = data.revision;
         setLib(data);
         setLibraryVersion((x) => x + 1); // editors rebase their drafts on fresh state
         return data;
@@ -5219,9 +5827,13 @@
     const submitOps = useCallback((ops, opts) => enqueueSubmit(async () => {
       const options = opts || {};
       const libraryId = libRef.current ? (libRef.current.libraryId || "default") : "default";
+      // F4: stamp expectedRevision from the synchronously-adopted slot —
+      // never from render-timing state that a just-released queue item may
+      // not have seen yet.
       const expected = options.expectedOverride != null
         ? options.expectedOverride
-        : (libRef.current ? libRef.current.revision : 0);
+        : (liveRevisionRef.current != null ? liveRevisionRef.current
+          : (libRef.current ? libRef.current.revision : 0));
       const opsDigest = JSON.stringify(ops);
       const pending = readOpsPending(libraryId);
       const requestId = options.requestIdOverride
@@ -5236,7 +5848,7 @@
       }
       let receipt;
       try {
-        receipt = await applyChannelChanges(requestId, expected, ops);
+        receipt = await applyChannelChanges(requestId, expected, ops, options.onSubmitted);
       } catch (e) {
         toast("The Apply may or may not have committed — its outcome is unknown. "
               + "Apply again to reuse the same request (it cannot commit twice).", "err");
@@ -5263,39 +5875,109 @@
       return receipt;
     }), [refreshLibrary, toast]);
 
+    // R9: the editor's channel Apply rides the SAME coordinator. The wrapper
+    // adopts the committed revision (refreshLibrary) before the queue
+    // releases, so a follow-up bulk/arrangement Apply never guesses a stale
+    // expectedRevision.
+    const submitChannelApply = useCallback((fn) => enqueueSubmit(async () => {
+      const receipt = await fn();
+      if (receipt && receipt.status === "committed") await refreshLibrary();
+      return receipt;
+    }), [refreshLibrary]);
+
     // ---- arrangement Apply (scope: "arrangement") ----
     // Joins the SAME coordinator: the frozen packet is submitted verbatim,
     // an identical retry reuses the same requestId (exactly-once), and the
     // durable receipt is the only success signal.
-    const finishArrangementCommit = useCallback(async (receipt, staged) => {
+    //
+    // R2: `submitted` is the IMMUTABLE pending snapshot (packet +
+    // beforeAfter + correlationToken) captured at submission — completion
+    // reconciles ONLY that, never the editable staged draft. A NEWER
+    // staging survives the commit as dirty; it is re-reviewed/re-planned
+    // against the new revision, never silently cleared and never applied to
+    // content drafts.
+    const finishArrangementCommit = useCallback(async (receipt, submitted) => {
       const org = orgRef.current;
-      if (org) {
-        // receipt.idMap reconciles temp creations; drop their drafts and
-        // follow the new id when the editor sits on it.
-        const idMap = receipt.idMap || {};
-        for (const op of (staged && staged.packet ? staged.packet.ops : [])) {
-          if (op.op === "channel.create" && op.tempId && idMap[op.tempId]) {
-            if (draftsRef.current) draftsRef.current.drop(op.tempId);
-            if (selectedIdRef.current === op.tempId) setSelectedId(idMap[op.tempId]);
+      const snap = submitted || (org ? org.get().pending : null);
+      if (!snap) return;
+      const packetOps = (snap.packet && snap.packet.ops) || [];
+      const idMap = receipt.idMap || {};
+      if (draftsRef.current) {
+        // R3: compare each temp draft to its SUBMITTED wire snapshot. Drop
+        // only an unchanged, fully-acknowledged draft; remap newer edits
+        // onto receipt.idMap[tempId] with the fresh acknowledged base
+        // (pending editor state rides along).
+        for (const op of packetOps) {
+          if (op.op !== "channel.create" || !op.tempId) continue;
+          const finalId = idMap[op.tempId];
+          if (!finalId) continue;
+          const entry = draftsRef.current.get(op.tempId);
+          const current = entry && entry.draft;
+          if (current && draftDiffersFromSubmitted(current, op.channel)) {
+            // F2: the remapped draft must carry the SUBMITTED plan's final
+            // number/groupId for this tempRef — otherwise it would diff
+            // from the committed base as a phantom pending renumber and
+            // the next Apply would silently move the channel back.
+            const remapped = clone(current);
+            if (op.channel && op.channel.number != null) remapped.number = op.channel.number;
+            if (op.channel && op.channel.groupId != null) remapped.groupId = op.channel.groupId;
+            let fresh = null;
+            try {
+              fresh = (await runOp("GetChannelDefinition", { channelId: finalId })).channel;
+            } catch (e) { /* definition unavailable — handled below */ }
+            if (fresh) {
+              draftsRef.current.put(finalId, remapped,
+                { base: clone(fresh), pending: (entry && entry.pending) || null });
+            } else {
+              // F2: never store a REAL-channel-keyed draft with base:null
+              // (temp-channel semantics). Keep the draft, mark it
+              // conflicted — the editor tells the owner to reload the
+              // channel before editing further.
+              draftsRef.current.put(finalId, remapped,
+                { conflict: "definition_unavailable", pending: (entry && entry.pending) || null });
+            }
+          }
+          draftsRef.current.drop(op.tempId);
+          if (selectedIdRef.current === op.tempId) setSelectedId(finalId);
+        }
+        // Groups created in the packet: drafts that referenced them as
+        // pending lose the sentinel — the group now exists server-side.
+        for (const op of packetOps) {
+          if (op.op !== "group.put" || !op.group || !op.group.id) continue;
+          for (const id of draftsRef.current.ids()) {
+            const entry = draftsRef.current.get(id);
+            const d = entry && entry.draft;
+            if (d && d.pendingGroupName != null && d.groupId === op.group.id) {
+              const next = clone(d);
+              delete next.pendingGroupName;
+              draftsRef.current.put(id, next, { base: entry.base !== undefined ? entry.base : null });
+            }
           }
         }
         // Field-level rebase for bystander content drafts (never a
-        // wholesale channel.put).
-        if (staged && staged.beforeAfter) rebaseDraftsAfterArrangement(draftsRef.current, staged.beforeAfter);
+        // wholesale channel.put) — against the SUBMITTED before/after map.
+        if (snap.beforeAfter) rebaseDraftsAfterArrangement(draftsRef.current, snap.beforeAfter);
+      }
+      if (org) {
         org.clearPending();
-        org.clearStagedOnly();
+        // Clear the staging ONLY if it is the one that was submitted; a
+        // newer staging stays dirty and the bar flags it stale (its
+        // baseRevision no longer matches the new library revision) so the
+        // owner re-plans it explicitly.
+        const stagedNow = org.get().staged;
+        if (stagedNow && stagedNow.correlationToken === snap.correlationToken) org.clearStagedOnly();
       }
       await refreshLibrary();
       announce("Arrangement applied at r" + receipt.revision + ".");
       studioEmit("applied", { scope: "arrangement", revision: receipt.revision });
       // Post-commit Stage reversal: inverse map + FRESH validation + a NEW
       // Apply — never a blind replay, created rows never auto-deleted.
-      const stagedSnapshot = staged;
+      const stagedSnapshot = snap;
       toast("Arrangement applied at r" + receipt.revision + ".", "ok", {
-        action: stagedSnapshot ? {
+        action: {
           label: "Stage reversal",
           onClick: () => { void stageReversal(stagedSnapshot); },
-        } : null,
+        },
       });
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [refreshLibrary, toast, announce]);
@@ -5355,6 +6037,16 @@
       const org = orgRef.current;
       const staged = org ? org.get().staged : null;
       if (!org || !staged || !staged.packet) return;
+      // R9: a packet reviewed at an older revision is EXPLICITLY stale —
+      // never silently re-based onto the current revision. F4: read the
+      // live slot, not render state.
+      const liveRev = liveRevisionRef.current != null ? liveRevisionRef.current
+        : (libRef.current ? libRef.current.revision : null);
+      if (liveRev != null && staged.baseRevision != null && liveRev !== staged.baseRevision) {
+        toast("This plan was reviewed at r" + staged.baseRevision + " and the library is now r" + liveRev
+          + " — Reload and replan to review it against the current revision before Applying.", "err");
+        return;
+      }
       const ops = clone(staged.packet.ops);
       const expected = staged.packet.expectedRevision;
       const opsDigest = JSON.stringify(ops);
@@ -5368,8 +6060,12 @@
         org.setPending({
           requestId, expected, opsDigest,
           correlationToken: staged.correlationToken,
-          beforeAfter: staged.beforeAfter,
-          submittedAt: Date.now(),
+          packet: { expectedRevision: expected, ops, requestId },
+          beforeAfter: staged.beforeAfter || {},
+          tempRefs: staged.tempRefs || {},
+          label: staged.label || "",
+          state: "submitting",
+          submittedAt: priorPending && priorPending.opsDigest === opsDigest ? priorPending.submittedAt : Date.now(),
         });
         announce("Applying arrangement…");
         const receipt = await submitOps(ops, {
@@ -5377,23 +6073,122 @@
           scope: "arrangement",
           expectedOverride: expected,
           requestIdOverride: requestId,
+          onSubmitted: () => org.setPendingState("polling"),
         });
+        // F1: an exhausted poll budget (status "unknown") is an UNKNOWN
+        // OUTCOME, exactly like a transport failure — keep the full
+        // snapshot (packet/requestId), offer Check result / Retry, never
+        // clearPending, never label it Rejected.
+        if (!receipt || receipt.status === "transport" || receipt.status === "unknown") {
+          // R6: transport failure — KEEP the exact packet + requestId and
+          // surface an actionable unknown outcome. The button must never
+          // stay stuck on "Applying…" and never require discarding.
+          org.setPendingState("outcome_unknown");
+          toast("The arrangement Apply may or may not have committed — its outcome is unknown. "
+            + "Use “Check result” or “Retry same Apply” (a byte-identical retry can never commit twice).", "err");
+          return;
+        }
         if (receipt.status === "committed") {
-          await finishArrangementCommit(receipt, org.get().staged || staged);
+          // Reconcile ONLY the submitted snapshot — even if the owner
+          // staged a newer arrangement while this one was in flight.
+          await finishArrangementCommit(receipt, org.get().pending);
         } else if (receipt.error === "revision_conflict") {
-          // Drafts retained; the bar offers Reload and replan (the base
-          // revision no longer matches — never blindly replay the old map).
           org.clearPending();
+          await refreshLibrary();
+          // The staged plan survives, flagged stale — re-plan against the
+          // new revision; never blindly replay the old packet.
           toast("Revision conflict — the staged arrangement is intact. Reload and replan to re-preview against r"
             + (receipt.currentRevision != null ? receipt.currentRevision : "the current revision") + ".", "err");
-        } else if (receipt.status !== "transport") {
+        } else {
           org.clearPending();
+          toast("Rejected: " + (receipt.message || receipt.error || "unknown error")
+            + " — the staged arrangement is intact; review it or edit and re-stage.", "err");
         }
       } finally {
         setArrBusy(false);
       }
       // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [submitOps, finishArrangementCommit, toast, announce]);
+    }, [submitOps, finishArrangementCommit, refreshLibrary, toast, announce]);
+
+    // R6 recovery: one honest receipt poll for a kept unknown-outcome
+    // request. Committed → reconcile; rejected → report and release.
+    const checkArrangementResult = useCallback(async () => {
+      const org = orgRef.current;
+      const pending = org ? org.get().pending : null;
+      if (!pending) return;
+      let receipt = null;
+      try {
+        receipt = await runOp("GetChannelApplyResult", { requestId: pending.requestId });
+      } catch (e) {
+        toast("Could not reach the server — try Check result again.", "err");
+        return;
+      }
+      if (!receipt || receipt.status === "unknown") {
+        toast("Still no result for this request — the server never saw it or it is still running. "
+          + "“Retry same Apply” is safe: the identical request cannot commit twice.", "");
+        return;
+      }
+      if (receipt.status === "committed") {
+        await finishArrangementCommit(receipt, pending);
+      } else {
+        if (org) org.clearPending();
+        await refreshLibrary();
+        if (receipt.error === "revision_conflict") {
+          toast("The Apply hit a revision conflict — nothing changed. The staged plan is intact; Reload and replan.", "err");
+        } else {
+          toast("The Apply was rejected: " + (receipt.message || receipt.error || "unknown error")
+            + " — the staged arrangement is intact.", "err");
+        }
+      }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [finishArrangementCommit, refreshLibrary, toast]);
+
+    // R6 recovery: resubmit the exact kept packet under the exact kept
+    // requestId (the server's idempotent replay — exactly one commit).
+    const retryArrangement = useCallback(async () => {
+      const org = orgRef.current;
+      const pending = org ? org.get().pending : null;
+      if (!pending) return;
+      let ops = null;
+      try { ops = JSON.parse(pending.opsDigest); } catch (e) { ops = null; }
+      if (!Array.isArray(ops) || !ops.length) {
+        toast("The kept packet could not be restored — stage the plan again.", "err");
+        if (org) org.clearPending();
+        return;
+      }
+      setArrBusy(true);
+      try {
+        org.setPending(Object.assign({}, pending, { state: "submitting" }));
+        const receipt = await submitOps(ops, {
+          label: pending.label || "Arrangement",
+          scope: "arrangement",
+          expectedOverride: pending.expected,
+          requestIdOverride: pending.requestId,
+          onSubmitted: () => org.setPendingState("polling"),
+        });
+        // F1: "unknown" after the poll budget is an unknown outcome, never
+        // a rejection — keep the snapshot, keep Check result / Retry alive.
+        if (!receipt || receipt.status === "transport" || receipt.status === "unknown") {
+          org.setPendingState("outcome_unknown");
+          toast("Still unknown — the same request id is kept; try Check result again in a moment.", "err");
+          return;
+        }
+        if (receipt.status === "committed") {
+          await finishArrangementCommit(receipt, org.get().pending);
+        } else if (receipt.error === "revision_conflict") {
+          org.clearPending();
+          await refreshLibrary();
+          toast("The retry hit a revision conflict — the staged plan is intact. Reload and replan.", "err");
+        } else {
+          org.clearPending();
+          toast("The retry was rejected: " + (receipt.message || receipt.error || "unknown error")
+            + " — the staged arrangement is intact.", "err");
+        }
+      } finally {
+        setArrBusy(false);
+      }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [submitOps, finishArrangementCommit, refreshLibrary, toast]);
 
     function countAffected(ops) {
       let n = 0;
@@ -5437,13 +6232,56 @@
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
+    // UX4: "New channel before/after this" — stage a draft at the target
+    // and open the placement sheet (the existing conflict resolver). The
+    // sheet refuses to Stage until the new channel's rules are complete.
+    const insertChannelNear = useCallback((ch, dir) => {
+      if (!draftsRef.current) return;
+      const kind = ch.kind || "net";
+      const band = BANDS[kind] || BANDS.net;
+      let target = dir === "before" ? ch.number : (Number.isInteger(ch.number) ? ch.number + 1 : null);
+      if (!Number.isInteger(target) || target < band[0] || target > band[1]) {
+        target = nextFreeNumber(libRef.current ? libRef.current.channels || [] : [], kind);
+      }
+      if (target == null) { toast("No free number left in " + band[0] + "–" + band[1] + ".", "err"); return; }
+      const tempId = newTempId();
+      draftsRef.current.put(tempId, {
+        kind, number: target, name: "", glyph: null,
+        color: pickDefaultColor(target), groupId: ch.groupId, sort: "shuffle",
+        enabled: true, archived: false, paused: false,
+        source: { type: "criteria" }, sourceLabel: "", programming: null,
+      });
+      setSelectedId(tempId);
+      toast("New draft at " + target + " — finish its rules, then place it with this sheet.", "");
+      if (arrangementAvailable) {
+        setNumRes({ subject: { ref: tempId, isNew: true, kind }, target });
+      }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [arrangementAvailable, toast]);
+
     // ---- organization glue ----
 
     const stageArrangement = useCallback((staged, subjectFinalNumber) => {
       if (!orgRef.current) return;
+      // F3: a new Stage must NEVER silently overwrite an unresolved
+      // submitted packet. The owner resolves it explicitly — Check result
+      // (committed/rejected), Retry same Apply, or Forget the kept request.
+      const pendingNow = orgRef.current.get().pending;
+      if (pendingNow) {
+        toast("An arrangement Apply is still unresolved — use “Check result” or “Retry same Apply” on the bar, "
+          + "or “Forget kept request”, before staging a new plan.", "err");
+        return;
+      }
+      // UX7: say so when a new Stage replaces an earlier unsubmitted plan
+      // (the store pushes the old one onto the undo stack).
+      const prev = orgRef.current.get().staged;
+      const replaced = !!(prev && prev.correlationToken !== staged.correlationToken);
       orgRef.current.stage(staged);
       studioEmit("staged", { label: staged.label, baseRevision: staged.baseRevision });
       announce("Arrangement staged: " + (staged.label || "review and Apply when ready.") + " Nothing is written until Apply arrangement.");
+      if (replaced) {
+        toast("Staged “" + (staged.label || "new plan") + "” — it replaces the earlier unstaged plan. Undo brings the old one back.", "");
+      }
       // A number-resolution staged for a draft channel: the subject's final
       // number lands in its draft so a later channel Apply agrees with the
       // committed renumber map.
@@ -5456,7 +6294,27 @@
       }
       setNumRes(null);
       setOrganize(null);
-    }, [announce]);
+    }, [announce, toast]);
+
+    // F3: the explicit "give up on the kept request" action — the only way
+    // an unresolved submission stops blocking a new Stage.
+    const forgetPendingSubmission = useCallback(async () => {
+      const org = orgRef.current;
+      const pending = org ? org.get().pending : null;
+      if (!pending) return;
+      const ok = await confirm({
+        title: "Forget the kept request?",
+        message: "The last arrangement Apply's outcome is unknown; its packet and request id are kept so it can be "
+          + "checked or retried safely. Forgetting means future Applies use a NEW request id — if the kept request "
+          + "actually committed, its changes stay committed and you lose the correlation.",
+        confirmLabel: "Forget kept request", danger: true,
+      });
+      if (!ok) return;
+      if (org) org.clearPending();
+      const libraryId = libRef.current ? (libRef.current.libraryId || "default") : "default";
+      clearOpsPending(libraryId);
+      toast("The kept request was forgotten — Apply again only if you are sure the earlier one did not commit.", "err");
+    }, [confirm, toast]);
 
     const openResolution = useCallback((subject, target) => {
       setNumRes({ subject, target });
@@ -5481,7 +6339,9 @@
       // Re-run the SAME intent against the fresh revision — the new
       // displacement review shows before any re-Apply.
       if (staged.intent && staged.intent.type === "reversal") {
-        toast("Reversal staged — its packet was validated against the current revision already.", "");
+        // R8: a stale reversal is rebuilt and re-validated FRESH against
+        // the current library — never reused as-is.
+        void stageReversal(staged);
         return;
       }
       if (staged.intent && staged.intent.type === "number-resolution") {
@@ -5515,17 +6375,10 @@
     // dial before they exist server-side — the Apply packet creates them.
     const pendingGroups = useMemo(() => {
       if (!draftsRef.current) return [];
-      const seen = new Set();
-      const out = [];
-      for (const id of draftsRef.current.ids()) {
-        const entry = draftsRef.current.get(id);
-        const d = entry && entry.draft;
-        if (d && d.pendingGroupName != null && d.groupId && !seen.has(d.groupId)) {
-          seen.add(d.groupId);
-          out.push({ id: d.groupId, name: String(d.pendingGroupName || "").trim() || "(new group)", position: 9000, staged: true });
-        }
-      }
-      return out;
+      // F5: ONE implementation (pendingGroupsFromDrafts) — the dial's chrome
+      // (position/staged) is applied on top of the shared extraction.
+      return pendingGroupsFromDrafts(draftsRef.current, lib ? lib.groups : [])
+        .map((g) => ({ id: g.id, name: g.name || "(new group)", position: 9000, staged: true }));
       // recompute on draft count changes
     }, [draftCount, lib]);
 
@@ -5934,7 +6787,10 @@
             onKeyDown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.currentTarget.click(); } },
           },
             h("span", null, item.g.name),
-            h("span", { className: "jw-group-count" }, String(item.count)),
+            h("span", { className: "jw-group-count", title: item.spanTitle }, String(item.count)),
+            item.spanText
+              ? h("span", { className: "jw-group-span", title: item.spanTitle }, item.spanText)
+              : null,
             h(GroupHeaderMenu, {
               group: item.g, arrangeAvailable: arrangementAvailable,
               onAction: (action) => groupHeaderAction(item.g, action),
@@ -5951,6 +6807,7 @@
           groupsById,
           onSelect: (id) => { void selectChannel(id); },
           onCheck: toggleSelect,
+          onInsert: insertChannelNear,
         });
       },
     });
@@ -5961,7 +6818,8 @@
           key: selected + ":" + editorKeyBump,
           channelId: selected,
           lib,
-          getRevision: () => (libRef.current ? libRef.current.revision : 0),
+          getRevision: () => (liveRevisionRef.current != null ? liveRevisionRef.current
+            : (libRef.current ? libRef.current.revision : 0)),
           drafts: draftsRef.current,
           confirm,
           toast,
@@ -5971,6 +6829,7 @@
             openResolution,
           },
           submitOps,
+          submitApply: submitChannelApply,
           onApplied: handleApplied,
           onCreated: handleCreated,
           libraryVersion,
@@ -6000,10 +6859,10 @@
         h("div", { className: "jw-topbar-side" },
           // Wide chrome: every organization action is a plain labeled
           // button — never hidden behind an unlabeled ellipsis again.
+          // UX8: exactly ONE New-channel action per context — the dial
+          // action on desktop (below), the topbar action only when the
+          // rail goes compact (CSS shows .jw-topbar-new under 761px).
           h("span", { className: "jw-topbar-wide-actions" },
-            h("button", {
-              className: "jw-btn jw-btn-primary", onClick: () => setDialog("new"),
-            }, "+ New channel"),
             h("button", {
               className: "jw-btn" + (bulkMode ? " jw-btn-primary" : ""),
               "aria-pressed": bulkMode ? "true" : "false",
@@ -6122,6 +6981,9 @@
         canUndo: !!(orgState.undo && orgState.undo.length),
         canRedo: !!(orgState.redo && orgState.redo.length),
         onApply: () => void submitArrangement(),
+        onCheckResult: () => void checkArrangementResult(),
+        onRetry: () => void retryArrangement(),
+        onForgetPending: () => void forgetPendingSubmission(),
         onReview: () => orgState.staged && setOrganize({ reviewStaged: orgState.staged }),
         onDiscard: () => void discardStaged(),
         onUndo: () => orgRef.current && orgRef.current.undo(),
@@ -6189,7 +7051,22 @@
             initialScope: organize.scope || null,
             initialIntent: organize.intent || null,
             reviewStaged: organize.reviewStaged || null,
+            cachedForm: organizeFormRef.current,
             onStage: stageArrangement,
+            onFormChange: (form) => { organizeFormRef.current = form; },
+            onBackToEdit: orgState.staged
+              ? () => {
+                // F6: a reversal has no editable form — Back to edit opens
+                // its read-only annotated review instead of a wrong form.
+                if (orgState.staged.intent && orgState.staged.intent.type === "reversal") {
+                  setOrganize({ reviewStaged: orgState.staged });
+                  return;
+                }
+                setOrganize({ intent: orgState.staged.intent || null });
+              }
+              : null,
+            onOpenDraft: (ref) => { setOrganize(null); setSelectedId(ref); },
+            onReplan: () => void replanStaged(),
             onSplitSelection: (kind) => {
               // band_mixed split: re-scope through Select channels so the
               // dial and bar reflect the narrower selection explicitly.

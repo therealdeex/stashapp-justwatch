@@ -1,0 +1,60 @@
+[
+  {
+    "ops": [
+      {
+        "op": "channels.renumber",
+        "assignments": true
+      }
+    ],
+    "preflight": {
+      "exception": "TypeError",
+      "message": "'bool' object is not iterable"
+    },
+    "apply": {
+      "exception": "TypeError",
+      "message": "'bool' object is not iterable"
+    },
+    "receipt": null,
+    "revisionAfter": 1
+  },
+  {
+    "ops": [
+      {
+        "op": "channels.renumber",
+        "assignments": 42
+      }
+    ],
+    "preflight": {
+      "exception": "TypeError",
+      "message": "'int' object is not iterable"
+    },
+    "apply": {
+      "exception": "TypeError",
+      "message": "'int' object is not iterable"
+    },
+    "receipt": null,
+    "revisionAfter": 1
+  },
+  {
+    "ops": [
+      {
+        "op": "channel.create",
+        "tempId": "temp-review",
+        "channel": {
+          "kind": "invalid",
+          "number": 100
+        }
+      }
+    ],
+    "preflight": {
+      "exception": "KeyError",
+      "message": "'invalid'"
+    },
+    "apply": {
+      "exception": "KeyError",
+      "message": "'invalid'"
+    },
+    "receipt": null,
+    "revisionAfter": 1
+  }
+]

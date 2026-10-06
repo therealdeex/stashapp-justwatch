@@ -470,3 +470,159 @@ def test_capabilities_advertise_arrangement():
     assert contract.OPERATIONS["previewChannelArrangement"] == \
         "PreviewChannelArrangement"
     assert "previewChannelArrangement" in contract.SYNC_OPERATIONS
+
+
+# ---------------------------------------------------------------------------
+# malformed transaction payloads: typed errors + durable rejection receipts
+# (review 2026-10-06 R10) — these used to raise TypeError/KeyError with no
+# receipt, leaving the client unable to recover the outcome
+# ---------------------------------------------------------------------------
+
+
+MALFORMED_OPS = [
+    ({"op": "channels.renumber", "assignments": True}, "bad_assignment"),
+    ({"op": "channels.renumber", "assignments": 42}, "bad_assignment"),
+    ({"op": "channels.renumber", "assignments": [[]]}, "bad_assignment"),
+    ({"op": "channels.renumber", "assignments": [7]}, "bad_assignment"),
+    ({"op": "channel.create", "tempId": "t1",
+      "channel": {"kind": "invalid", "number": 100}}, "bad_kind"),
+    ({"op": "channel.create", "tempId": "t1", "channel": 42}, "not_an_object"),
+    ({"op": "channel.create", "tempId": "t1", "channel": ["kind"]},
+     "not_an_object"),
+    ({"op": "channel.create", "tempId": "t1",
+      "channel": {"kind": ["x"], "name": "N"}}, "bad_kind"),
+    ({"op": "channel.create", "tempId": "t1",
+      "channel": {"kind": "ch", "name": "N", "groupId": ["x"]}},
+     "unknown_group"),
+    ({"op": "channel.put", "channel": 42}, "not_an_object"),
+    ({"op": "channel.put", "channel": {"id": ["x"]}}, "unknown_channel"),
+    ({"op": "channel.put", "channel": {"id": "ch_11111111", "seed": [1],
+                                       "number": 1}}, "identity_change"),
+    ({"op": "channel.swap", "a": ["x"], "b": "ch_11111111"}, "unknown_channel"),
+    ({"op": "group.put", "group": {"id": ["x"], "name": "G"}}, "bad_group_id"),
+    ({"op": "group.delete", "id": ["x"]}, "unknown_group"),
+    ({"op": "channels.move", "groupId": ["x"],
+      "channelIds": ["ch_11111111"]}, "unknown_group"),
+    ({"op": "channels.move", "groupId": "grp_general",
+      "channelIds": [["x"]]}, "bad_channel_ids"),
+]
+
+
+@pytest.mark.parametrize("op,code", MALFORMED_OPS)
+def test_malformed_ops_validate_as_typed_errors(tmp_path, op, code):
+    op_library(tmp_path)
+    ctx = Ctx(tmp_path, FakeClient(), {"ops": [op]})
+    result = channel_ops.op_validate_channel_changes(ctx)
+    assert result["valid"] is False
+    assert code in [e["code"] for e in result["errors"]], result["errors"]
+    assert all(set(e) == {"path", "code", "message"} for e in result["errors"])
+    assert result["revision"] == 1
+
+
+@pytest.mark.parametrize("op,code", MALFORMED_OPS)
+def test_malformed_ops_store_durable_rejected_receipts(tmp_path, op, code):
+    op_library(tmp_path)
+    ctx = Ctx(tmp_path, FakeClient(), {})
+    ctx.args = {"requestId": "malformed-1", "expectedRevision": 1, "ops": [op]}
+    receipt = channel_ops.op_apply_channel_changes(ctx)
+    assert receipt["status"] == "rejected"
+    assert receipt["error"] == "validation_failed"
+    assert code in [e["code"] for e in receipt["errors"]], receipt
+    assert receipt["digest"]
+    assert library_mod.load(tmp_path)["revision"] == 1, \
+        "a rejected transaction never moves definitions or the revision"
+    lookup = channel_ops.op_get_channel_apply_result(
+        Ctx(tmp_path, FakeClient(), {"requestId": "malformed-1"}))
+    assert lookup["status"] == "rejected", "receipt is durably recoverable"
+    replay = library_mod.apply_transaction(
+        tmp_path, expected_revision=1, request_id="malformed-1", ops=[op])
+    assert replay["status"] == "rejected"
+    assert replay["digest"] == receipt["digest"], "identical retry replays"
+
+
+def test_malformed_create_invalid_kind_reports_band_as_typed_error(tmp_path):
+    """The exact probe from the review: kind "invalid" used to KeyError in
+    BANDS[kind] inside the number interpreter before any typed check ran."""
+    op_library(tmp_path)
+    ops = [{"op": "channel.create", "tempId": "temp-review",
+            "channel": {"kind": "invalid", "number": 100}}]
+    errors = library_mod._check_ops(library_mod.load(tmp_path), ops)
+    assert [e["code"] for e in errors][0] == "bad_kind"
+    result = library_mod.apply_transaction(
+        tmp_path, expected_revision=1, request_id="kind-keyerror", ops=ops)
+    assert result["status"] == "rejected"
+    assert result["errors"][0]["code"] == "bad_kind"
+
+
+# ---------------------------------------------------------------------------
+# pending (uncommitted) groups through the real ops (review R5 backend)
+# ---------------------------------------------------------------------------
+
+
+def test_preview_pending_groups_flow_through_to_apply(tmp_path):
+    arrangement_library(tmp_path)
+    preview = channel_ops.op_preview_channel_arrangement(Ctx(
+        tmp_path, FakeClient(),
+        {"expectedRevision": 12, "correlationToken": "org-pg",
+         "groups": json.dumps([{"id": "grp_abcd1234", "name": "Duo"}]),
+         "intent": {"type": "assign_group",
+                    "channelIds": ["net_aaaa0001", "net_aaaa0002"],
+                    "groupId": "grp_abcd1234"}}))
+    assert preview["valid"] and not preview["noop"]
+    assert preview["revision"] == 12
+    ops = preview["packet"]["ops"]
+    assert [op["op"] for op in ops] == ["group.put", "channels.move"]
+    assert ops[0]["group"] == {"id": "grp_abcd1234", "name": "Duo"}
+    ctx = Ctx(tmp_path, FakeClient(), {})
+    ctx.args = {"requestId": "pg-1", "expectedRevision": 12, "ops": ops}
+    receipt = channel_ops.op_apply_channel_changes(ctx)
+    assert receipt["status"] == "committed", receipt
+    doc = library_mod.load(tmp_path)
+    assert next(g for g in doc["groups"]
+                if g["id"] == "grp_abcd1234")["name"] == "Duo"
+    members = {c["id"]: c["groupId"] for c in doc["channels"]}
+    assert members["net_aaaa0001"] == "grp_abcd1234"
+    assert members["net_aaaa0002"] == "grp_abcd1234"
+
+    with pytest.raises(ValueError):
+        channel_ops.op_preview_channel_arrangement(Ctx(
+            tmp_path, FakeClient(),
+            {"expectedRevision": 13, "correlationToken": "t",
+             "groups": {"id": "grp_abcd1234"},
+             "intent": {"type": "swap", "a": "net_aaaa0001",
+                        "b": "net_aaaa0002"}}))
+
+
+def test_apply_pending_group_create_and_renumber_packet(tmp_path):
+    """The composed preview packet (group.put → create skeleton → renumber)
+    commits as ONE Apply once the client merges its create draft — a new
+    channel at an occupied number, in a group that did not exist before."""
+    arrangement_library(tmp_path)
+    preview = channel_ops.op_preview_channel_arrangement(Ctx(
+        tmp_path, FakeClient(),
+        {"expectedRevision": 12, "correlationToken": "org-pg2",
+         "groups": [{"id": "grp_abcd1234", "name": "Fresh Group"}],
+         "channels": [{"tempRef": "temp-1", "kind": "net", "name": "Fresh",
+                       "groupId": "grp_abcd1234"}],
+         "intent": {"type": "insert", "tempRef": "temp-1", "number": 300}}))
+    assert preview["valid"], preview["errors"]
+    ops = preview["packet"]["ops"]
+    assert [op["op"] for op in ops] == ["group.put", "channel.create",
+                                        "channels.renumber"]
+    for op in ops:
+        if op["op"] == "channel.create":
+            op["channel"]["source"] = {"type": "criteria", "tagsAny": ["3"]}
+    ctx = Ctx(tmp_path, FakeClient(), {})
+    ctx.args = {"requestId": "pg-2", "expectedRevision": 12, "ops": ops}
+    receipt = channel_ops.op_apply_channel_changes(ctx)
+    assert receipt["status"] == "committed", receipt
+    doc = library_mod.load(tmp_path)
+    new_id = receipt["idMap"]["temp-1"]
+    numbers = {c["id"]: c["number"] for c in doc["channels"]}
+    assert numbers[new_id] == 300
+    assert numbers["net_aaaa0001"] == 301
+    assert numbers["net_aaaa0002"] == 302
+    assert numbers["net_aaaa0003"] == 303
+    created = next(c for c in doc["channels"] if c["id"] == new_id)
+    assert created["groupId"] == "grp_abcd1234"
+    assert any(g["id"] == "grp_abcd1234" for g in doc["groups"])

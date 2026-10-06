@@ -1,0 +1,315 @@
+
+== flow 1: create-at-occupied + shift chain + downward mirror
+    ok   occupied hint offers placement
+    ok   sheet title names the subject at 300
+    ok   no Swap choice for a new channel
+    ok   shift-up preselected with the real chain (3 move, stops at 303)
+    ok   review lists the 300→303 chain + the new row
+    ok   staged bar names the placement
+    ok   revision advanced to 13
+    ok   exactly ONE apply for the whole chain
+    ok   dial renumbered: Fresh Cut at 300
+    ok   Occupied 302 pushed to 303
+    ok   created channel carries the authored rule + provenance
+    ok   downward chain shifts 5 (stops at 296)
+    ok   revision advanced to 14
+    ok   Deep Cut at 301 / Fresh Cut pushed to 299
+    ok   still one apply per arrangement
+    ok   no page errors
+   (11s)
+
+== flow 2: existing 299 → 300 with dirty name (opt-in put + renumber)
+    ok   editor shows the unsaved draft
+    ok   existing row gets a Swap choice
+    ok   selection scope active (1)
+    ok   displaced occupant listed in review
+    ok   review meta counts 1 displaced bystander
+    ok   draft opt-in latches
+    ok   bar summarizes 2 renumbered + 1 relocated
+    ok   revision advanced to 13
+    ok   ONE packet committed it
+    ok   renumber + dirty name committed together (299→300)
+    ok   displaced occupant landed at 303
+    ok   wire put carries the final number (agreement rule)
+    ok   no page errors
+   (5s)
+
+== flow 3: block 171/173/180 → 300 with bystanders
+    ok   review lists all 6 rows / 3 displaced bystanders
+    ok   displaced row reviewed: Occupied 300
+    ok   displaced row reviewed: Occupied 301
+    ok   displaced row reviewed: Occupied 302
+    ok   revision advanced to 13
+    ok   one apply committed the whole block
+    ok   block landed consecutively at 300-302
+    ok   displaced trio pushed consecutively to 303-305
+    ok   no page errors
+   (4s)
+
+== flow 4: Performers 300-699 useAvailable + capacity + shortfall + R7 alpha
+    ok   group scope preselected (2 channels)
+    ok   capacity line exact
+    ok   outsiders 320/450 untouched in review
+    ok   R7: alphabetical arrange_range plans by name (Alpha Net first)
+    ok   R7: frontend sends the canonical order enum ("name", never "alpha")
+    ok   revision advanced to 13
+    ok   number-order pack: Zulu 310→303, Alpha 311→304; outsiders stay
+    ok   shortfall line carries the exact number
+    ok   staging refused while short
+    ok   nothing staged by the refused plan
+    ok   no page errors
+   (8s)
+
+== flow 5: exclusive range with outside interval
+    ok   one-time copy present
+    ok   exclusive capacity line
+    ok   outsider relocated via exclusive rule
+    ok   revision advanced to 13
+    ok   all outsiders relocated, block packed
+    ok   no page errors
+   (5s)
+
+== flow 6: create group + assign in one Apply (R5)
+    ok   R5a: editor Create group… commits in one Apply
+    ok   R5a: client group id uses the grp_ prefix (storage-compatible)
+    ok   R5a: group created + assigned
+    ok   R5b: occupied create with a new group previews cleanly (no unknown_group)
+    ok   R5b: preview carried the pending group via the groups argument
+    ok   R5b: UX4 — the sheet demands complete rules before placing a bare draft
+    ok   R5b: reopened placement sheet still previews the pending group cleanly
+    ok   revision advanced to 14
+    ok   R5b: ONE Apply creates the group AND places the channel
+    ok   R5b: group + channel committed together at 300
+    ok   no page errors
+   (8s)
+
+== flow 7: revision conflict + R6 unknown-outcome retry
+    ok   conflict receipt recorded
+    ok   other writer bumped the revision
+    ok   bar shows stale base + Reload and replan
+    ok   content drafts retained through the conflict
+    ok   replan re-previews at the new revision
+    ok   re-staged against the fresh revision with a NEW requestId
+    ok   R6: transport failure keeps the packet + requestId and offers Check/Retry
+    ok   R6: honest unknown after Check result (never submitted)
+    ok   same requestId resubmitted
+    ok   revision advanced exactly once
+    ok   no page errors
+   (6s)
+
+== flow 8: edit-in-flight, undo/redo, rebase, reversal, R2 stage-in-flight
+    ok   first snapshot committed, second edit still draft
+    ok   R9: no self-inflicted revision conflict inside one tab
+    ok   R9: both submissions committed, the second at the first receipt's revision
+    ok   bulk path landed (Chart One paused)
+    ok   undo clears the staging (bar unmounts or drops to its empty state)
+    ok   redo restores the staged bar
+    ok   bystander draft number silently rebased (299→302)
+    ok   no rebase notice for a non-conflicting rebase
+    ok   reversal restored 299/302
+    ok   reversal rebased the bystander draft back
+    ok   same-field conflict names itself
+    ok   draft keeps the local value
+    ok   R2/F4: the during-flight Stage is refused — the submitted plan is never overwritten
+    ok   server committed the ORIGINAL in-flight plan
+    ok   R2: bystander drafts untouched by the refused plan (299, Zeta Three)
+    ok   R2: pending resolved; nothing of the refused staging leaked
+    ok   no page errors
+   (30s)
+
+== flow 9: capability gating fallback
+    ok   gate pill explains the old backend
+    ok   no organize entries
+    ok   group menu lacks Arrange numbers…
+    ok   occupied number explains without Resolve
+    ok   no Resolve conflict… link
+    ok   no Move / insert… entry
+    ok   new-channel refuses occupied numbers when gated
+    ok   basic editing still applies
+    ok   groups still apply
+    ok   no page errors
+   (7s)
+
+== flow 10: visual sweep + geometry + keyboard
+    shot dark-01-main
+    ok   dial rows render at 44px
+    shot dark-02-numres-sheet
+    ok   focus starts inside the sheet
+    ok   focus stays trapped in the sheet after 5 Tabs
+    shot dark-03-organize-review
+    ok   R11: review columns align with the header (Channel/Number/Group/Why)
+    shot dark-04-staged-bar
+    shot dark-05-narrow-actions
+    shot dark-06-zoom-200
+    ok   no page errors (dark sweep)
+    shot light-01-main
+    shot light-02-organize-review
+    shot light-03-staged-bar
+    ok   no page errors (light sweep)
+   (8s)
+
+== flow 11: extras snippet lifecycle
+    ok   snippet attached to the live page state
+    ok   snippet sees the staged event
+    ok   snippet badges the body
+    ok   removal clears the badge
+    ok   removed snippet receives no further events
+    ok   revision advanced to 13
+    ok   core arrangement Apply committed through the coordinator
+    ok   no page errors
+   (5s)
+
+== flow 12: R1: stale-preview binding, reorder, numres debounce
+    ok   400–410 plan is bound and stageable
+    ok   R1: Stage is dead the instant an input changes (old response unbound)
+    ok   R1: the abandoned 400 plan was never staged in the click window
+    ok   R1: the 500–510 preview replaced the review
+    ok   R1: staged packet assigns 500.., never the abandoned 400s
+    ok   R1: staged label names the NEW destination
+    ok   R1: current plan (500) rendered while the 400 response is still held
+    ok   R1: precondition — the held 400 response did arrive late
+    ok   R1: the late response was discarded — review still shows the 500 plan
+    ok   R1: still bound after the late landing (Stage enabled)
+    ok   R1: staged packet after the late landing still assigns 500..
+    ok   R1: numres 303 plan stageable
+    ok   R1: numres Stage dies the instant the destination changes
+    ok   R1: numres old (303) plan not staged in the debounce window
+    ok   R1: numres new (305) plan bound
+    ok   R1: numres staged packet places at the CURRENT destination (305)
+    ok   no page errors
+   (11s)
+
+== flow 13: R2: submitted-snapshot reconciliation, newer staging survives
+    ok   B is the bar's staged plan (A sits on the undo stack)
+    ok   R2/F3: a new Stage during the flight is REFUSED (sheet stays open, staged untouched)
+    ok   R2: Undo during flight shows plan A while B's Apply runs
+    ok   server committed the SUBMITTED plan B only
+    ok   R2: the newer (undo-revealed) staging survives the commit — staged kept, pending resolved
+    ok   R2: bystander draft keeps its content and adopts ONLY the committed map (401, never an uncommitted number)
+    ok   R2: bar flags the surviving staging stale + offers Reload and replan
+    ok   no page errors
+   (12s)
+
+== flow 14: R3: newer creation edits remap onto the final id
+    ok   server record carries the SUBMITTED name at 300
+    ok   R3: drafts not emptied — the newer edit remapped onto the final id
+    ok   R3: the temp draft was dropped after the remap
+    ok   no page errors
+   (8s)
+
+== flow 15: R4: include-draft honors the reviewed group (both variants)
+    ok   review shows the reviewed move Alpha → Trio
+    ok   revision advanced to 13
+    ok   R4: committed group is the REVIEWED Trio (not the draft's stale Alpha)
+    ok   R4: dirty name committed alongside, number untouched
+    ok   R4: wire put carries the reconciled groupId (agreement rule extends to groups)
+    ok   combined review shows number AND group
+    ok   revision advanced to 13
+    ok   R4 combined: number, group AND name all land as reviewed
+    ok   no page errors (variant 2)
+   (10s)
+
+== flow 16: R5: inline group creation (editor, occupied-create, bulk)
+    ok   R5a: one Apply commits group.put + channel.put
+    ok   R5a: group exists and Chart One is a member
+    ok   R5b: placement previews with the pending group (no unknown_group)
+    ok   R5b: preview requests carried the groups argument
+    ok   R5b: reopened sheet still previews the pending group cleanly
+    ok   revision advanced to 14
+    ok   R5b: packet order group.put → channel.create → renumber chain
+    ok   R5b: group + created channel committed together at 300
+    ok   revision advanced to 15
+    ok   R5c: bulk create-and-assign in one packet
+    ok   R5c: both channels moved into the new group
+    ok   no page errors
+   (11s)
+
+== flow 17: R6: unknown outcome — abort before submit + lost-after-commit
+    ok   R6a: never stuck on "Applying…" — Check result / Retry offered
+    ok   R6a: the exact submitted packet + requestId are kept
+    ok   R6a: unknown stays actionable after Check result (never rejected, never committed)
+    ok   R6a: retry committed ONCE under the kept requestId
+    ok   R6b: the server DID commit — only this tab's outcome is unknown
+    ok   R6b: Check result reconciles the durable committed receipt (no resubmission)
+    ok   R6b: revision adopted
+    ok   no page errors
+   (5s)
+
+== flow 18: R7: alphabetical order enum name
+    ok   task sheet fixes the group scope
+    ok   R7: review plans by name (Alpha Net first)
+    ok   R7: the frontend packet uses order:"name" (never the rejected "alpha")
+    ok   R7: staged packet packs Alpha Net → 303, Zulu Net → 304 (300–302 belong to Alpha bystanders)
+    ok   revision advanced to 13
+    ok   R7: committed by name order
+    ok   no page errors
+   (5s)
+
+== flow 19: R8: reload + replan retains the full intent
+    ok   staged: Performers → 400–410 + combined Trio assignment
+    ok   bar flags the stale base after the external revision
+    ok   R8: the staged intent + stale flag survive the reload
+    ok   R8: scope group retained (Performers, NOT the first group)
+    ok   R8: scope still counts 2 channels
+    ok   R8: order retained (Alphabetical)
+    ok   R8: conflict strategy retained (keep other channels in place)
+    ok   R8: combined assignment retained (checkbox + Trio)
+    ok   R8: destination range retained (400–410)
+    ok   R8: replan re-previewed BOTH halves at the new revision with the kept settings
+    ok   R8: re-staged packet keeps the combined composition
+    ok   revision advanced to 14
+    ok   R8: committed Alpha Net 400, Zulu Net 401
+    ok   R8: both performers landed in Trio
+    ok   no page errors
+   (8s)
+
+== flow 20: R9: one coordinator serializes editor + bulk
+    ok   R9: both ops landed (rename + pause)
+    ok   R9: serialized — the bulk op ran at the editor receipt's revision
+    ok   R9: no revision-conflict toast anywhere
+    ok   no page errors
+   (6s)
+
+== flow 21: R10: malformed payloads → typed + durable rejection
+    ok   R10 validate typed rejection: assignments:true
+    ok   R10 apply rejected without crashing: assignments:true
+    ok   R10 rejected receipt is durable + replay-exact: assignments:true
+    ok   R10 validate typed rejection: assignments:42
+    ok   R10 apply rejected without crashing: assignments:42
+    ok   R10 rejected receipt is durable + replay-exact: assignments:42
+    ok   R10 validate typed rejection: nested-array entry
+    ok   R10 apply rejected without crashing: nested-array entry
+    ok   R10 rejected receipt is durable + replay-exact: nested-array entry
+    ok   R10 validate typed rejection: kind:"invalid"
+    ok   R10 apply rejected without crashing: kind:"invalid"
+    ok   R10 rejected receipt is durable + replay-exact: kind:"invalid"
+    ok   R10: revision + definitions untouched by every malformed attempt
+    ok   no page errors
+   (2s)
+
+================ DRY-RUN SUMMARY ================
+flow 1: pass
+flow 2: pass
+flow 3: pass
+flow 4: pass
+flow 5: pass
+flow 6: pass
+flow 7: pass
+flow 8: pass
+flow 9: pass
+flow 10: pass
+flow 11: pass
+flow 12: pass
+flow 13: pass
+flow 14: pass
+flow 15: pass
+flow 16: pass
+flow 17: pass
+flow 18: pass
+flow 19: pass
+flow 20: pass
+flow 21: pass
+known-classified failures: {}
+new findings: 0; harness crashes: 0; notes: 1; shots: 9
+GATE: PASS — 0 behavioral failures, 0 crashes
+report + screenshots in analysis/channel-org-remediation-2026-10-06

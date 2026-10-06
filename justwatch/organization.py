@@ -41,6 +41,9 @@ MAX_LIBRARY_CHANNELS = library.MAX_LIBRARY_CHANNELS
 _TEMP_TOKEN_PREFIX = "t:"
 _REAL_ID_RE = re.compile(r"^(?:ch|net)_[0-9a-f]{8}$")
 _GRP_ID_RE = library.GRP_ID_RE
+#: Pending (uncommitted) groups are created client-side with a fixed-width id,
+#: stricter than the stored group-id pattern (review 2026-10-06 R5).
+_PENDING_GRP_ID_RE = re.compile(r"^grp_[0-9a-f]{8}$")
 
 _CHOICES_LIST_DEFAULT = 5
 _CHOICES_LIST_MAX = 25
@@ -61,12 +64,70 @@ def _bounded(names: list, limit: int = 5) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Pending (uncommitted) groups
+# ---------------------------------------------------------------------------
+
+
+def _pending_groups(raw: Any, doc: dict, errors: list) -> dict[str, str]:
+    """Validate the request's pending groups BEFORE any use → ``{id: name}``.
+
+    A pending group is addressable in this plan exactly like a committed one
+    (overlay ``groupId``, assignment targets, created rows); a referenced one
+    is compiled into the packet as a leading ``group.put`` so one Apply
+    creates the group and assigns channels atomically (review 2026-10-06 R5).
+    Invalid records are never addressable; the typed errors make the whole
+    preview invalid."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, list):
+        _err(errors, "groups", "bad_intent",
+             "groups must be a list of pending group objects")
+        return {}
+    committed = {g["id"]: g for g in doc["groups"]}
+    pending: dict[str, str] = {}
+    for i, entry in enumerate(raw):
+        path = f"groups[{i}]"
+        if not isinstance(entry, dict):
+            _err(errors, path, "bad_intent",
+                 "each pending group must be a JSON object {id, name}")
+            continue
+        gid = entry.get("id")
+        if not isinstance(gid, str) or not _PENDING_GRP_ID_RE.match(gid):
+            _err(errors, f"{path}.id", "bad_group_id",
+                 "pending group ids look like grp_ + 8 lowercase hex")
+            continue
+        if gid in committed:
+            _err(errors, f"{path}.id", "group_id_conflicts_committed",
+                 f"group {gid!r} already exists in the committed library")
+            continue
+        if gid in pending:
+            _err(errors, f"{path}.id", "duplicate_group_id",
+                 f"group id {gid!r} appears twice in this request")
+            continue
+        name = entry.get("name")
+        if not isinstance(name, str) or not (1 <= len(name.strip()) <= MAX_NAME_LEN):
+            _err(errors, f"{path}.name", "bad_group_name",
+                 f"group name must be 1-{MAX_NAME_LEN} characters")
+            continue
+        norm = name.strip().casefold()
+        if any(g["name"].strip().casefold() == norm for g in committed.values()) \
+                or any(n.strip().casefold() == norm for n in pending.values()):
+            _err(errors, f"{path}.name", "duplicate_group",
+                 f"a group named {name.strip()!r} exists")
+            continue
+        pending[gid] = name.strip()
+    return pending
+
+
+# ---------------------------------------------------------------------------
 # Rows (committed channels + temp overlays)
 # ---------------------------------------------------------------------------
 
 
-def _rows(doc: dict, overlays: Any, errors: list) -> dict:
-    """Unified row map keyed by token: channel id, or ``t:<tempRef>``."""
+def _rows(doc: dict, overlays: Any, errors: list,
+          pending: dict[str, str] | None = None) -> dict:
+    """Unified row map keyed by token: channel id, or ``t:<tempRef>``.
+    Overlay ``groupId`` accepts committed AND validated pending groups."""
     rows: dict[str, dict] = {}
     for c in doc["channels"]:
         rows[c["id"]] = {
@@ -77,6 +138,7 @@ def _rows(doc: dict, overlays: Any, errors: list) -> dict:
             "paused": bool(c.get("paused")),
             "enabled": bool(c.get("enabled", True)),
         }
+    group_ids = {g["id"] for g in doc["groups"]} | set(pending or {})
     seen_refs: set[str] = set()
     for i, ov in enumerate(overlays or []):
         path = f"channels[{i}]"
@@ -108,7 +170,7 @@ def _rows(doc: dict, overlays: Any, errors: list) -> dict:
                  f"overlay name must be 1-{MAX_NAME_LEN} characters when present")
             name = None
         group_id = ov.get("groupId")
-        if group_id is not None and group_id not in {g["id"] for g in doc["groups"]}:
+        if group_id is not None and group_id not in group_ids:
             _err(errors, f"{path}.groupId", "unknown_group",
                  f"no group {group_id!r}")
             continue
@@ -248,7 +310,8 @@ def _range_block(rows: dict, kind: str, start: int, end: int, *,
 
 def _new_out() -> dict:
     return {"moves": [], "groups": [], "created": [], "new_groups": {},
-            "capacity": None, "suggestions": None, "choices": None}
+            "pending_groups": {}, "capacity": None, "suggestions": None,
+            "choices": None}
 
 
 def _move(out: dict, row: dict, to: int, reason: str, selected: bool) -> None:
@@ -277,7 +340,8 @@ def _intent_assign_group(doc, rows, intent, errors, out) -> None:
         return
     groups = {g["id"]: g for g in doc["groups"]}
     if gid is not None:
-        if not isinstance(gid, str) or gid not in groups:
+        if not isinstance(gid, str) or (
+                gid not in groups and gid not in out["pending_groups"]):
             _err(errors, "intent.groupId", "unknown_group", f"no group {gid!r}")
             return
         target = gid
@@ -304,9 +368,10 @@ def _plan_new_group(doc, create: Any, groups: dict, out: dict, errors: list):
              f"group name must be 1-{MAX_NAME_LEN} characters")
         return None
     norm = name.strip().casefold()
-    pending = {g["name"].strip().casefold() for g in out["new_groups"].values()}
+    taken_names = {g["name"].strip().casefold() for g in out["new_groups"].values()}
+    taken_names.update(n.strip().casefold() for n in out["pending_groups"].values())
     if any(g["name"].strip().casefold() == norm for g in groups.values()) \
-            or norm in pending:
+            or norm in taken_names:
         _err(errors, "intent.createGroup.name", "duplicate_group",
              f"a group named {name.strip()!r} exists")
         return None
@@ -321,7 +386,7 @@ def _plan_new_group(doc, create: Any, groups: dict, out: dict, errors: list):
             _err(errors, "intent.createGroup.id", "bad_intent",
                  "createGroup.id must look like grp_…")
             return None
-        if explicit in groups:
+        if explicit in groups or explicit in out["pending_groups"]:
             _err(errors, "intent.createGroup.id", "duplicate_group",
                  f"group id {explicit!r} already exists")
             return None
@@ -343,7 +408,7 @@ def _derive_group_id(doc: dict, name: str, groups: dict, out: dict) -> str | Non
     Same library + same name → same id, forever."""
     digest = hashlib.sha256(
         f"{doc['libraryId']}\n{name.strip().casefold()}".encode("utf-8")).hexdigest()
-    taken = set(groups) | set(out["new_groups"])
+    taken = set(groups) | set(out["new_groups"]) | set(out["pending_groups"])
     for i in range(16):
         candidate = f"grp_{digest[:12]}" if i == 0 else f"grp_{digest[:11]}{format(i, 'x')}"
         if candidate not in taken:
@@ -368,6 +433,11 @@ def _intent_arrange_range(doc, rows, intent, errors, out) -> None:
              "per band explicitly")
         return
     order = intent.get("order") or "number"
+    if order == "alpha":
+        # Deprecated alias for "name", accepted for backward compatibility
+        # with previously persisted UI intents (review 2026-10-06 R7); do not
+        # emit it in new clients.
+        order = "name"
     if order not in ("number", "name"):
         _err(errors, "intent.order", "bad_intent",
              "order must be 'number' or 'name'")
@@ -426,6 +496,12 @@ def _intent_arrange_range(doc, rows, intent, errors, out) -> None:
             return
         for i, row in enumerate(_order_rows(sel, order)):
             _move(out, row, start + i, "range-pack", selected=True)
+            if row["tempRef"] is not None:
+                out["created"].append({"tempRef": row["tempRef"],
+                                       "number": start + i,
+                                       "groupId": row["groupId"],
+                                       "kind": row["kind"], "name": row["name"],
+                                       "placed": True})
     else:
         free_positions = [n for n in range(start, end + 1) if n not in occ]
         if len(free_positions) < len(sel):
@@ -440,6 +516,12 @@ def _intent_arrange_range(doc, rows, intent, errors, out) -> None:
             return
         for row, dest in zip(_order_rows(sel, order), free_positions):
             _move(out, row, dest, "range-pack", selected=True)
+            if row["tempRef"] is not None:
+                out["created"].append({"tempRef": row["tempRef"],
+                                       "number": dest,
+                                       "groupId": row["groupId"],
+                                       "kind": row["kind"], "name": row["name"],
+                                       "placed": True})
     out["capacity"] = _band_capacity(rows, kind, needed=len(sel),
                                      rng=range_block, outside=outside_block)
 
@@ -812,14 +894,31 @@ def _packet(out: dict) -> list:
     :func:`plan` wraps this as the ``packet`` object
     ``{"expectedRevision": …, "ops": […]}``. Create entries are SKELETONS
     (kind/number/name/groupId only) — the client merges its full
-    pending-create draft (source, color, glyph) before submit."""
+    pending-create draft (source, color, glyph) before submit. Validated
+    pending groups ride the leading group.put phase (sorted with the
+    planner-planned ones by id) when the plan references them, so one Apply
+    creates the group and assigns channels atomically; unreferenced pending
+    groups are omitted, never created silently."""
     ops: list[dict] = []
+    puts: dict[str, dict] = {}
     for gid in sorted(out["new_groups"]):
         group = {"id": gid, "name": out["new_groups"][gid]["name"]}
         position = out["new_groups"][gid]["position"]
         if position is not None:
             group["position"] = position
-        ops.append({"op": "group.put", "group": group})
+        puts[gid] = group
+    # A pending group is created by this Apply ONLY when the plan actually
+    # lands a row in it — a group change targeting it or a created row
+    # carrying it. An unreferenced pending group would otherwise be created
+    # silently, invisible in the review table (review finding F-B1).
+    referenced = {change["to"] for change in out["groups"]}
+    referenced.update(entry["groupId"] for entry in out["created"]
+                      if entry["groupId"])
+    for gid, name in out["pending_groups"].items():
+        if gid in referenced:
+            puts[gid] = {"id": gid, "name": name}
+    for gid in sorted(puts):
+        ops.append({"op": "group.put", "group": puts[gid]})
     for entry in sorted(out["created"], key=lambda c: c["tempRef"]):
         channel = {"kind": entry["kind"]}
         if entry["placed"]:
@@ -848,10 +947,13 @@ def _packet(out: dict) -> list:
 
 
 def plan(doc: dict, *, intent: Any, overlays: Any = None, explain: bool = False,
-         expected_revision: int | None = None) -> dict:
+         expected_revision: int | None = None,
+         pending_groups: Any = None) -> dict:
     """Plan one arrangement against the committed document. Pure; returns the
     preview response body (the handler adds pluginId/contractVersion and the
-    echoed correlationToken)."""
+    echoed correlationToken). ``pending_groups`` are client-authored groups
+    that do not exist yet; they are validated, then addressable like committed
+    groups and created by the packet's leading ``group.put`` ops."""
     errors: list[dict] = []
     body = {
         "revision": doc["revision"], "libraryId": doc["libraryId"],
@@ -867,7 +969,8 @@ def plan(doc: dict, *, intent: Any, overlays: Any = None, explain: bool = False,
         errors[-1]["currentRevision"] = doc["revision"]
         body["valid"] = False
         return body
-    rows = _rows(doc, overlays, errors)
+    pending = _pending_groups(pending_groups, doc, errors)
+    rows = _rows(doc, overlays, errors, pending)
     if errors:
         body["valid"] = False
         return body
@@ -883,6 +986,7 @@ def plan(doc: dict, *, intent: Any, overlays: Any = None, explain: bool = False,
         body["valid"] = False
         return body
     out = _new_out()
+    out["pending_groups"] = pending
     handler(doc, rows, intent, errors, out, explain=bool(explain))
     body["capacity"] = out["capacity"]
     body["suggestions"] = out["suggestions"]

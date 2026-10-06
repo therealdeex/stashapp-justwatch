@@ -496,7 +496,12 @@
 .jw-field { margin-bottom: var(--jw-sp-3); min-width: 0; }
 .jw-field:last-child { margin-bottom: 0; }
 .jw-field-label { display: block; font-size: var(--jw-fs-caption); color: var(--jw-muted); margin-bottom: .3rem; }
-.jw-field input, .jw-field select { width: 100%; }
+/* R11: full-width applies to text-like fields ONLY — checkbox/radio keep
+   their native size (the stretched "Also assign" checkbox sat far from its
+   label) and the color-picker swatch keeps its own absolute sizing. */
+.jw-field input:not([type="checkbox"]):not([type="radio"]):not([type="color"]),
+.jw-field select { width: 100%; }
+.jw-field input[type="checkbox"], .jw-field input[type="radio"] { width: auto; flex: none; }
 .jw-fieldrow { display: flex; gap: var(--jw-sp-4); flex-wrap: wrap; }
 .jw-fieldrow .jw-field { flex: 1 1 180px; }
 .jw-fieldrow .jw-field-number { flex: 0 0 200px; }
@@ -977,6 +982,10 @@
 .jw-arrange-label { display: inline-flex; align-items: baseline; gap: var(--jw-sp-2); flex-wrap: wrap; min-width: 0; }
 .jw-arrange-sublabel { font-size: var(--jw-fs-caption); color: var(--jw-muted); }
 .jw-arrange-stale { margin: 0; padding: .1rem .5rem; font-size: var(--jw-fs-caption); }
+.jw-arrange-bar-empty {
+  border-style: dashed;
+  background: var(--jw-surface);
+}
 
 /* ---------- organize / number-resolution sheets ---------- */
 
@@ -1037,14 +1046,28 @@
 .jw-choice-ctrl { display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; margin-top: .3rem; }
 
 /* ---------- review table (shared by both sheets) ---------- */
+/* R11: the header and every row use the SAME explicit 4-column grid and a
+   fixed 36px virtual stride. Glyph+name live in ONE Channel cell; every
+   cell ellipsizes with its full text in the title attribute. */
 
 .jw-review-tools {
   display: flex; align-items: center; gap: var(--jw-sp-2); flex-wrap: wrap;
   margin-bottom: var(--jw-sp-2);
 }
+.jw-review-sticky {
+  position: sticky; top: 0; z-index: 2;
+  background: var(--jw-bg);
+  padding: .2rem 0 .35rem;
+}
+.jw-review-subhead {
+  font-size: var(--jw-fs-caption); font-weight: 700; text-transform: uppercase;
+  letter-spacing: .06em; color: var(--jw-muted);
+  padding: .35rem .5rem .25rem;
+  border-top: 1px solid var(--jw-border);
+}
 .jw-review-head, .jw-review-row {
   display: grid;
-  grid-template-columns: minmax(10rem, 1.6fr) 6.5rem minmax(6rem, 1fr) minmax(8rem, 1.4fr);
+  grid-template-columns: minmax(11rem, 1.8fr) 6.5rem minmax(6rem, 1fr) minmax(9rem, 1.4fr);
   align-items: center;
   gap: .6rem;
   padding: 0 .5rem;
@@ -1055,9 +1078,8 @@
   letter-spacing: .06em; color: var(--jw-faint);
   border-bottom: 1px solid var(--jw-border);
 }
-.jw-review-head .jw-glyph-tile { display: none; }
 .jw-review-list {
-  height: 260px; flex: none;
+  flex: none;
   border: 1px solid var(--jw-border);
   border-radius: var(--jw-radius);
   overflow-y: auto; overflow-x: auto;
@@ -1068,9 +1090,14 @@
   height: 36px;
   font-size: var(--jw-fs-small);
   border-bottom: 1px solid var(--jw-border);
+  overflow: hidden;
 }
 .jw-review-list-short .jw-review-row { border-bottom: none; }
 .jw-review-row-displaced { background: color-mix(in srgb, var(--jw-warn) 7%, transparent); }
+.jw-review-channel {
+  display: inline-flex; align-items: center; gap: .5rem;
+  min-width: 0; overflow: hidden;
+}
 .jw-review-name {
   display: inline-flex; align-items: center; gap: .4rem; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -1080,16 +1107,29 @@
   font-variant-numeric: tabular-nums;
   color: var(--jw-muted);
   white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
 }
 .jw-review-group, .jw-review-reason {
   font-size: var(--jw-fs-caption); color: var(--jw-muted);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .jw-review-optin { font-size: var(--jw-fs-caption); flex: none; }
+.jw-orgsec-notice { border: 1px solid var(--jw-warn); border-radius: 6px; padding: .5rem .75rem; }
+.jw-incomplete-temp { margin-left: .75rem; }
+/* F8: overflowed review values are focusable — the full text lives in the
+   accessible name, and focus makes the disclosure keyboard-reachable. */
+.jw-review-row span[tabindex]:focus-visible {
+  outline: 2px solid var(--jw-accent, #4a7dff);
+  outline-offset: 1px;
+  border-radius: 3px;
+}
 .jw-review-errors { margin: var(--jw-sp-2) 0; }
-/* the number-resolution sheet stacks tile+name in the first column */
+.jw-warn-details { margin-top: .3rem; font-size: var(--jw-fs-caption); color: var(--jw-muted); }
+.jw-warn-details summary { cursor: pointer; color: var(--jw-faint); }
+/* the number-resolution sheet stacks its review differently: Channel /
+   Number / Why — one explicit grid, same 36px stride */
 .jw-sheet-numres .jw-review-head, .jw-sheet-numres .jw-review-row {
-  grid-template-columns: 1.6rem minmax(8rem, 1.4fr) 6.5rem minmax(8rem, 1.2fr);
+  grid-template-columns: minmax(11rem, 1.8fr) 6.5rem minmax(9rem, 1.4fr);
 }
 
 /* ---------- dial additions (44px geometry untouched) ---------- */
@@ -1107,8 +1147,57 @@
 .jw-group-menu-btn:focus-visible { visibility: visible; }
 .jw-group-menu { min-width: 180px; display: flex; flex-direction: column; position: absolute; }
 .jw-group-header .jw-group-count { flex: none; }
+/* UX8: actual number span/gap summary — current truth, no reservations */
+.jw-group-span {
+  flex: none;
+  font-size: var(--jw-fs-micro); font-weight: 600; letter-spacing: 0;
+  color: var(--jw-faint);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+/* UX4: hover-revealed insert action on dial rows (28px inside the 44px row) */
+.jw-insert-host { flex: none; }
+.jw-insert-btn { visibility: hidden; }
+.jw-dial-row:hover .jw-insert-btn,
+.jw-insert-btn[aria-expanded="true"],
+.jw-insert-btn:focus-visible { visibility: visible; }
 /* the ::after rule draws a flexible divider — keep the menu button after it */
 .jw-group-header { position: relative; }
+
+/* ---------- organize sheet: task mode, occupancy, consequence ---------- */
+
+.jw-task-scope {
+  display: flex; align-items: center; gap: var(--jw-sp-2); flex-wrap: wrap;
+  padding: .45rem .65rem;
+  border: 1px solid var(--jw-border-strong);
+  border-radius: var(--jw-r-sm);
+  background: var(--jw-surface);
+  margin-bottom: var(--jw-sp-2);
+}
+.jw-task-scope-line { font-size: var(--jw-fs-body); min-width: 0; }
+.jw-occupancy-wrap { margin: var(--jw-sp-2) 0 0; }
+.jw-occupancy {
+  display: flex; gap: 2px;
+  height: 12px;
+  margin: var(--jw-sp-2) 0 var(--jw-sp-1);
+}
+.jw-occ {
+  flex: 1 1 0;
+  min-width: 0;
+  border-radius: 2px;
+  background: var(--jw-surface-3);
+}
+.jw-occ-selected { background: var(--jw-accent); }
+.jw-occ-occupied { background: color-mix(in srgb, var(--jw-warn) 75%, var(--jw-bg)); }
+.jw-occ-temp { background: color-mix(in srgb, var(--jw-accent) 40%, var(--jw-bg)); }
+/* UX2: consequence summary beside the Stage button */
+.jw-consequence {
+  align-self: center;
+  margin-right: auto;
+  font-size: var(--jw-fs-caption); color: var(--jw-muted);
+  max-width: 46%;
+  min-width: 12rem;
+}
 
 /* ---------- disclosures (rules / programming cards) ---------- */
 
@@ -1186,9 +1275,13 @@
   .jw-review-xscroll .jw-review-list { min-width: 560px; }
   .jw-review-xscroll .jw-review-list { overflow-x: clip; }
   .jw-review-head, .jw-review-row {
-    grid-template-columns: minmax(8rem, 1.4fr) 5.5rem minmax(5rem, .8fr) minmax(7rem, 1.2fr);
+    grid-template-columns: minmax(9rem, 1.6fr) 5.5rem minmax(5rem, .8fr) minmax(7rem, 1.2fr);
     min-width: 560px; /* the review table scrolls horizontally as a block */
   }
+  .jw-sheet-numres .jw-review-head, .jw-sheet-numres .jw-review-row {
+    grid-template-columns: minmax(9rem, 1.6fr) 5.5rem minmax(7rem, 1.2fr);
+  }
+  .jw-consequence { max-width: none; flex-basis: 100%; }
   .jw-arrange-bar { align-items: flex-start; }
 }
 

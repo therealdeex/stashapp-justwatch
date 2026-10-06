@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root{color-scheme:light dark}*{box-sizing:border-box}body{margin:0;color:var(--foreground,#e8edf2);background:var(--background,#171b22);font:14px/1.5 var(--font-sans,system-ui,sans-serif)}
+p,h2,h3{margin:0}h2{font-size:21px;letter-spacing:-.3px;margin:6px 0 14px}.caption{font-size:12px;color:var(--muted-foreground,#98a6b7)}
+.meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:14px}.badge{padding:3px 9px;border-radius:5px;background:var(--accent-surface,#202d44);color:var(--accent-surface-foreground,#b8d4ff)}
+label{cursor:pointer}.section{border-top:1px solid var(--border,#35404d);padding:14px 0}.section-title{font-size:14px;font-weight:650;margin-bottom:10px}
+.range{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.field{display:grid;gap:4px;flex:1;min-width:115px}.field>span{font-size:12px;color:var(--muted-foreground,#98a6b7)}
+input[type=number]{font:inherit;width:100%;padding:9px 10px;border:1px solid var(--input,#425062);border-radius:7px;background:var(--card,#222b36);color:inherit}
+input:focus-visible,button:focus-visible{outline:2px solid var(--ring,#7bb0fb);outline-offset:3px}
+fieldset{margin:0;padding:0;border:0;display:grid;gap:7px}.choice{display:flex;align-items:flex-start;gap:9px;padding:9px 10px;border:1px solid var(--border,#35404d);border-radius:7px}
+.choice:has(input:checked){border-color:var(--accent,#6d9eea);background:var(--accent-surface,#202d44)}.choice input{margin:5px 0 0;accent-color:var(--accent,#6d9eea)}
+.choice strong{font-size:13px}.choice p{font-size:12px;color:var(--muted-foreground,#98a6b7)}
+#outside{padding-top:9px}.occupancy{display:flex;gap:3px;margin:10px 0 6px;height:12px;overflow:hidden;border-radius:4px}.cell{flex:1;min-width:0;background:var(--muted,#38404d)}
+.cell.moved{background:var(--chart-1,#709fe8)}.cell.occupied{background:var(--chart-3,#d5a562)}.legend{display:flex;gap:15px;flex-wrap:wrap;font-size:12px;color:var(--muted-foreground,#98a6b7)}.legend i{width:8px;height:8px;display:inline-block;border-radius:2px;margin-right:5px}
+.recap{font-size:15px;font-weight:650;margin-bottom:5px}.detail{font-size:12px;color:var(--muted-foreground,#98a6b7)}
+.table{border:1px solid var(--border,#35404d);border-radius:8px;overflow:hidden;margin-top:10px}
+.row{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(95px,1fr) minmax(85px,1fr);gap:8px;padding:8px 11px;align-items:center;border-bottom:1px solid var(--border,#35404d);font-size:13px}.row:last-child{border-bottom:0}.row.head{color:var(--muted-foreground,#98a6b7);font-size:11px;background:var(--secondary,#28313e)}
+.number{font-variant-numeric:tabular-nums;font-family:var(--font-mono,monospace)}.reason{color:var(--muted-foreground,#98a6b7);font-size:12px}
+.footer{display:flex;align-items:center;gap:8px;flex-wrap:wrap;border-top:1px solid var(--border,#35404d);padding:14px 0 6px}.footer .state{flex:1;min-width:170px;font-size:12px;color:var(--muted-foreground,#98a6b7)}
+button{font:inherit;padding:8px 12px;border:1px solid var(--border,#35404d);border-radius:7px;background:var(--secondary,#28313e);color:inherit;cursor:pointer}
+button.primary{background:var(--primary,#628ee0);color:var(--primary-foreground,#fff);border-color:transparent;font-weight:600}button:disabled{opacity:.5;cursor:default}button.text{background:transparent;border-color:transparent;padding:2px 0;color:var(--accent,#91b8fb);font-size:12px}
+[hidden]{display:none!important}.warning{color:var(--warning-foreground,#f5c77a)}
+@media(max-width:420px){h2{font-size:19px}.row{grid-template-columns:minmax(0,1.2fr) 93px 81px;padding:8px}.footer button{flex:1}.footer .state{flex-basis:100%}}
+</style>
+<body>
+<p class="caption">Suggested organization flow · interactive mockup · example counts only</p>
+<h2>Place Performers in a range</h2>
+<div class="meta"><span class="badge">Performers</span><span>180 channels selected</span><span class="caption">Group chosen from its guide header</span></div>
+<section class="section" aria-labelledby="destination-title">
+<h3 class="section-title" id="destination-title">1. Destination</h3>
+<div class="range"><label class="field"><span>First channel number</span><input id="start" type="number" value="300" min="100" max="899"></label><span aria-hidden="true">→</span><label class="field"><span>Last channel number</span><input id="end" type="number" value="699" min="100" max="899"></label></div>
+<div class="occupancy" id="map" aria-hidden="true"></div><div class="legend"><span><i style="background:var(--chart-1,#709fe8)"></i>Selected channels</span><span><i style="background:var(--chart-3,#d5a562)"></i>Other channels</span><span id="capacity">400 slots · 388 available</span></div>
+<p class="detail" style="margin-top:8px">Keep the current channel order.</p>
+</section>
+<section class="section" aria-labelledby="conflicts-title"><h3 class="section-title" id="conflicts-title">2. Other channels in this range</h3>
+<fieldset aria-label="Handle occupied numbers"><label class="choice"><input type="radio" name="strategy" value="keep" checked><div><strong>Keep other channels in place</strong><p>Place Performers in the available gaps.</p></div></label>
+<label class="choice"><input type="radio" name="strategy" value="move"><div><strong>Move other channels out of this range</strong><p>Choose where they go; review every move.</p></div></label></fieldset>
+<div id="outside" hidden><div class="range"><label class="field"><span>Relocate other channels from</span><input id="outside-start" type="number" value="700" min="100" max="899"></label><label class="field"><span>To</span><input id="outside-end" type="number" value="899" min="100" max="899"></label></div><p class="detail" style="margin-top:6px">One-time arrangement. This does not reserve numbers permanently.</p></div>
+</section>
+<section class="section" aria-labelledby="review-title"><h3 class="section-title" id="review-title">3. Review changes</h3><p class="recap" id="recap">180 channels move · 12 other channels stay</p><p class="detail">What airs and each channel's identity stay the same.</p>
+<div class="table" role="table" aria-label="Example channel changes"><div class="row head" role="row"><span role="columnheader">Channel</span><span role="columnheader">Number</span><span role="columnheader">Why</span></div>
+<div class="row" role="row"><span role="cell">Performer channel A</span><span role="cell" class="number" id="a-number">171 → 300</span><span role="cell" class="reason">Selected</span></div>
+<div class="row" role="row"><span role="cell">Performer channel B</span><span role="cell" class="number" id="b-number">172 → 301</span><span role="cell" class="reason">Selected</span></div>
+<div class="row" role="row"><span role="cell">Other channel</span><span role="cell" class="number" id="other-number">320 → 320</span><span role="cell" class="reason" id="other-reason">Unchanged</span></div></div>
+<p class="detail" style="margin-top:7px">Show all affected channels in the real editor; examples above are illustrative.</p>
+</section>
+<div class="footer"><span class="state" id="state" role="status" aria-live="polite">Review first. Nothing applies automatically.</span><button id="back">Reset example</button><button class="primary" id="stage">Stage 180 channel moves</button></div>
+<p class="caption">Design demonstration only. These controls do not contact Stash or change your library.</p>
+<script>
+const ids=id=>document.getElementById(id);const blockers=[320,350,380,410,440,450,500,540,570,600,630,650];let staged=false;
+function update(){const lo=Number(ids('start').value),hi=Number(ids('end').value),move=document.querySelector('input[name=strategy]:checked').value==='move',valid=lo>=100&&hi<=899&&lo<=hi,others=blockers.filter(n=>lo<=n&&n<=hi).length,available=valid?(hi-lo+1-(move?0:others)):0;ids('outside').hidden=!move;ids('capacity').textContent=valid?(hi-lo+1)+' slots · '+available+' available':'Choose a valid range within 100–899';
+ids('recap').textContent='180 channels move · '+others+' other channels '+(move?'relocate':'stay');ids('a-number').textContent='171 → '+lo;ids('b-number').textContent='172 → '+(lo+1);ids('other-number').textContent=move?'320 → '+ids('outside-start').value:'320 → 320';ids('other-reason').textContent=move?'Relocated':'Unchanged';
+ids('map').replaceChildren();for(let i=0;i<100;i++){const c=document.createElement('span');c.className='cell '+(i<45?'moved':(!move&&i>=45&&i<48?'occupied':''));ids('map').append(c)}
+const canStage=valid&&available>=180;ids('stage').disabled=!canStage;ids('stage').textContent=staged?'Staged — ready for explicit Apply':'Stage 180 channel moves';ids('state').textContent=!canStage?'Not enough space — adjust the destination.':staged?'Draft staged. The real editor would now offer Apply.':'Review first. Nothing applies automatically.'}
+document.querySelectorAll('input').forEach(e=>e.addEventListener('input',()=>{staged=false;update()}));ids('stage').addEventListener('click',()=>{staged=true;update()});ids('back').addEventListener('click',()=>{staged=false;ids('start').value=300;ids('end').value=699;document.querySelector('input[value=keep]').checked=true;update()});update();
+</script>
+</body></html>

@@ -1,0 +1,46 @@
+{
+  "flowStatus": {
+    "1": "pass",
+    "2": "pass",
+    "3": "pass",
+    "4": "pass",
+    "5": "pass",
+    "6": "pass",
+    "7": "pass",
+    "8": "pass",
+    "9": "pass",
+    "10": "pass",
+    "11": "pass",
+    "12": "pass",
+    "13": "pass",
+    "14": "pass",
+    "15": "pass",
+    "16": "pass",
+    "17": "pass",
+    "18": "pass",
+    "19": "pass",
+    "20": "pass",
+    "21": "pass"
+  },
+  "failKnown": {},
+  "failNew": [],
+  "failHarness": [],
+  "notes": [
+    "remediation rerun (2026-10-06): expectations updated to the FIXED tree — the 2026-10-05 review's F1/F3/F4/F5/F6 known-failure markers and the empty-create-source/review-wrap notes are now passing assertions (R1–R11); flows 12–21 are the new R1–R10 real-bundle regressions. The gate exits nonzero on ANY behavioral failure or crash (R12)."
+  ],
+  "shots": [
+    "dark-01-main",
+    "dark-02-numres-sheet",
+    "dark-03-organize-review",
+    "dark-04-staged-bar",
+    "dark-05-narrow-actions",
+    "dark-06-zoom-200",
+    "light-01-main",
+    "light-02-organize-review",
+    "light-03-staged-bar"
+  ],
+  "gate": {
+    "failures": 0,
+    "pass": true
+  }
+}

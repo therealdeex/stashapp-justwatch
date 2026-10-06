@@ -651,3 +651,216 @@ def test_name_order_tiebreak_uses_id_then_temp_token():
     assert got["net_0000012e"] == (302, 301, "range-pack", True)
     assert got["zz"] == (None, 302, "range-pack", True)
     assert "net_00000130" not in got
+
+
+# ---------------------------------------------------------------------------
+# deprecated "alpha" order alias + unified name ordering (review R7 backend)
+# ---------------------------------------------------------------------------
+
+
+def test_arrange_range_alpha_alias_plans_exactly_like_name():
+    doc = doc_of(net_row(300, "zeta"), net_row(301, "alpha"),
+                 net_row(302, "mid"))
+    sel = ["net_0000012c", "net_0000012d", "net_0000012e"]
+    rng = {"start": 300, "end": 306}
+    alpha = organization.plan(doc, intent={
+        "type": "arrange_range", "channelIds": sel, "range": rng,
+        "order": "alpha"})
+    name = organization.plan(doc, intent={
+        "type": "arrange_range", "channelIds": sel, "range": rng,
+        "order": "name"})
+    assert alpha["valid"] and not alpha["noop"]
+    assert json.dumps(alpha, sort_keys=True) == json.dumps(name, sort_keys=True)
+    got = moves_by_ref(alpha)
+    assert got["net_0000012d"] == (301, 300, "range-pack", True)
+    assert got["net_0000012e"] == (302, 301, "range-pack", True)
+    assert got["net_0000012c"] == (300, 302, "range-pack", True)
+    # only the exact deprecated token is aliased; anything else stays typed
+    body = organization.plan(doc, intent={
+        "type": "arrange_range", "channelIds": sel, "range": rng,
+        "order": "Alpha"})
+    assert body["errors"][0]["code"] == "bad_intent"
+
+
+def test_name_order_interleaves_temp_rows_into_the_block():
+    # The UNIFIED name order decides the numbers: the "Beta" temp sorts
+    # between Alpha and Charlie, takes the middle slot, and Charlie shifts —
+    # temps are never appended to the end of the block.
+    doc = doc_of(net_row(300, "Alpha"), net_row(301, "Charlie"))
+    body = organization.plan(
+        doc, overlays=[{"tempRef": "t-beta", "kind": "net", "name": "Beta",
+                        "groupId": "grp_net"}],
+        intent={"type": "arrange_range",
+                "channelIds": ["net_0000012c", "net_0000012d"],
+                "tempRefs": ["t-beta"],
+                "range": {"start": 300, "end": 306}, "order": "alpha"})
+    assert body["valid"] and not body["noop"]
+    got = moves_by_ref(body)
+    assert "net_0000012c" not in got, "Alpha keeps 300"
+    assert got["t-beta"] == (None, 301, "range-pack", True)
+    assert got["net_0000012d"] == (301, 302, "range-pack", True)
+    ops = body["packet"]["ops"]
+    assert [op["op"] for op in ops] == ["channel.create", "channels.renumber"]
+    assert ops[0]["channel"]["number"] == 301
+
+
+# ---------------------------------------------------------------------------
+# pending (uncommitted) groups (review R5 backend)
+# ---------------------------------------------------------------------------
+
+_PG = "grp_1234abcd"
+
+
+def test_pending_groups_absent_or_empty_is_byte_identical():
+    doc = ids300()
+    intent = {"type": "assign_group", "channelIds": ["net_0000012c"],
+              "createGroup": {"name": "Solo"}}
+    base = organization.plan(doc, intent=intent)
+    for extra in (None, []):
+        assert json.dumps(organization.plan(doc, intent=intent,
+                                            pending_groups=extra),
+                          sort_keys=True) == json.dumps(base, sort_keys=True)
+
+
+def test_pending_group_validation_errors_are_typed():
+    doc = doc_of(net_row(300), net_row(301))
+    doc["groups"].append({"id": "grp_deadbeef", "name": "Committed",
+                          "position": 3, "legacySection": None})
+    intent = {"type": "assign_group", "channelIds": ["net_0000012c"],
+              "groupId": "grp_net"}
+    cases = [
+        ([{"id": "grpXX", "name": "G"}], "bad_group_id"),
+        ([{"id": "GRP_1234ABCD", "name": "G"}], "bad_group_id"),
+        ([{"id": "grp_1234abcd0", "name": "G"}], "bad_group_id"),
+        ([{"name": "G"}], "bad_group_id"),
+        ([{"id": _PG}], "bad_group_name"),
+        ([{"id": _PG, "name": "   "}], "bad_group_name"),
+        ([{"id": _PG, "name": "x" * 61}], "bad_group_name"),
+        ([{"id": _PG, "name": "A"}, {"id": _PG, "name": "B"}],
+         "duplicate_group_id"),
+        ([{"id": "grp_deadbeef", "name": "Other"}],
+         "group_id_conflicts_committed"),
+        ([{"id": _PG, "name": "Networks"}], "duplicate_group"),
+        ("nope", "bad_intent"),
+        ([42], "bad_intent"),
+    ]
+    for groups, code in cases:
+        body = organization.plan(doc, intent=intent, pending_groups=groups)
+        assert body["valid"] is False, groups
+        assert body["packet"] is None
+        assert body["errors"][0]["code"] == code, (groups, body["errors"])
+
+
+def test_pending_group_compiles_put_first_and_feeds_created_rows():
+    doc = ids300()
+    body = organization.plan(
+        doc, overlays=[{"tempRef": "temp-1", "kind": "net", "name": "Fresh",
+                        "groupId": _PG}],
+        intent={"type": "assign_group", "tempRefs": ["temp-1"],
+                "groupId": _PG},
+        pending_groups=[{"id": _PG, "name": "Performers"}])
+    assert body["valid"] and not body["noop"]
+    assert body["created"] == [{"tempRef": "temp-1", "number": None,
+                                "groupId": _PG}]
+    ops = body["packet"]["ops"]
+    assert [op["op"] for op in ops] == ["group.put", "channel.create"]
+    assert ops[0]["group"] == {"id": _PG, "name": "Performers"}
+    assert ops[1]["tempId"] == "temp-1"
+    assert ops[1]["channel"]["groupId"] == _PG
+
+
+def test_pending_group_receives_existing_channels_via_move():
+    doc = ids300()
+    body = organization.plan(
+        doc, intent={"type": "assign_group",
+                     "channelIds": ["net_0000012c", "net_0000012d"],
+                     "groupId": _PG},
+        pending_groups=[{"id": _PG, "name": "Duo"}])
+    assert body["valid"] and not body["noop"]
+    assert all(c["to"] == _PG for c in body["groupChanges"])
+    ops = body["packet"]["ops"]
+    assert [op["op"] for op in ops] == ["group.put", "channels.move"]
+    assert ops[0]["group"] == {"id": _PG, "name": "Duo"}
+    assert ops[1] == {"op": "channels.move",
+                      "channelIds": ["net_0000012c", "net_0000012d"],
+                      "groupId": _PG}
+
+
+def test_pending_group_create_and_renumber_compose_in_order():
+    # a new channel placed at an OCCUPIED number, into a group that does not
+    # exist yet: ONE packet — group.put → channel.create skeleton → renumber.
+    doc = ids300()
+    body = organization.plan(
+        doc, overlays=[{"tempRef": "temp-1", "kind": "net", "name": "Fresh",
+                        "groupId": _PG}],
+        intent={"type": "insert", "tempRef": "temp-1", "number": 300},
+        pending_groups=[{"id": _PG, "name": "Fresh Group"}])
+    assert body["valid"] and not body["noop"]
+    ops = body["packet"]["ops"]
+    assert [op["op"] for op in ops] == ["group.put", "channel.create",
+                                        "channels.renumber"]
+    assert ops[0]["group"] == {"id": _PG, "name": "Fresh Group"}
+    assert ops[1]["channel"] == {"kind": "net", "number": 300, "name": "Fresh",
+                                 "groupId": _PG}
+    assert ops[2]["assignments"] == [
+        {"channelId": "net_0000012c", "number": 301},
+        {"channelId": "net_0000012d", "number": 302},
+        {"channelId": "net_0000012e", "number": 303}]
+
+
+def test_pending_group_and_planned_new_group_cannot_collide():
+    doc = ids300()
+    body = organization.plan(
+        doc, intent={"type": "assign_group", "channelIds": ["net_0000012c"],
+                     "createGroup": {"name": "Trio"}},
+        pending_groups=[{"id": _PG, "name": "trio"}])
+    assert body["errors"][0]["code"] == "duplicate_group"
+    body = organization.plan(
+        doc, intent={"type": "assign_group", "channelIds": ["net_0000012c"],
+                     "createGroup": {"name": "Trio", "id": _PG}},
+        pending_groups=[{"id": _PG, "name": "Pending"}])
+    assert body["errors"][0]["code"] == "duplicate_group"
+
+
+def test_pending_group_noop_plan_stays_packetless():
+    doc = ids300()
+    body = organization.plan(
+        doc, intent={"type": "free_number", "kind": "net", "near": 300},
+        pending_groups=[{"id": _PG, "name": "Unused"}])
+    assert body["valid"] and body["noop"] and body["packet"] is None
+
+
+def test_unreferenced_pending_group_is_omitted_from_packet():
+    # an arrange_range that never lands a row in the pending group must not
+    # create it: same packet as if no groups had been sent (review F-B1)
+    doc = ids300()
+    intent = {"type": "arrange_range",
+              "channelIds": ["net_0000012c", "net_0000012d",
+                             "net_0000012e"],
+              "range": {"start": 295, "end": 306}, "order": "alpha"}
+    base = organization.plan(doc, intent=intent)
+    assert base["valid"] and not base["noop"]
+    assert base["packet"]["ops"], "the arrangement itself must do something"
+    body = organization.plan(
+        doc, intent=intent,
+        pending_groups=[{"id": "grp_deadbeef", "name": "Unused"}])
+    assert body["valid"] and not body["noop"]
+    assert json.dumps(body, sort_keys=True) == json.dumps(base, sort_keys=True)
+    assert all(op["op"] != "group.put" for op in body["packet"]["ops"])
+
+
+def test_pending_group_packet_only_includes_referenced_groups():
+    # mixed request: Duo is the assignment target, Unused rides along —
+    # only Duo's group.put compiles, and it still leads the packet
+    doc = ids300()
+    body = organization.plan(
+        doc, intent={"type": "assign_group",
+                     "channelIds": ["net_0000012c", "net_0000012d"],
+                     "groupId": _PG},
+        pending_groups=[{"id": _PG, "name": "Duo"},
+                        {"id": "grp_deadbeef", "name": "Unused"}])
+    assert body["valid"] and not body["noop"]
+    ops = body["packet"]["ops"]
+    assert [op["op"] for op in ops] == ["group.put", "channels.move"]
+    assert ops[0]["group"] == {"id": _PG, "name": "Duo"}
+    assert all("grp_deadbeef" != op.get("group", {}).get("id") for op in ops)

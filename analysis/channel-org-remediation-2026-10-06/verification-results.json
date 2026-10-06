@@ -1,0 +1,71 @@
+{
+  "date": "2026-10-06",
+  "verifiedBy": "verification sub-agent (browser harness owner)",
+  "tree": "uncommitted working tree on master after 213f0dc (R1-R11 remediation)",
+  "gates": {
+    "pytest": {"command": "python3 -m pytest -q", "exitCode": 0, "result": "491 passed in 38.81s", "log": "pytest-final.log"},
+    "nodeCheckUi": {"command": "node --check ui/index.js", "exitCode": 0},
+    "nodeCheckExtras": {"command": "node --check extras/channel-studio-custom.js", "exitCode": 0},
+    "browserHarness": {
+      "command": "node analysis/channel-org-2026-10-05/browser-verify-org.cjs analysis/channel-org-remediation-2026-10-06",
+      "exitCode": 0,
+      "gate": "PASS — 0 behavioral failures, 0 crashes",
+      "flows": 21,
+      "flowsPassed": 21,
+      "report": "dry-run-report.json",
+      "log": "dry-run.log"
+    },
+    "gateNegativeProof": {
+      "description": "throwaway harness copy with one deliberately failing assertion, flow 10",
+      "exitCode": 1,
+      "output": "FAIL deliberate gate-proof failure; GATE: FAIL — 1 failing assertion(s)/crash(es)"
+    }
+  },
+  "flowTable": {
+    "1": "pass — create-at-occupied + shift chain + downward mirror",
+    "2": "pass — existing 299 → 300 with dirty name (opt-in put + renumber)",
+    "3": "pass — block 171/173/180 → 300 with bystanders",
+    "4": "pass — Performers 300-699 useAvailable + capacity + shortfall + R7 alpha",
+    "5": "pass — exclusive range with outside interval",
+    "6": "pass — create group + assign in one Apply (R5)",
+    "7": "pass — revision conflict + R6 unknown-outcome retry",
+    "8": "pass — edit-in-flight, undo/redo, rebase, reversal, R2 stage-in-flight",
+    "9": "pass — capability gating fallback",
+    "10": "pass — visual sweep + geometry + keyboard (incl. R11 column-alignment check)",
+    "11": "pass — extras snippet lifecycle",
+    "12": "pass — R1: stale-preview binding, delayed/reordered responses, numres debounce",
+    "13": "pass — R2: submitted-snapshot reconciliation; stage-during-flight refused (F3 guard); undo-during-flight staging survives; bystander draft adopts only the committed map",
+    "14": "pass — R3: newer creation edits remap onto the final id; temp draft dropped",
+    "15": "pass — R4: include-draft honors the reviewed group (assignment-only AND combined range+group)",
+    "16": "pass — R5: inline group creation (editor, occupied-create via groups arg, bulk create-and-assign)",
+    "17": "pass — R6: abort-before-submit (Check result / Retry same Apply) + lost-response-after-commit (Check result reconciles, no resubmission)",
+    "18": "pass — R7: alphabetical order enum name; staged packet packs by name",
+    "19": "pass — R8: reload + replan retains scope group/order/strategy/combined assignment/range",
+    "20": "pass — R9: editor Apply + bulk pause serialize through one coordinator (expected 12 → 13)",
+    "21": "pass — R10: malformed payloads (assignments:true/42, nested array, kind:invalid) → typed bad_assignment/bad_kind, durable replay-exact REJECTED receipts, revision+definitions untouched"
+  },
+  "productNotes": [
+    {
+      "kind": "design-decision-observed (not a defect)",
+      "where": "ui/index.js stageArrangement (~line 6212)",
+      "what": "A new Stage while an arrangement Apply is unresolved is REFUSED with an error toast ('still unresolved … Check result / Retry same Apply / Forget kept request'). The 2026-10-06 review's R2 repro ('stage arrangement B while A applies') is therefore structurally blocked; the surviving R2 hazard is Undo during flight, which flow 13 exercises (the undo-revealed staging survives the commit as stale, drafts adopt only the committed map)."
+    },
+    {
+      "kind": "ui-change-observed (not a defect)",
+      "where": "ui/index.js ArrangementBar",
+      "what": "The arrangement bar persists as a 'Nothing staged' empty state whenever the undo stack is non-empty (UX7); the Stage button label is dynamic ('Stage N channel moves'). The harness now locates the Stage button by .jw-btn-primary class and distinguishes .jw-arrange-bar-empty."
+    },
+    {
+      "kind": "transient-test-failure (resolved mid-session)",
+      "where": "tests/test_channel_organization.py::test_unreferenced_pending_group_is_omitted_from_packet",
+      "what": "Observed failing (1 failed / 490 passed) against an earlier revision of the uncommitted backend diff: the test's base arrange_range (2 channels, already in name order inside 300-306) is a genuine planner noop, contradicting its own 'must do something' premise. The backend owner amended the test (3 channels, range 295-306) while verification was running; the final suite is 491 passed, exit 0. No product change was involved."
+    }
+  ],
+  "evidence": {
+    "harnessReportJson": "analysis/channel-org-remediation-2026-10-06/dry-run-report.json",
+    "harnessLog": "analysis/channel-org-remediation-2026-10-06/dry-run.log",
+    "pytestLog": "analysis/channel-org-remediation-2026-10-06/pytest-final.log",
+    "screenshots": "analysis/channel-org-remediation-2026-10-06/*.png (dark-01…dark-06, light-01…light-03; dark-03-organize-review.png is the R11-aligned review table capture)",
+    "harness": "analysis/channel-org-2026-10-05/browser-verify-org.cjs (R12 strict gate + flows 12-21 added)"
+  }
+}

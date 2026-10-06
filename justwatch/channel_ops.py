@@ -217,9 +217,14 @@ def _reference_errors(ctx, doc: dict, ops: list[dict]) -> list[dict]:
     for i, op in enumerate(ops):
         if not isinstance(op, dict) or op.get("op") not in ("channel.put", "channel.create"):
             continue
-        channel = op.get("channel") or {}
-        draft_source = channel.get("source") or {}
-        stored_source = (by_id.get(channel.get("id")) or {}).get("source") or {}
+        channel = op.get("channel")
+        if not isinstance(channel, dict):
+            continue  # malformed records are typed errors from _check_ops
+        source = channel.get("source")
+        draft_source = source if isinstance(source, dict) else {}
+        cid = channel.get("id")
+        stored = by_id.get(cid) if isinstance(cid, str) else None
+        stored_source = (stored or {}).get("source") or {}
         if criteria.source_signature(draft_source) == criteria.source_signature(stored_source):
             continue  # unchanged source: no new references to validate
         if criteria.uses_dynamic_rules(draft_source):
@@ -301,15 +306,20 @@ def _effect_summary(doc: dict, ops: list[dict]) -> list[dict]:
             continue
         kind = op.get("op")
         if kind == "channel.put":
-            channel = op.get("channel") or {}
-            stored = by_id.get(channel.get("id"))
+            channel = op.get("channel")
+            if not isinstance(channel, dict):
+                continue
+            cid = channel.get("id")
+            stored = by_id.get(cid) if isinstance(cid, str) else None
             if stored is None:
                 continue
+            seed = channel.get("seed")
+            seed = seed if isinstance(seed, int) and not isinstance(seed, bool) else 0
             membership_changed = (
                 criteria.source_signature(channel.get("source") or {})
                 != criteria.source_signature(stored.get("source") or {})
                 or channel.get("sort") != stored.get("sort")
-                or int(channel.get("seed") or 0) != int(stored.get("seed") or 0)
+                or seed != int(stored.get("seed") or 0)
                 or (channel.get("programming") or {}) != (stored.get("programming") or {})
                 or bool(channel.get("archived")) != bool(stored.get("archived"))
                 or bool(channel.get("paused")) != bool(stored.get("paused"))
@@ -328,8 +338,9 @@ def _effect_summary(doc: dict, ops: list[dict]) -> list[dict]:
                             "count": len(op.get("channelIds") or []) if "channelIds" in op
                             else (2 if kind == "channel.swap" else None)})
         elif kind == "channels.renumber":
+            assignments = op.get("assignments")
             effects.append({"op": kind, "kind": "metadata", "reindex": False,
-                            "count": len(op.get("assignments") or [])})
+                            "count": len(assignments) if isinstance(assignments, list) else 0})
         elif kind == "group.put":
             effects.append({"op": kind, "kind": "metadata", "reindex": False})
         elif kind == "group.delete":
@@ -405,7 +416,11 @@ def op_preview_channel_arrangement(ctx) -> dict:
 
     Wraps the pure planner in :mod:`justwatch.organization` against the
     COMMITTED document: complete occupancy (archived/paused/disabled rows
-    included), one intent, optional temp-row overlays for pending creations.
+    included), one intent, optional temp-row overlays for pending creations,
+    and optional PENDING groups (request argument ``groups``: objects
+    ``{"id": "grp_" + 8 lowercase hex, "name": str}`` the client authored but
+    not committed yet — the plan treats them as addressable and the compiled
+    packet creates them with leading ``group.put`` ops).
     Zero writes, zero receipts, zero journal/history entries, zero id/seed
     allocation, zero Stash queries — bounded by construction (≤899 rows of
     arithmetic). The response is correlated by the client-generated
@@ -425,9 +440,14 @@ def op_preview_channel_arrangement(ctx) -> dict:
         overlays = []
     if not isinstance(overlays, list):
         raise ValueError("channels must be a list of temp-row overlays")
+    pending_groups = _parse_json_arg(args.get("groups"), "groups")
+    if pending_groups is None:
+        pending_groups = []
+    if not isinstance(pending_groups, list):
+        raise ValueError("groups must be a list of pending group objects")
     intent = _parse_json_arg(args.get("intent"), "intent")
     body = organization.plan(
-        doc, intent=intent, overlays=overlays,
+        doc, intent=intent, overlays=overlays, pending_groups=pending_groups,
         explain=bool(args.get("explain")), expected_revision=expected)
     return {
         "pluginId": contract.PLUGIN_ID,

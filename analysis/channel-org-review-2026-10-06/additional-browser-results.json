@@ -1,0 +1,69 @@
+[
+  {
+    "case": "group change plus opted-in draft",
+    "reviewed": [
+      "—Chart Onedraft included ✓·Alpha → Trioselected — "
+    ],
+    "expectedGroup": "grp_trio001",
+    "actualGroup": "grp_alpha001",
+    "name": "Owner updated name",
+    "ops": [
+      {
+        "op": "channels.move",
+        "channelIds": [
+          "net_a0000001"
+        ],
+        "groupId": "grp_trio001"
+      },
+      {
+        "op": "channel.put",
+        "channel": {
+          "id": "net_a0000001",
+          "kind": "net",
+          "number": 297,
+          "name": "Owner updated name",
+          "glyph": null,
+          "color": "#3949AB",
+          "groupId": "grp_alpha001",
+          "sort": "newest",
+          "seed": 1297,
+          "enabled": true,
+          "archived": false,
+          "paused": false,
+          "source": {
+            "type": "criteria",
+            "studiosAny": [
+              "297"
+            ]
+          },
+          "sourceLabel": "",
+          "programming": {
+            "mode": "fixed"
+          },
+          "provenance": {
+            "origin": "v4-final-proposal"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "case": "newer creation draft during arrangement apply",
+    "tempId": "temp-d8234c78",
+    "draftDuringName": "Newer unsent channel name",
+    "committedName": "Submitted channel name",
+    "draftsAfter": {},
+    "idMap": {
+      "temp-d8234c78": "net_601f7b05"
+    }
+  },
+  {
+    "case": "replan group scope",
+    "originalGroup": "grp_perfo01",
+    "replannedGroup": "grp_my00001",
+    "scope": "1 channel in scope",
+    "errors": [
+      "these channels are not net channels and cannot enter 400-410: ch_00000005; split the arrangement per band explicitlyUse the network channels onlyUse the My Channels rows only"
+    ]
+  }
+]

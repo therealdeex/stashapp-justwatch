@@ -1,0 +1,52 @@
+[
+  {
+    "case": "stale preview stage during debounce",
+    "priorRows": [
+      "400Zulu Net310 → 400·selected — packed into the range",
+      "401Alpha Net311 → 401·selected — packed into the range"
+    ],
+    "enabledImmediately": true,
+    "stagedLabel": "Arrange 2 channels into 500–510",
+    "intent": {
+      "type": "arrange_range",
+      "channelIds": [
+        "net_e0000001",
+        "net_e0000002"
+      ],
+      "tempRefs": [],
+      "range": {
+        "start": 500,
+        "end": 510
+      },
+      "order": "number",
+      "strategy": "useAvailable",
+      "scopeType": "group",
+      "action": "arrange_range",
+      "start": null,
+      "offset": null
+    },
+    "packet": {
+      "expectedRevision": 12,
+      "ops": [
+        {
+          "op": "channels.renumber",
+          "assignments": [
+            {
+              "channelId": "net_e0000001",
+              "number": 400
+            },
+            {
+              "channelId": "net_e0000002",
+              "number": 401
+            }
+          ]
+        }
+      ],
+      "requestId": "req-muwdkpl9-0-5bbt"
+    },
+    "actualNumbers": [
+      400,
+      401
+    ]
+  }
+]
